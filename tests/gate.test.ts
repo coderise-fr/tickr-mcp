@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { ApiHttpError, ApiProblemError } from "../src/api/errors.js";
 import type { MeDto, RoleCode } from "../src/api/types.js";
-import { BAD_ME_CONTRACT, KeyGate, TOO_OLD } from "../src/tools/gate.js";
+import { BAD_ME_CONTRACT, KeyGate, TOO_OLD, TOO_OLD_OR_NOT_TICKR } from "../src/tools/gate.js";
 import { runTool } from "../src/tools/run.js";
 import { defineTool, READ_ANNOTATIONS } from "../src/tools/tool.js";
 import { fakeApi } from "./helpers/fakeApi.js";
@@ -52,16 +52,23 @@ describe("KeyGate via runTool", () => {
     expect(api.me).toHaveBeenCalledTimes(1);
   });
 
-  it.each([new ApiHttpError(404), new ApiProblemError({ status: 404, code: "not_found", fieldErrors: [] })])(
-    "reports an instance without /me as too old",
-    async (err) => {
-      const { api, deps: d } = deps("workspace_user");
-      api.me.mockRejectedValue(err);
-      const res = await runTool(echo("read"), {}, d);
-      expect(res.isError).toBe(true);
-      expect(res.content).toEqual([{ type: "text", text: TOO_OLD }]);
-    },
-  );
+  it("reports a Tickr 404 problem on /me as an instance too old", async () => {
+    const { api, deps: d } = deps("workspace_user");
+    api.me.mockRejectedValue(new ApiProblemError({ status: 404, code: "not_found", fieldErrors: [] }));
+    const res = await runTool(echo("read"), {}, d);
+    expect(res.isError).toBe(true);
+    expect(res.content).toEqual([{ type: "text", text: TOO_OLD }]);
+  });
+
+  it("reports a non-API 404 on /me as too old or not a Tickr instance", async () => {
+    const { api, deps: d } = deps("workspace_user");
+    api.me.mockRejectedValue(new ApiHttpError(404, "GET"));
+    const res = await runTool(echo("read"), {}, d);
+    expect(res.isError).toBe(true);
+    expect(res.content).toEqual([{ type: "text", text: TOO_OLD_OR_NOT_TICKR }]);
+    expect(TOO_OLD_OR_NOT_TICKR.startsWith(TOO_OLD)).toBe(true);
+    expect(TOO_OLD_OR_NOT_TICKR).toMatch(/TICKR_BASE_URL does not point to a Tickr instance/);
+  });
 
   it("returns structured content plus its JSON text on success", async () => {
     const { deps: d } = deps("workspace_user");

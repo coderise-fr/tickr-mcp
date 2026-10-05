@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { EntryDto, MeDto, ProjectDto, TagDto, TaskDto } from "../api/types.js";
+import { ROLE_CODES, type EntryDto, type MeDto, type ProjectDto, type RoleCode, type TagDto, type TaskDto } from "../api/types.js";
 import { cleanDescription, cleanName, cleanNullableName } from "../sanitize.js";
 
 // Allow-listed result shapes (spec §6.2). Strict: any extra field is a bug.
@@ -28,7 +28,7 @@ export const tagSchema = z.strictObject({ id: z.string(), name: z.string() });
 export const contextSchema = z.strictObject({
   user: z.strictObject({ id: z.string(), display_name: z.string(), email: z.string(), timezone: z.string() }),
   workspace: z.strictObject({ id: z.string(), name: z.string(), timezone: z.string() }),
-  role: z.string(),
+  role: z.enum(ROLE_CODES),
   server_time: z.string(),
 });
 
@@ -84,6 +84,8 @@ export const toContext = (me: MeDto): Context => ({
     timezone: cleanName(me.user.timezone),
   },
   workspace: { id: me.workspace.id, name: cleanName(me.workspace.name), timezone: cleanName(me.workspace.timezone) },
-  role: me.role,
+  // Passed as is: a role outside the known list fails the output schema and is reported
+  // as an unreadable answer, never shown to the agent.
+  role: me.role as RoleCode,
   server_time: me.serverTime,
 });
