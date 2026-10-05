@@ -9,6 +9,30 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ TICKR_API_KEY: "   " })).toThrow(/TICKR_API_KEY/);
   });
 
+  const ch = (code: number) => String.fromCharCode(code);
+  it.each([
+    ["an inner space", "tkr_secret value"],
+    ["a tab", `tkr_secret${ch(9)}value`],
+    ["a line break", `tkr_secret${ch(10)}value`],
+    ["a control character", `tkr_secret${ch(7)}value`],
+    ["a non-breaking space", `tkr_secret${ch(0xa0)}value`],
+  ])("rejects a key with %s, without echoing it", (_label, key) => {
+    let message = "";
+    try {
+      loadConfig({ TICKR_API_KEY: key });
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigError);
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/TICKR_API_KEY/);
+    expect(message).not.toContain("tkr_secret");
+    expect(message).not.toContain("value");
+  });
+
+  it("still trims surrounding whitespace from the key", () => {
+    expect(loadConfig({ TICKR_API_KEY: `  ${KEY}${String.fromCharCode(10)}` }).apiKey).toBe(KEY);
+  });
+
   it("defaults the base URL", () => {
     expect(loadConfig({ TICKR_API_KEY: KEY })).toEqual({ apiKey: KEY, baseUrl: DEFAULT_BASE_URL });
   });

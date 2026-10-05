@@ -22,6 +22,13 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     );
   }
 
+  // Whitespace or control characters inside a key are a copy/paste error; the key is never echoed.
+  if (/[\s\p{Cc}]/u.test(apiKey)) {
+    throw new ConfigError(
+      "TICKR_API_KEY contains spaces, line breaks or control characters. Copy the key again from Tickr (Settings → API keys).",
+    );
+  }
+
   const raw = env.TICKR_BASE_URL?.trim() || DEFAULT_BASE_URL;
   let url: URL;
   try {

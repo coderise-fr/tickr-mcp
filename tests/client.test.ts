@@ -73,6 +73,25 @@ describe("createTickrClient", () => {
     expect((err as ApiHttpError).status).toBe(502);
   });
 
+  it.each([
+    [302, "GET"],
+    [307, "POST"],
+  ])("does not follow a %i redirect on %s: one request, reported by status only", async (status, method) => {
+    const { api, requests } = await setup((r) =>
+      r.url === "/elsewhere" ? json(200, []) : {
+        status,
+        headers: { location: "/elsewhere", "content-type": "application/problem+json" },
+        body: JSON.stringify({ type: "https://x/errors/moved", detail: "secret redirect detail" }),
+      });
+    const err = await (method === "GET" ? api.listTags() : api.startTimer({})).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiHttpError);
+    expect((err as ApiHttpError).status).toBe(status);
+    expect(requests).toHaveLength(1);
+    const msg = toAgentMessage(err, { baseUrl: "x", isWrite: false });
+    expect(msg).toBe(`Tickr answered HTTP ${status} with a non-API response (often a proxy or gateway error).`);
+    expect(msg).not.toMatch(/elsewhere|secret/);
+  });
+
   it("retries once after a short Retry-After on 429", async () => {
     const { api, requests, sleep } = await setup((_r, i) =>
       i === 0 ? problem(429, "rate_limited", "Too many requests", {}, { "retry-after": "2" }) : json(200, []));

@@ -64,6 +64,8 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
           headers,
           body: init.body === undefined ? undefined : JSON.stringify(init.body),
           signal: AbortSignal.timeout(timeoutMs),
+          // A redirect is never followed: the key and a write body must not be replayed elsewhere.
+          redirect: "manual",
         });
       } catch (e) {
         const name = e instanceof Error ? e.name : "";
@@ -86,6 +88,11 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
         const parsed = schema.safeParse(body);
         if (!parsed.success) throw new UnreadableResponseError(res.status, method);
         return parsed.data;
+      }
+
+      if (res.status >= 300 && res.status < 400) {
+        await res.body?.cancel();
+        throw new ApiHttpError(res.status, method);
       }
 
       const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
