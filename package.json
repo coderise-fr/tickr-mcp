@@ -1,0 +1,48 @@
+{
+  "name": "@coderise-fr/tickr-mcp",
+  "version": "0.0.1",
+  "description": "MCP server that lets an AI agent start, stop and edit your Tickr time entries.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "tickr-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coderise-fr/tickr-mcp.git"
+  },
+  "homepage": "https://github.com/coderise-fr/tickr-mcp#readme",
+  "keywords": [
+    "mcp",
+    "tickr",
+    "time-tracking",
+    "model-context-protocol"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:contract": "vitest run --config vitest.contract.config.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "eslint": "10.11.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0",
+    "vitest": "4.0.18"
+  }
+}
