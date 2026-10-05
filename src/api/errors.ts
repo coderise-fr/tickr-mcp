@@ -80,6 +80,8 @@ export function problemCode(type: unknown): string {
   return segment ?? "unknown";
 }
 
+const MAX_FIELD_ERRORS = 10;
+
 const WRITE_HINT =
   " The change may or may not have been applied: check with list_entries or list_active_timers before trying again.";
 
@@ -141,13 +143,20 @@ function problemMessage(e: ApiProblemError): string {
       if (e.detail === "Timer already stopped") return "This timer is already stopped.";
       return `Conflict: ${detail ?? "the request conflicts with the current state"}.`;
     case 422: {
-      const fields = e.fieldErrors
-        .map((f) => `${cleanDetail(f.field)}: ${cleanDetail(f.message)} (${cleanDetail(f.code)})`)
-        .join("; ");
+      const listed = e.fieldErrors
+        .slice(0, MAX_FIELD_ERRORS)
+        .map((f) => `${cleanDetail(f.field)}: ${cleanDetail(f.message)} (${cleanDetail(f.code)})`);
+      const more = e.fieldErrors.length - listed.length;
+      const fields = listed.join("; ") + (more > 0 ? `; and ${more} more` : "");
       return `Tickr rejected the input: ${fields || detail || "validation failed"}.`;
     }
     case 429:
-      return `Tickr's rate limit is reached. Wait ${e.retryAfterSeconds !== undefined ? `${e.retryAfterSeconds} seconds` : "a minute"} and try again.`;
+    {
+      const wait = e.retryAfterSeconds === undefined
+        ? "a minute"
+        : `${e.retryAfterSeconds} second${e.retryAfterSeconds === 1 ? "" : "s"}`;
+      return `Tickr's rate limit is reached. Wait ${wait} and try again.`;
+    }
     default:
       if (e.status >= 500) return `Tickr returned a server error (HTTP ${e.status}).`;
       return `Tickr returned HTTP ${e.status} (${cleanDetail(e.code)}${detail ? `: ${detail}` : ""}).`;

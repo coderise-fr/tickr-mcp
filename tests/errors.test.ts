@@ -27,6 +27,8 @@ describe("toAgentMessage", () => {
     [p(409, "conflict", "Timer already stopped"), /already stopped/],
     [p(409, "conflict", "something else"), /Conflict: something else/],
     [p(429, "rate_limited", undefined, { retryAfterSeconds: 30 }), /Wait 30 seconds/],
+    [p(429, "rate_limited", undefined, { retryAfterSeconds: 1 }), /Wait 1 second and/],
+    [p(429, "rate_limited", undefined), /Wait a minute/],
     [p(500, "internal", "boom"), /server error \(HTTP 500\)/],
   ])("translates %o", (err, expected) => {
     expect(toAgentMessage(err, ctx)).toMatch(expected);
@@ -37,6 +39,17 @@ describe("toAgentMessage", () => {
       fieldErrors: [{ field: "task_id", code: "invalid", message: "task_id does not belong to project_id" }],
     });
     expect(toAgentMessage(err, ctx)).toContain("task_id: task_id does not belong to project_id (invalid)");
+  });
+
+  it("lists at most 10 field errors on 422, then how many more", () => {
+    const fieldErrors = Array.from({ length: 13 }, (_, i) => ({ field: `f${i}`, code: "invalid", message: `bad ${i}` }));
+    const msg = toAgentMessage(p(422, "validation", "Validation failed", { fieldErrors }), ctx);
+    expect(msg).toContain("f9: bad 9 (invalid)");
+    expect(msg).not.toContain("f10:");
+    expect(msg).toContain("and 3 more");
+    const ten = toAgentMessage(p(422, "validation", undefined, { fieldErrors: fieldErrors.slice(0, 10) }), ctx);
+    expect(ten).toContain("f9: bad 9 (invalid)");
+    expect(ten).not.toContain("more");
   });
 
   it("appends the correlation id when present", () => {

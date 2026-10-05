@@ -1,12 +1,16 @@
-﻿export const TRUNCATION_MARK = "…[truncated]";
+export const TRUNCATION_MARK = "…[truncated]";
 
 // C0 + C1 control characters and the Unicode line/paragraph separators.
 const CONTROL_ALL = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g;
-// Same, but keeps "\n" (U+000A) so multi-line descriptions stay readable.
+// Same, but keeps the line feed (U+000A) so multi-line descriptions stay readable.
 const CONTROL_KEEP_NEWLINE = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u2028\u2029]/g;
+// Invisible formatting characters: zero-width characters, direction marks, embeddings,
+// overrides and isolates, invisible operators, and the zero-width no-break space (BOM).
+// They are removed, so the agent reads the same text a person sees.
+const INVISIBLE_FORMATTING = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
 
 function clean(value: string, max: number, pattern: RegExp): string {
-  const cleaned = value.replace(pattern, " ");
+  const cleaned = value.replace(INVISIBLE_FORMATTING, "").replace(pattern, " ");
   return cleaned.length <= max ? cleaned : cleaned.slice(0, max) + TRUNCATION_MARK;
 }
 
