@@ -1,0 +1,15 @@
+{
+  "status": 200,
+  "contentType": "application/json; charset=utf-8",
+  "body": [
+    {
+      "id": "01a10c66-abc0-7a27-8da7-1c4d1649a336",
+      "projectId": "01a10c66-aa45-787b-885c-3ba17e6979c6",
+      "name": "Task A1",
+      "isArchived": false,
+      "createdAt": "2026-10-05T14:10:17.664432+00:00",
+      "updatedAt": "2026-10-05T14:10:17.664432+00:00"
+    }
+  ],
+  "retryAfter": null
+}

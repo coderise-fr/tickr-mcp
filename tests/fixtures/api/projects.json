@@ -1,0 +1,35 @@
+{
+  "status": 200,
+  "contentType": "application/json; charset=utf-8",
+  "body": [
+    {
+      "id": "01a10c66-aa45-787b-885c-3ba17e6979c6",
+      "name": "Project A",
+      "color": "#3366cc",
+      "isArchived": false,
+      "visibility": "private",
+      "clientId": null,
+      "clientName": null,
+      "createdAt": "2026-10-05T14:10:17.285201+00:00",
+      "updatedAt": "2026-10-05T14:10:17.285201+00:00",
+      "defaultIsBillable": null,
+      "description": null,
+      "clientLegalName": null
+    },
+    {
+      "id": "01a10c66-ab55-7d35-a428-5ab3c50ba2d6",
+      "name": "Project B",
+      "color": "#cc6633",
+      "isArchived": false,
+      "visibility": "private",
+      "clientId": null,
+      "clientName": null,
+      "createdAt": "2026-10-05T14:10:17.557833+00:00",
+      "updatedAt": "2026-10-05T14:10:17.557833+00:00",
+      "defaultIsBillable": null,
+      "description": null,
+      "clientLegalName": null
+    }
+  ],
+  "retryAfter": null
+}

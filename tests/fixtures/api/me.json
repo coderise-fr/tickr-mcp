@@ -1,0 +1,21 @@
+{
+  "status": 200,
+  "contentType": "application/json; charset=utf-8",
+  "body": {
+    "user": {
+      "id": "01a10c65-ee41-7f84-9279-53a5b1b692df",
+      "displayName": "User",
+      "email": "user@example.com",
+      "timezone": "Europe/Paris"
+    },
+    "workspace": {
+      "id": "01a10c65-ee41-72b3-9829-917f6528165b",
+      "name": "Workspace",
+      "timezone": "Europe/Paris"
+    },
+    "role": "workspace_user",
+    "keyRole": "workspace_user",
+    "serverTime": "2026-10-05T14:11:46.6281774+00:00"
+  },
+  "retryAfter": null
+}

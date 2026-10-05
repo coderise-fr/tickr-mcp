@@ -1,0 +1,12 @@
+{
+  "status": 409,
+  "contentType": "application/problem+json",
+  "body": {
+    "type": "https://docs.tickr.coderise.cloud/errors/conflict",
+    "title": "Conflict",
+    "status": 409,
+    "detail": "timer_limit_reached",
+    "correlationId": "01a10c68-08f8-7504-9a01-6c427f179dd3"
+  },
+  "retryAfter": null
+}

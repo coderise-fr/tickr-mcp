@@ -1,0 +1,12 @@
+{
+  "status": 403,
+  "contentType": "application/problem+json",
+  "body": {
+    "type": "https://docs.tickr.coderise.cloud/errors/forbidden",
+    "title": "Forbidden",
+    "status": 403,
+    "detail": "analyst_read_only",
+    "correlationId": "01a10c68-0810-750a-ae03-943e8b701814"
+  },
+  "retryAfter": null
+}

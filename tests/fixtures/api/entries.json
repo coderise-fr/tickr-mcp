@@ -1,0 +1,55 @@
+{
+  "status": 200,
+  "contentType": "application/json; charset=utf-8",
+  "body": {
+    "data": [
+      {
+        "id": "01a10c66-e57c-7506-b014-e58e33da49b9",
+        "userId": "01a10c65-ee41-7f84-9279-53a5b1b692df",
+        "projectId": "01a10c66-aa45-787b-885c-3ba17e6979c6",
+        "projectName": "Project A",
+        "projectColor": "#3366cc",
+        "clientId": null,
+        "clientName": null,
+        "taskId": null,
+        "taskName": null,
+        "description": "Review",
+        "startedAt": "2026-10-03T13:00:00+00:00",
+        "stoppedAt": "2026-10-03T13:20:30+00:00",
+        "durationSeconds": 1230,
+        "tagIds": [],
+        "createdAt": "2026-10-05T14:10:32.444963+00:00",
+        "updatedAt": "2026-10-05T14:10:32.444963+00:00",
+        "isBillable": false,
+        "billableRateSnapshot": null,
+        "billableCurrencySnapshot": null
+      },
+      {
+        "id": "01a10c66-e552-7523-9893-ad65a60d327c",
+        "userId": "01a10c65-ee41-7f84-9279-53a5b1b692df",
+        "projectId": "01a10c66-ab55-7d35-a428-5ab3c50ba2d6",
+        "projectName": "Project B",
+        "projectColor": "#cc6633",
+        "clientId": null,
+        "clientName": null,
+        "taskId": null,
+        "taskName": null,
+        "description": "",
+        "startedAt": "2026-10-02T09:00:00+00:00",
+        "stoppedAt": "2026-10-02T10:30:00+00:00",
+        "durationSeconds": 5400,
+        "tagIds": [],
+        "createdAt": "2026-10-05T14:10:32.402759+00:00",
+        "updatedAt": "2026-10-05T14:10:32.402759+00:00",
+        "isBillable": false,
+        "billableRateSnapshot": null,
+        "billableCurrencySnapshot": null
+      }
+    ],
+    "page": {
+      "next_cursor": "eyJTdGFydGVkQXQiOiIyMDI2LTEwLTAyVDA5OjAwOjAwKzAwOjAwIiwiSWQiOiIwMWExMGM2Ni1lNTUyLTc1MjMtOTg5My1hZDY1YTYwZDMyN2MifQ",
+      "has_more": true
+    }
+  },
+  "retryAfter": null
+}

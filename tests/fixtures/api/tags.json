@@ -1,0 +1,15 @@
+{
+  "status": 200,
+  "contentType": "application/json; charset=utf-8",
+  "body": [
+    {
+      "id": "01a10c66-ac6b-7e40-b9d8-965c86700c60",
+      "name": "meeting",
+      "createdAt": "2026-10-05T14:10:17.835967+00:00",
+      "usageCount": 1,
+      "lastUsedAt": "2026-10-01T09:00:00+00:00",
+      "color": "#888888"
+    }
+  ],
+  "retryAfter": null
+}

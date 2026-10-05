@@ -1,0 +1,12 @@
+{
+  "status": 401,
+  "contentType": "application/problem+json",
+  "body": {
+    "type": "https://docs.tickr.coderise.cloud/errors/unauthorized",
+    "title": "Unauthorized",
+    "status": 401,
+    "detail": "Invalid or revoked API key",
+    "correlationId": "01a10c68-07eb-7dfa-98ca-71390c39873a"
+  },
+  "retryAfter": null
+}

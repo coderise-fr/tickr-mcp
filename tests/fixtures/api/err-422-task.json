@@ -1,0 +1,19 @@
+{
+  "status": 422,
+  "contentType": "application/problem+json",
+  "body": {
+    "type": "https://docs.tickr.coderise.cloud/errors/validation",
+    "title": "Validation failed",
+    "status": 422,
+    "detail": "Validation failed",
+    "correlationId": "01a10c68-0832-7815-9856-9b02734d6639",
+    "errors": [
+      {
+        "field": "task_id",
+        "code": "invalid",
+        "message": "task_id does not belong to project_id"
+      }
+    ]
+  },
+  "retryAfter": null
+}
