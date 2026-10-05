@@ -1,0 +1,61 @@
+import { describe, expect, it } from "vitest";
+import { NetworkError } from "../src/api/errors.js";
+import { TOO_LARGE } from "../src/tools/paging.js";
+import { listProjectsTool, listTagsTool, listTasksTool } from "../src/tools/reference.js";
+import { fakeApi } from "./helpers/fakeApi.js";
+import { IDS, NOW, projectFixture, tagFixture } from "./helpers/fixtures.js";
+
+const d = (api = fakeApi()) => ({ api, now: () => NOW });
+
+describe("reference tools", () => {
+  it("list_projects maps include_archived to the archived query and projects items", async () => {
+    const api = fakeApi();
+    const out = await listProjectsTool.run(listProjectsTool.inputSchema.parse({ include_archived: true }), d(api));
+    expect(api.listProjects).toHaveBeenCalledWith({ archived: true });
+    expect(out).toStrictEqual({
+      items: [{ id: IDS.projectA, name: "Acme website", client_name: "Acme", archived: false }],
+      total: 1, has_more: false, next_cursor: null,
+    });
+    expect(listProjectsTool.outputSchema.safeParse(out).success).toBe(true);
+  });
+
+  it("list_tasks requires project_id and passes it as project_id", async () => {
+    const api = fakeApi();
+    expect(listTasksTool.inputSchema.safeParse({}).success).toBe(false);
+    await listTasksTool.run(listTasksTool.inputSchema.parse({ project_id: IDS.projectA }), d(api));
+    expect(api.listTasks).toHaveBeenCalledWith({ project_id: IDS.projectA, archived: false });
+  });
+
+  it("list_tags drops usage statistics", async () => {
+    const api = fakeApi();
+    api.listTags.mockResolvedValue([tagFixture(), tagFixture({ id: IDS.entry2, name: "deep work" })]);
+    const out = await listTagsTool.run(listTagsTool.inputSchema.parse({ name_contains: "deep" }), d(api));
+    expect(out.items).toStrictEqual([{ id: IDS.entry2, name: "deep work" }]);
+  });
+
+  it("searches the cleaned names the agent sees", async () => {
+    const api = fakeApi();
+    api.listProjects.mockResolvedValue([projectFixture({ name: "Line\nbreak" })]);
+    const out = await listProjectsTool.run(listProjectsTool.inputSchema.parse({ name_contains: "line" }), d(api));
+    expect(out.items[0]!.name).toBe("Line break");
+  });
+
+  it("turns a download timeout into the dedicated too-large message", async () => {
+    const api = fakeApi();
+    api.listProjects.mockRejectedValue(new NetworkError(true));
+    await expect(listProjectsTool.run(listProjectsTool.inputSchema.parse({}), d(api))).rejects.toThrow(TOO_LARGE);
+  });
+
+  it("keeps other network failures as network errors", async () => {
+    const api = fakeApi();
+    api.listTags.mockRejectedValue(new NetworkError(false));
+    await expect(listTagsTool.run(listTagsTool.inputSchema.parse({}), d(api))).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("descriptions tell the agent not to conclude absence too early", () => {
+    for (const t of [listProjectsTool, listTasksTool, listTagsTool]) {
+      expect(t.description).toMatch(/name_contains/);
+      expect(t.annotations.readOnlyHint).toBe(true);
+    }
+  });
+});
