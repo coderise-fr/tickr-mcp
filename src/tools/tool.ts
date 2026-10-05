@@ -44,4 +44,14 @@ export function compact<T extends object>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as T;
 }
 
+/**
+ * Converts a validated offset datetime to the same instant in UTC ("…Z"). Tool inputs keep their
+ * explicit offset; every datetime put on the wire is sent in UTC.
+ */
+export function toUtc(value: string): string;
+export function toUtc(value: string | undefined): string | undefined;
+export function toUtc(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : new Date(value).toISOString();
+}
+
 export const isAfter = (a: string, b: string): boolean => Date.parse(a) > Date.parse(b);

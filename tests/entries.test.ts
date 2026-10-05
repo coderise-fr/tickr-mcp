@@ -7,12 +7,21 @@ import { entryFixture, IDS, NOW } from "./helpers/fixtures.js";
 const d = (api = fakeApi()) => ({ api, now: () => NOW });
 const START = "2026-10-01T09:00:00+02:00";
 const STOP = "2026-10-01T11:00:00+02:00";
+// The same instants in UTC, as sent on the wire.
+const START_UTC = "2026-10-01T07:00:00.000Z";
+const STOP_UTC = "2026-10-01T09:00:00.000Z";
 
 describe("list_entries", () => {
   it("maps parameters to the declared query names and defaults limit to 50", async () => {
     const api = fakeApi();
     await listEntriesTool.run(listEntriesTool.inputSchema.parse({ from: START, project_id: IDS.projectA, cursor: "abc" }), d(api));
-    expect(api.listEntries).toHaveBeenCalledWith({ from: START, project_id: IDS.projectA, cursor: "abc", limit: 50 });
+    expect(api.listEntries).toHaveBeenCalledWith({ from: START_UTC, project_id: IDS.projectA, cursor: "abc", limit: 50 });
+  });
+
+  it("sends from and to as the same instants in UTC", async () => {
+    const api = fakeApi();
+    await listEntriesTool.run(listEntriesTool.inputSchema.parse({ from: START, to: STOP }), d(api));
+    expect(api.listEntries).toHaveBeenCalledWith({ from: START_UTC, to: STOP_UTC, limit: 50 });
   });
 
   it("returns items and the API cursor", async () => {
@@ -38,7 +47,7 @@ describe("create_entry", () => {
     }), d(api));
     const body = api.createEntry.mock.calls[0]![0];
     expect(body).toStrictEqual({
-      startedAt: START, stoppedAt: STOP, projectId: IDS.projectA, taskId: IDS.taskA,
+      startedAt: START_UTC, stoppedAt: STOP_UTC, projectId: IDS.projectA, taskId: IDS.taskA,
       description: "Review", tagIds: [IDS.tag], isBillable: true,
     });
     expect(Object.keys(body).every((k) => bodyPropertiesOf("post", "/api/v1/entries").includes(k))).toBe(true);
@@ -71,7 +80,7 @@ describe("update_entry", () => {
       tag_ids: [], billable: false,
     }), d(api));
     const body = api.updateEntry.mock.calls[0]![1];
-    expect(body).toStrictEqual({ projectId: IDS.projectB, description: "x", startedAt: START, stoppedAt: STOP, tagIds: [], isBillable: false });
+    expect(body).toStrictEqual({ projectId: IDS.projectB, description: "x", startedAt: START_UTC, stoppedAt: STOP_UTC, tagIds: [], isBillable: false });
     expect(Object.keys(body).every((k) => bodyPropertiesOf("patch", "/api/v1/entries/{id}").includes(k))).toBe(true);
   });
 
@@ -105,5 +114,17 @@ describe("update_entry", () => {
   it("explains in its description that changing the project clears the task", () => {
     expect(updateEntryTool.description).toMatch(/project.*clears the task/i);
     expect(updateEntryTool.description).toMatch(/last write wins/i);
+  });
+});
+
+describe("datetimes on the wire", () => {
+  it("sends a +02:00 input as the same instant in UTC (Z)", async () => {
+    const api = fakeApi();
+    const input = "2026-10-04T09:00:00+02:00";
+    await createEntryTool.run(createEntryTool.inputSchema.parse({ started_at: input, stopped_at: "2026-10-04T11:00:00+02:00" }), d(api));
+    const body = api.createEntry.mock.calls[0]![0];
+    expect(body.startedAt).toBe("2026-10-04T07:00:00.000Z");
+    expect(body.stoppedAt).toBe("2026-10-04T09:00:00.000Z");
+    expect(Date.parse(body.startedAt)).toBe(Date.parse(input));
   });
 });

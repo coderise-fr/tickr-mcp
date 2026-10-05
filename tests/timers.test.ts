@@ -21,7 +21,7 @@ describe("start_timer", () => {
     const body = api.startTimer.mock.calls[0]![0];
     expect(body).toStrictEqual({
       projectId: IDS.projectA, taskId: IDS.taskA, description: "Design", tagIds: [IDS.tag],
-      isBillable: false, startedAt: "2026-10-02T09:00:00+02:00",
+      isBillable: false, startedAt: "2026-10-02T07:00:00.000Z",
     });
     expect(Object.keys(body).every((k) => bodyPropertiesOf("post", "/api/v1/timers/start").includes(k))).toBe(true);
   });
@@ -109,7 +109,7 @@ describe("stop_timer", () => {
   it("stops the given id with the optional stop time", async () => {
     const api = fakeApi();
     const out = await stopTimerTool.run({ entry_id: IDS.entry, stopped_at: "2026-10-02T12:00:00+02:00" }, d(api));
-    expect(api.stopTimer).toHaveBeenCalledWith(IDS.entry, { stoppedAt: "2026-10-02T12:00:00+02:00" });
+    expect(api.stopTimer).toHaveBeenCalledWith(IDS.entry, { stoppedAt: "2026-10-02T10:00:00.000Z" });
     expect(api.listActiveTimers).not.toHaveBeenCalled();
     expect(out.status).toBe("stopped");
   });

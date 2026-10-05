@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ApiProblemError, ToolError } from "../api/errors.js";
 import { cleanDetail } from "../sanitize.js";
 import { entrySchema, toEntry, type Entry } from "./shapes.js";
-import { compact, defineTool, id, offsetDateTime, READ_ANNOTATIONS, UNTRUSTED } from "./tool.js";
+import { compact, defineTool, id, offsetDateTime, READ_ANNOTATIONS, toUtc, UNTRUSTED } from "./tool.js";
 
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
 
@@ -63,7 +63,7 @@ export const startTimerTool = defineTool({
       taskId: a.task_id,
       description: a.description,
       tagIds: a.tag_ids,
-      startedAt: a.started_at,
+      startedAt: toUtc(a.started_at),
       isBillable: a.billable,
     });
     try {
@@ -100,7 +100,7 @@ export const stopTimerTool = defineTool({
   }),
   annotations: WRITE,
   run: async (a, { api, now }) => {
-    const body = compact({ stoppedAt: a.stopped_at });
+    const body = compact({ stoppedAt: toUtc(a.stopped_at) });
     if (a.entry_id !== undefined) {
       return { status: "stopped" as const, entry: toEntry(await api.stopTimer(a.entry_id, body), now()) };
     }

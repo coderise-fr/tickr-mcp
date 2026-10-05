@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { entrySchema, toEntry } from "./shapes.js";
-import { compact, defineTool, id, isAfter, offsetDateTime, READ_ANNOTATIONS, UNTRUSTED } from "./tool.js";
+import { compact, defineTool, id, isAfter, offsetDateTime, READ_ANNOTATIONS, toUtc, UNTRUSTED } from "./tool.js";
 
 const DATES =
   "Datetimes need an explicit offset; for relative dates call get_context and interpret them in user.timezone. " +
@@ -31,7 +31,7 @@ export const listEntriesTool = defineTool({
   annotations: READ_ANNOTATIONS,
   run: async (a, { api, now }) => {
     const res = await api.listEntries(compact({
-      from: a.from, to: a.to, project_id: a.project_id, task_id: a.task_id, tag_id: a.tag_id,
+      from: toUtc(a.from), to: toUtc(a.to), project_id: a.project_id, task_id: a.task_id, tag_id: a.tag_id,
       cursor: a.cursor, limit: a.limit ?? 50,
     }));
     return {
@@ -65,8 +65,8 @@ export const createEntryTool = defineTool({
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   run: async (a, { api, now }) => {
     const body = compact({
-      startedAt: a.started_at,
-      stoppedAt: a.stopped_at,
+      startedAt: toUtc(a.started_at),
+      stoppedAt: toUtc(a.stopped_at),
       projectId: a.project_id,
       taskId: a.task_id,
       description: a.description,
@@ -132,8 +132,8 @@ export const updateEntryTool = defineTool({
       taskId: a.task_id,
       clearTask: a.clear_task ? true : undefined,
       description: a.description,
-      startedAt: a.started_at,
-      stoppedAt: a.stopped_at,
+      startedAt: toUtc(a.started_at),
+      stoppedAt: toUtc(a.stopped_at),
       tagIds: a.tag_ids,
       isBillable: a.billable,
     });
