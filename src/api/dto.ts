@@ -47,8 +47,10 @@ export const meDtoSchema = z.looseObject({
   user: z.looseObject({ id: z.string(), displayName: z.string(), email: z.string(), timezone: z.string() }),
   workspace: z.looseObject({ id: z.string(), name: z.string(), timezone: z.string() }),
   role: z.string(),
-  // Checked by the key-role gate, which must answer a missing or unknown value with its own message.
-  keyRole: z.unknown(),
+  // Checked by the key-role gate, which must answer a missing, null or unknown value with its own
+  // message. Optional here: in zod 4 a z.unknown() key is otherwise required, and a missing keyRole
+  // would be reported as an unreadable answer instead of a contract error.
+  keyRole: z.unknown().optional(),
   serverTime: z.string(),
 });
 

@@ -3,7 +3,10 @@ import { createTickrClient } from "../src/api/client.js";
 import {
   ApiHttpError, ApiProblemError, NetworkError, UnreadableResponseError, toAgentMessage,
 } from "../src/api/errors.js";
+import { BAD_ME_CONTRACT, KeyGate } from "../src/tools/gate.js";
+import { runTool } from "../src/tools/run.js";
 import { toEntry } from "../src/tools/shapes.js";
+import { listTagsTool } from "../src/tools/reference.js";
 import { entryFixture, meFixture, NOW } from "./helpers/fixtures.js";
 import { json, problem, startServer, type Reply, type RecordedRequest } from "./helpers/httpServer.js";
 
@@ -203,6 +206,20 @@ describe("createTickrClient", () => {
       const srv = await setup((_r, i) => (i === 0 ? json(200, noUser) : json(200, { ...meFixture(), keyRole: null })));
       await expect(srv.api.me()).rejects.toBeInstanceOf(UnreadableResponseError);
       await expect(srv.api.me()).resolves.toMatchObject({ keyRole: null });
+    });
+
+    it.each([
+      ["without keyRole", (() => { const { keyRole: _k, ...rest } = meFixture(); void _k; return rest; })()],
+      ["with a null keyRole", { ...meFixture(), keyRole: null }],
+      ["with an unknown keyRole", { ...meFixture(), keyRole: "superuser" }],
+    ])("lets the gate answer the contract error for /me %s (real client, runTool)", async (_label, body) => {
+      const srv = await startServer(() => json(200, body));
+      close = srv.close;
+      const api = createTickrClient({ baseUrl: srv.baseUrl, apiKey: KEY });
+      const res = await runTool(listTagsTool, {}, { api, now: () => NOW, gate: new KeyGate(api), baseUrl: srv.baseUrl });
+      expect(res.isError).toBe(true);
+      expect(res.content).toEqual([{ type: "text", text: BAD_ME_CONTRACT }]);
+      expect(srv.requests.map((r) => r.url)).toEqual(["/api/v1/me"]);
     });
 
     it("rejects a project, task or tag without its name", async () => {
