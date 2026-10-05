@@ -4,7 +4,7 @@ import { listProjectsTool, listTagsTool, listTasksTool } from "./reference.js";
 import { listActiveTimersTool, startTimerTool, stopTimerTool } from "./timers.js";
 import type { AnyTool } from "./tool.js";
 
-// Exactly the ten V1 tools (spec §6.1). tests/protocol.test.ts pins this list.
+// Exactly the ten V1 tools. tests/protocol.test.ts pins this list.
 export const ALL_TOOLS: readonly AnyTool[] = [
   getContextTool,
   listActiveTimersTool,

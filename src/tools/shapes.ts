@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ROLE_CODES, type EntryDto, type MeDto, type ProjectDto, type RoleCode, type TagDto, type TaskDto } from "../api/types.js";
 import { cleanDescription, cleanName, cleanNullableName } from "../sanitize.js";
 
-// Allow-listed result shapes (spec §6.2). Strict: any extra field is a bug.
+// Allow-listed result shapes. Strict: any extra field is a bug.
 export const entrySchema = z.strictObject({
   id: z.string(),
   description: z.string(),

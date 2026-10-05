@@ -4,7 +4,7 @@ import { pageReferenceList, TOO_LARGE } from "./paging.js";
 import { projectSchema, tagSchema, taskSchema, toProject, toTag, toTask } from "./shapes.js";
 import { defineTool, id, READ_ANNOTATIONS, UNTRUSTED } from "./tool.js";
 
-/** Spec §6.5: a whole-list download that times out gets the dedicated "too large" message. */
+/** A whole-list download that times out gets the dedicated "too large" message. */
 async function fetchWhole<T>(load: () => Promise<T[]>): Promise<T[]> {
   try {
     return await load();

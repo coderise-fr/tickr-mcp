@@ -59,7 +59,7 @@ function decodeCursor(cursor: string): CursorPayload {
   }
 }
 
-/** Spec §6.5: local keyset paging over a list the API returns whole. */
+/** Local keyset paging over a list the API returns whole (projects, tasks, tags). */
 export function pageReferenceList<T extends { id: string; name: string }>(items: T[], req: PageRequest): PageResult<T> {
   if (items.length > MAX_REFERENCE_ITEMS) throw new ToolError(TOO_LARGE);
 

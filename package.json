@@ -29,6 +29,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
@@ -43,6 +44,6 @@
     "eslint": "10.11.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.71.0",
-    "vitest": "4.0.18"
+    "vitest": "4.1.11"
   }
 }

@@ -159,7 +159,7 @@ describe("list_active_timers", () => {
 });
 
 describe("annotations", () => {
-  it("match spec §6.1", () => {
+  it("declare reads as read-only and writes as non-idempotent open-world calls", () => {
     expect(listActiveTimersTool.annotations).toMatchObject({ readOnlyHint: true });
     expect(startTimerTool.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
     expect(stopTimerTool.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });

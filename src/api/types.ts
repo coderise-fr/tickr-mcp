@@ -1,5 +1,5 @@
 // REST shapes of the Tickr public API /api/v1, verbatim (camelCase bodies,
-// snake_case enum values and pagination block). Spec §5.1–5.2.
+// snake_case enum values and pagination block).
 
 export const ROLE_CODES = ["owner", "admin", "project_lead", "analyst", "workspace_user"] as const;
 export type RoleCode = (typeof ROLE_CODES)[number];

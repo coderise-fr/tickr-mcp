@@ -9,7 +9,7 @@ export interface RunDeps extends ToolDeps {
 }
 
 /**
- * Spec §4 order: arguments were already validated by the SDK against inputSchema
+ * Order of checks: arguments were already validated by the SDK against inputSchema
  * (no network); then the key-role gate; then the business call. Never throws.
  */
 export async function runTool(tool: AnyTool, args: unknown, deps: RunDeps): Promise<CallToolResult> {

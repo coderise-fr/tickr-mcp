@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { REST_CONTRACT } from "../../src/api/contract.js";
 
-// Spec §8: routes, query parameters and request-body property names (with their exact
+// Routes, query parameters and request-body property names (with their exact
 // casing) must exist in the published OpenAPI document. It declares no response schemas,
 // so response shapes are covered by fixtures and the manual E2E checklist only.
 const URL_ = process.env.TICKR_SWAGGER_URL ?? "https://tickr.coderise.cloud/api/docs/v1/swagger.json";

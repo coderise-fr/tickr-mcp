@@ -32,7 +32,10 @@ export async function fetchMe(api: TickrApi): Promise<MeDto> {
   }
 }
 
-/** Spec §3.1. Caches the key's frozen role only; it is immutable for the key's lifetime. */
+/**
+ * Key-role gate, checked before every tool call: only keys limited to their owner's own entries
+ * may act. Caches the key's frozen role only; it is immutable for the key's lifetime.
+ */
 export class KeyGate {
   private keyRole: RoleCode | undefined;
 
