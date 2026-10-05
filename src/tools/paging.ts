@@ -7,11 +7,19 @@ export const TOO_LARGE =
   "or too slow to download within 30 seconds). Ask your Tickr administrator.";
 export const BAD_CURSOR = "Invalid cursor: restart from the first page without cursor.";
 export const CURSOR_MISMATCH =
-  "This cursor was issued for other filters (name_contains / include_archived). Restart from the first page.";
+  "This cursor was issued for another list or other filters (tool, project_id, name_contains, include_archived). " +
+  "Restart from the first page without cursor.";
+
+/** What a cursor is bound to: the tool (t), the project (p) and the archived filter (a). */
+export interface FilterKey {
+  t: string;
+  p: string | null;
+  a: boolean | null;
+}
 
 export interface PageRequest {
   nameContains?: string;
-  filterKey: { a: boolean | null };
+  filterKey: FilterKey;
   limit?: number;
   cursor?: string;
 }
@@ -24,7 +32,7 @@ export interface PageResult<T> {
 }
 
 type Key = [string, string];
-interface CursorPayload { k: Key; q: string | null; a: boolean | null }
+interface CursorPayload extends FilterKey { k: Key; q: string | null }
 
 const keyOf = (i: { id: string; name: string }): Key => [i.name.toLowerCase(), i.id];
 
@@ -42,7 +50,8 @@ function decodeCursor(cursor: string): CursorPayload {
   try {
     const p = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as CursorPayload;
     const ok = Array.isArray(p.k) && p.k.length === 2 && typeof p.k[0] === "string" && typeof p.k[1] === "string" &&
-      (p.q === null || typeof p.q === "string") && (p.a === null || typeof p.a === "boolean");
+      (p.q === null || typeof p.q === "string") && (p.a === null || typeof p.a === "boolean") &&
+      typeof p.t === "string" && (p.p === null || typeof p.p === "string");
     if (!ok) throw new Error("shape");
     return p;
   } catch {
@@ -61,7 +70,8 @@ export function pageReferenceList<T extends { id: string; name: string }>(items:
   let start = 0;
   if (req.cursor !== undefined) {
     const c = decodeCursor(req.cursor);
-    if (c.q !== q || c.a !== req.filterKey.a) throw new ToolError(CURSOR_MISMATCH);
+    const f = req.filterKey;
+    if (c.t !== f.t || c.p !== f.p || c.q !== q || c.a !== f.a) throw new ToolError(CURSOR_MISMATCH);
     const idx = filtered.findIndex((i) => compareKeys(keyOf(i), c.k) > 0);
     start = idx === -1 ? filtered.length : idx;
   }
@@ -74,6 +84,6 @@ export function pageReferenceList<T extends { id: string; name: string }>(items:
     items: page,
     total: filtered.length,
     has_more: hasMore,
-    next_cursor: hasMore && last ? encodeCursor({ k: keyOf(last), q, a: req.filterKey.a }) : null,
+    next_cursor: hasMore && last ? encodeCursor({ k: keyOf(last), q, t: req.filterKey.t, p: req.filterKey.p, a: req.filterKey.a }) : null,
   };
 }

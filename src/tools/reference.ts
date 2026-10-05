@@ -38,7 +38,7 @@ export const listProjectsTool = defineTool({
   run: async (a, { api }) => {
     const archived = a.include_archived ?? false;
     const projects = (await fetchWhole(() => api.listProjects({ archived }))).map(toProject);
-    return pageReferenceList(projects, { nameContains: a.name_contains, filterKey: { a: archived }, limit: a.limit, cursor: a.cursor });
+    return pageReferenceList(projects, { nameContains: a.name_contains, filterKey: { t: "list_projects", p: null, a: archived }, limit: a.limit, cursor: a.cursor });
   },
 });
 
@@ -53,7 +53,9 @@ export const listTasksTool = defineTool({
   run: async (a, { api }) => {
     const archived = a.include_archived ?? false;
     const tasks = (await fetchWhole(() => api.listTasks({ project_id: a.project_id, archived }))).map(toTask);
-    return pageReferenceList(tasks, { nameContains: a.name_contains, filterKey: { a: archived }, limit: a.limit, cursor: a.cursor });
+    return pageReferenceList(tasks, {
+      nameContains: a.name_contains, filterKey: { t: "list_tasks", p: a.project_id, a: archived }, limit: a.limit, cursor: a.cursor,
+    });
   },
 });
 
@@ -67,6 +69,6 @@ export const listTagsTool = defineTool({
   annotations: READ_ANNOTATIONS,
   run: async (a, { api }) => {
     const tags = (await fetchWhole(() => api.listTags())).map(toTag);
-    return pageReferenceList(tags, { nameContains: a.name_contains, filterKey: { a: null }, limit: a.limit, cursor: a.cursor });
+    return pageReferenceList(tags, { nameContains: a.name_contains, filterKey: { t: "list_tags", p: null, a: null }, limit: a.limit, cursor: a.cursor });
   },
 });

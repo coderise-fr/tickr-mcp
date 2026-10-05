@@ -4,7 +4,7 @@ import { MAX_REFERENCE_ITEMS, pageReferenceList } from "../src/tools/paging.js";
 
 const item = (name: string, n: number) => ({ id: `00000000-0000-7000-8000-${String(n).padStart(12, "0")}`, name });
 const names = (r: { items: { name: string }[] }) => r.items.map((i) => i.name);
-const key = { a: false };
+const key = { t: "list_projects", p: null, a: false };
 
 describe("pageReferenceList", () => {
   const list = [item("beta", 2), item("Alpha", 1), item("gamma", 3), item("alpha", 4)];
@@ -34,7 +34,16 @@ describe("pageReferenceList", () => {
   it("rejects a cursor reused with other filters", () => {
     const p1 = pageReferenceList(list, { filterKey: key, limit: 1 });
     expect(() => pageReferenceList(list, { filterKey: key, limit: 1, nameContains: "a", cursor: p1.next_cursor! })).toThrow(ToolError);
-    expect(() => pageReferenceList(list, { filterKey: { a: true }, limit: 1, cursor: p1.next_cursor! })).toThrow(ToolError);
+    expect(() => pageReferenceList(list, { filterKey: { ...key, a: true }, limit: 1, cursor: p1.next_cursor! })).toThrow(ToolError);
+  });
+
+  it("rejects a cursor reused with another tool or another project", () => {
+    const p1 = pageReferenceList(list, { filterKey: { t: "list_tasks", p: "project-a", a: false }, limit: 1 });
+    const reuse = (filterKey: { t: string; p: string | null; a: boolean | null }) =>
+      () => pageReferenceList(list, { filterKey, limit: 1, cursor: p1.next_cursor! });
+    expect(reuse({ t: "list_tasks", p: "project-a", a: false })).not.toThrow();
+    expect(reuse({ t: "list_tasks", p: "project-b", a: false })).toThrow(/another list/);
+    expect(reuse({ t: "list_projects", p: null, a: false })).toThrow(/another list/);
   });
 
   it("rejects a malformed cursor", () => {

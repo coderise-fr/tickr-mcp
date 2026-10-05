@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { NetworkError } from "../src/api/errors.js";
-import { TOO_LARGE } from "../src/tools/paging.js";
+import { CURSOR_MISMATCH, TOO_LARGE } from "../src/tools/paging.js";
 import { listProjectsTool, listTagsTool, listTasksTool } from "../src/tools/reference.js";
 import { fakeApi } from "./helpers/fakeApi.js";
-import { IDS, NOW, projectFixture, tagFixture } from "./helpers/fixtures.js";
+import { IDS, NOW, projectFixture, tagFixture, taskFixture } from "./helpers/fixtures.js";
 
 const d = (api = fakeApi()) => ({ api, now: () => NOW });
 
@@ -50,6 +50,27 @@ describe("reference tools", () => {
     const api = fakeApi();
     api.listTags.mockRejectedValue(new NetworkError(false));
     await expect(listTagsTool.run(listTagsTool.inputSchema.parse({}), d(api))).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("rejects a list_tasks cursor reused on another project", async () => {
+    const api = fakeApi();
+    api.listTasks.mockResolvedValue([taskFixture(), taskFixture({ id: IDS.entry2, name: "Review" })]);
+    const first = await listTasksTool.run(listTasksTool.inputSchema.parse({ project_id: IDS.projectA, limit: 1 }), d(api));
+    expect(first.next_cursor).not.toBeNull();
+    const again = listTasksTool.inputSchema.parse({ project_id: IDS.projectA, limit: 1, cursor: first.next_cursor });
+    await expect(listTasksTool.run(again, d(api))).resolves.toMatchObject({ has_more: false });
+    const other = listTasksTool.inputSchema.parse({ project_id: IDS.projectB, limit: 1, cursor: first.next_cursor });
+    await expect(listTasksTool.run(other, d(api))).rejects.toThrow(CURSOR_MISMATCH);
+  });
+
+  it("rejects a list_projects cursor reused on list_tasks", async () => {
+    const api = fakeApi();
+    api.listProjects.mockResolvedValue([projectFixture(), projectFixture({ id: IDS.projectB, name: "Beta" })]);
+    api.listTasks.mockResolvedValue([taskFixture(), taskFixture({ id: IDS.entry2, name: "Review" })]);
+    const first = await listProjectsTool.run(listProjectsTool.inputSchema.parse({ limit: 1 }), d(api));
+    expect(first.next_cursor).not.toBeNull();
+    const reused = listTasksTool.inputSchema.parse({ project_id: IDS.projectA, limit: 1, cursor: first.next_cursor });
+    await expect(listTasksTool.run(reused, d(api))).rejects.toThrow(CURSOR_MISMATCH);
   });
 
   it("descriptions tell the agent not to conclude absence too early", () => {
