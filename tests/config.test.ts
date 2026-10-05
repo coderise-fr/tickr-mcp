@@ -33,11 +33,32 @@ describe("loadConfig", () => {
   });
 
   it("never echoes the key or the raw URL in errors", () => {
+    // Check credentials case
+    expect(() =>
+      loadConfig({ TICKR_API_KEY: KEY, TICKR_BASE_URL: "https://user:pass@x.example.com" })
+    ).toThrow(ConfigError);
+
     try {
       loadConfig({ TICKR_API_KEY: KEY, TICKR_BASE_URL: "https://user:pass@x.example.com" });
     } catch (e) {
-      expect(String((e as Error).message)).not.toContain("pass");
-      expect(String((e as Error).message)).not.toContain(KEY);
+      const msg = String((e as Error).message);
+      expect(msg).not.toContain("pass");
+      expect(msg).not.toContain("user");
+      expect(msg).not.toContain(KEY);
+      expect(msg).not.toContain("x.example.com");
+    }
+
+    // Check garbage URL case with key-like text
+    expect(() =>
+      loadConfig({ TICKR_API_KEY: KEY, TICKR_BASE_URL: "not a url tkr_secret_value" })
+    ).toThrow(ConfigError);
+
+    try {
+      loadConfig({ TICKR_API_KEY: KEY, TICKR_BASE_URL: "not a url tkr_secret_value" });
+    } catch (e) {
+      const msg = String((e as Error).message);
+      expect(msg).not.toContain("tkr_secret_value");
+      expect(msg).not.toContain("not a url");
     }
   });
 });
