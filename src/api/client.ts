@@ -1,4 +1,8 @@
+import { z } from "zod";
 import { VERSION } from "../version.js";
+import {
+  entryDtoSchema, meDtoSchema, pagedEntriesDtoSchema, projectDtoSchema, tagDtoSchema, taskDtoSchema,
+} from "./dto.js";
 import {
   ApiHttpError, ApiProblemError, NetworkError, UnreadableResponseError, problemCode, type FieldError,
 } from "./errors.js";
@@ -35,7 +39,12 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
-  async function request<T>(method: string, path: string, init: { query?: Query; body?: unknown } = {}): Promise<T> {
+  async function request<S extends z.ZodType>(
+    method: string,
+    path: string,
+    schema: S,
+    init: { query?: Query; body?: unknown } = {},
+  ): Promise<z.infer<S>> {
     const url = new URL(opts.baseUrl + path);
     for (const [k, v] of Object.entries(init.query ?? {})) {
       if (v !== undefined) url.searchParams.set(k, String(v));
@@ -62,16 +71,21 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
       }
 
       if (res.ok) {
-        if (res.status === 204) return undefined as T;
         // The body is read inside the same error boundary as the request: a write may
         // already be applied when its answer is cut or truncated, and the agent must be told.
+        let body: unknown;
         try {
-          return (await res.json()) as T;
+          body = res.status === 204 ? undefined : await res.json();
         } catch (e) {
           const name = e instanceof Error ? e.name : "";
           if (name === "TimeoutError" || name === "AbortError") throw new NetworkError(true);
           throw new UnreadableResponseError(res.status);
         }
+        // Checked here, so a missing or null field is reported as an unreadable answer
+        // instead of breaking a projection later.
+        const parsed = schema.safeParse(body);
+        if (!parsed.success) throw new UnreadableResponseError(res.status);
+        return parsed.data;
       }
 
       const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
@@ -87,17 +101,19 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
 
   const id = (value: string) => encodeURIComponent(value);
 
+  const entries = z.array(entryDtoSchema);
+
   return {
-    me: () => request("GET", "/api/v1/me"),
-    listActiveTimers: () => request("GET", "/api/v1/timers/active"),
-    startTimer: (body) => request("POST", "/api/v1/timers/start", { body }),
-    stopTimer: (entryId, body) => request("POST", `/api/v1/timers/${id(entryId)}/stop`, { body }),
-    listEntries: (query) => request("GET", "/api/v1/entries", { query: { ...query } }),
-    createEntry: (body) => request("POST", "/api/v1/entries", { body }),
-    updateEntry: (entryId, body) => request("PATCH", `/api/v1/entries/${id(entryId)}`, { body }),
-    listProjects: (query) => request("GET", "/api/v1/projects", { query: { ...query } }),
-    listTasks: (query) => request("GET", "/api/v1/tasks", { query: { ...query } }),
-    listTags: () => request("GET", "/api/v1/tags"),
+    me: () => request("GET", "/api/v1/me", meDtoSchema),
+    listActiveTimers: () => request("GET", "/api/v1/timers/active", entries),
+    startTimer: (body) => request("POST", "/api/v1/timers/start", entryDtoSchema, { body }),
+    stopTimer: (entryId, body) => request("POST", `/api/v1/timers/${id(entryId)}/stop`, entryDtoSchema, { body }),
+    listEntries: (query) => request("GET", "/api/v1/entries", pagedEntriesDtoSchema, { query: { ...query } }),
+    createEntry: (body) => request("POST", "/api/v1/entries", entryDtoSchema, { body }),
+    updateEntry: (entryId, body) => request("PATCH", `/api/v1/entries/${id(entryId)}`, entryDtoSchema, { body }),
+    listProjects: (query) => request("GET", "/api/v1/projects", z.array(projectDtoSchema), { query: { ...query } }),
+    listTasks: (query) => request("GET", "/api/v1/tasks", z.array(taskDtoSchema), { query: { ...query } }),
+    listTags: () => request("GET", "/api/v1/tags", z.array(tagDtoSchema)),
   };
 }
 

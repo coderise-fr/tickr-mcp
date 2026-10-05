@@ -3,6 +3,8 @@ import { createTickrClient } from "../src/api/client.js";
 import {
   ApiHttpError, ApiProblemError, NetworkError, UnreadableResponseError, toAgentMessage,
 } from "../src/api/errors.js";
+import { toEntry } from "../src/tools/shapes.js";
+import { entryFixture, meFixture, NOW } from "./helpers/fixtures.js";
 import { json, problem, startServer, type Reply, type RecordedRequest } from "./helpers/httpServer.js";
 
 const KEY = "tkr_secret_value";
@@ -29,7 +31,7 @@ describe("createTickrClient", () => {
   });
 
   it("sends the exact camelCase JSON body", async () => {
-    const { api, requests } = await setup(() => json(200, { id: "e1" }));
+    const { api, requests } = await setup(() => json(200, entryFixture()));
     await api.startTimer({ projectId: "p1", startedAt: "2026-10-02T09:00:00+02:00" });
     expect(requests[0]!.url).toBe("/api/v1/timers/start");
     expect(requests[0]!.headers["content-type"]).toBe("application/json");
@@ -47,7 +49,7 @@ describe("createTickrClient", () => {
   });
 
   it("encodes ids in paths", async () => {
-    const { api, requests } = await setup(() => json(200, { id: "e1" }));
+    const { api, requests } = await setup(() => json(200, entryFixture()));
     await api.stopTimer("a/b", {});
     expect(requests[0]!.url).toBe("/api/v1/timers/a%2Fb/stop");
   });
@@ -127,7 +129,11 @@ describe("createTickrClient", () => {
   });
 
   it("calls every route of the contract with the right method and path", async () => {
-    const { api, requests } = await setup(() => json(200, { data: [], page: { next_cursor: null, has_more: false } }));
+    const { api, requests } = await setup((r) => {
+      if (r.url === "/api/v1/me") return json(200, meFixture());
+      if (r.url.startsWith("/api/v1/entries")) return json(200, entryFixture());
+      return json(200, []);
+    });
     await api.me();
     await api.listProjects({ archived: false });
     await api.listTasks({ project_id: "p1", archived: true });
@@ -140,5 +146,60 @@ describe("createTickrClient", () => {
       "PATCH /api/v1/entries/e1",
       "POST /api/v1/entries",
     ]);
+  });
+
+  describe("validates answers before handing them to the tools", () => {
+    it("accepts a null entry description, projected as an empty string", async () => {
+      const { api } = await setup(() => json(200, [entryFixture({ description: null })]));
+      const [entry] = await api.listActiveTimers();
+      expect(entry!.description).toBeNull();
+      expect(toEntry(entry!, NOW).description).toBe("");
+    });
+
+    it("keeps unknown extra fields out of the way (taskName)", async () => {
+      const { api } = await setup(() => json(200, [{ ...entryFixture(), taskName: "Design" }]));
+      await expect(api.listActiveTimers()).resolves.toHaveLength(1);
+    });
+
+    it("rejects an entry without startedAt as unreadable, with the HTTP status", async () => {
+      const { startedAt: _s, ...broken } = entryFixture();
+      void _s;
+      const { api } = await setup(() => json(200, { data: [broken], page: { next_cursor: null, has_more: false } }));
+      const err = await api.listEntries({ limit: 50 }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnreadableResponseError);
+      expect((err as UnreadableResponseError).status).toBe(200);
+      expect(toAgentMessage(err, { baseUrl: "x", isWrite: false })).toMatch(/HTTP 200.*could not be read or did not have the expected shape/);
+    });
+
+    it("rejects /me answering 200 null as unreadable", async () => {
+      const { api } = await setup(() => json(200, null));
+      const err = await api.me().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnreadableResponseError);
+      expect((err as UnreadableResponseError).status).toBe(200);
+    });
+
+    it("rejects /me without its user block, but leaves keyRole to the gate", async () => {
+      const { user: _u, ...noUser } = meFixture();
+      void _u;
+      const srv = await setup((_r, i) => (i === 0 ? json(200, noUser) : json(200, { ...meFixture(), keyRole: null })));
+      await expect(srv.api.me()).rejects.toBeInstanceOf(UnreadableResponseError);
+      await expect(srv.api.me()).resolves.toMatchObject({ keyRole: null });
+    });
+
+    it("rejects a project, task or tag without its name", async () => {
+      const { api } = await setup(() => json(200, [{ id: "x" }]));
+      await expect(api.listProjects({ archived: false })).rejects.toBeInstanceOf(UnreadableResponseError);
+      await expect(api.listTasks({ project_id: "p", archived: false })).rejects.toBeInstanceOf(UnreadableResponseError);
+      await expect(api.listTags()).rejects.toBeInstanceOf(UnreadableResponseError);
+    });
+
+    it("tells the agent to check before retrying when the answer to a write is unreadable", async () => {
+      const { api, requests } = await setup(() => json(201, { id: "e1" }));
+      const err = await api.createEntry({ startedAt: "a", stoppedAt: "b" }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnreadableResponseError);
+      expect((err as UnreadableResponseError).status).toBe(201);
+      expect(toAgentMessage(err, { baseUrl: "x", isWrite: true })).toMatch(/may or may not have been applied/);
+      expect(requests).toHaveLength(1);
+    });
   });
 });

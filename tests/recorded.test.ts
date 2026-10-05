@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ZodType } from "zod";
 import { createTickrClient, type TickrApi } from "../src/api/client.js";
-import { ApiProblemError, toAgentMessage } from "../src/api/errors.js";
+import { ApiProblemError, toAgentMessage, UnreadableResponseError } from "../src/api/errors.js";
 import type { EntryDto, MeDto, ProjectDto, TagDto, TaskDto } from "../src/api/types.js";
 import {
   contextSchema, entrySchema, projectSchema, tagSchema, taskSchema, toContext, toEntry, toProject, toTag, toTask,
@@ -108,6 +108,13 @@ describe.each(LIST_CASES)("$name recording", (c) => {
     const all = await rows();
     expect(all.length).toBeGreaterThan(0);
     for (const row of all) expect(conforms(() => c.project(row), c.schema)).toBe(true);
+  });
+
+  it.each(c.required)("the client rejects a recording whose first row lacks %s", async (field) => {
+    const rec = structuredClone(load(c.name));
+    const list = (Array.isArray(rec.body) ? rec.body : (rec.body as { data: Row[] }).data) as Row[];
+    delete list[0]![field];
+    await expect(c.fetch(await clientServing(rec))).rejects.toBeInstanceOf(UnreadableResponseError);
   });
 
   it.each(c.required)("a row without %s is rejected (counter-test)", async (field) => {

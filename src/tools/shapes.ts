@@ -51,7 +51,7 @@ export function toEntry(dto: EntryDto, now: Date): Entry {
   const seconds = Math.max(0, running ? computed : dto.durationSeconds ?? computed);
   return {
     id: dto.id,
-    description: cleanDescription(dto.description),
+    description: dto.description === null ? "" : cleanDescription(dto.description),
     project_id: dto.projectId,
     project_name: cleanNullableName(dto.projectName),
     client_name: cleanNullableName(dto.clientName),

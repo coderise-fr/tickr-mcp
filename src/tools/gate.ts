@@ -38,8 +38,8 @@ export class KeyGate {
 
   async check(access: Access): Promise<void> {
     if (this.keyRole === undefined) {
-      // The client's typing is a cast, not a runtime check: validate before caching.
-      const raw: unknown = ((await fetchMe(this.api)) as { keyRole?: unknown }).keyRole;
+      // The client checks the rest of /me; keyRole is checked here, before caching.
+      const raw: unknown = (await fetchMe(this.api)).keyRole;
       if (typeof raw !== "string" || !KNOWN_ROLES.includes(raw as RoleCode)) throw new ToolError(BAD_ME_CONTRACT);
       this.keyRole = raw as RoleCode;
     }

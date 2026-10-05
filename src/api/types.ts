@@ -3,57 +3,8 @@
 
 export type RoleCode = "owner" | "admin" | "project_lead" | "analyst" | "workspace_user";
 
-export interface MeDto {
-  user: { id: string; displayName: string; email: string; timezone: string };
-  workspace: { id: string; name: string; timezone: string };
-  role: RoleCode;
-  keyRole: RoleCode;
-  serverTime: string;
-}
-
-export interface EntryDto {
-  id: string;
-  userId: string;
-  projectId: string | null;
-  projectName: string | null;
-  projectColor: string | null;
-  clientId: string | null;
-  clientName: string | null;
-  taskId: string | null;
-  description: string;
-  startedAt: string;
-  stoppedAt: string | null;
-  durationSeconds: number | null;
-  tagIds: string[];
-  createdAt: string;
-  updatedAt: string;
-  isBillable: boolean;
-}
-
-export interface ProjectDto {
-  id: string;
-  name: string;
-  isArchived: boolean;
-  clientId: string | null;
-  clientName: string | null;
-}
-
-export interface TaskDto {
-  id: string;
-  projectId: string;
-  name: string;
-  isArchived: boolean;
-}
-
-export interface TagDto {
-  id: string;
-  name: string;
-}
-
-export interface PagedDto<T> {
-  data: T[];
-  page: { next_cursor: string | null; has_more: boolean };
-}
+// Answers are validated at runtime by the schemas in dto.ts; their types are derived from them.
+export type { EntryDto, MeDto, PagedDto, ProjectDto, TagDto, TaskDto } from "./dto.js";
 
 export interface StartTimerBody {
   projectId?: string;
