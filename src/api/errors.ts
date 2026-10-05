@@ -13,6 +13,8 @@ export interface ProblemInit {
   correlationId?: string;
   fieldErrors: FieldError[];
   retryAfterSeconds?: number;
+  /** HTTP method of the failed request; set by the client. */
+  method?: string;
 }
 
 /** RFC 7807 response from the Tickr API. */
@@ -23,6 +25,7 @@ export class ApiProblemError extends Error {
   readonly correlationId?: string;
   readonly fieldErrors: FieldError[];
   readonly retryAfterSeconds?: number;
+  readonly method?: string;
 
   constructor(init: ProblemInit) {
     super(`Tickr API ${init.status} ${init.code}`);
@@ -33,19 +36,20 @@ export class ApiProblemError extends Error {
     this.correlationId = init.correlationId;
     this.fieldErrors = init.fieldErrors;
     this.retryAfterSeconds = init.retryAfterSeconds;
+    this.method = init.method;
   }
 }
 
 /** Non-API response (proxy page, empty body). Its body is never kept. */
 export class ApiHttpError extends Error {
-  constructor(readonly status: number) {
+  constructor(readonly status: number, readonly method?: string) {
     super(`HTTP ${status}`);
     this.name = "ApiHttpError";
   }
 }
 
 export class NetworkError extends Error {
-  constructor(readonly timedOut: boolean) {
+  constructor(readonly timedOut: boolean, readonly method?: string) {
     super(timedOut ? "timeout" : "network failure");
     this.name = "NetworkError";
   }
@@ -56,7 +60,7 @@ export class NetworkError extends Error {
  * cut) or did not match the expected shape. For a write, the change may have been applied.
  */
 export class UnreadableResponseError extends Error {
-  constructor(readonly status: number | undefined) {
+  constructor(readonly status: number | undefined, readonly method?: string) {
     super("unreadable response");
     this.name = "UnreadableResponseError";
   }
@@ -79,25 +83,34 @@ export function problemCode(type: unknown): string {
 const WRITE_HINT =
   " The change may or may not have been applied: check with list_entries or list_active_timers before trying again.";
 
+/**
+ * True when the failed request may have changed data: the tool is a write and the request
+ * that failed was not a read. An error without a method (raised after the requests, e.g. while
+ * checking the answer of a write that succeeded) counts as a write when the tool is one.
+ */
+function mayHaveWritten(err: { method?: string }, isWrite: boolean): boolean {
+  return isWrite && err.method !== "GET";
+}
+
 export function toAgentMessage(err: unknown, ctx: { baseUrl: string; isWrite: boolean }): string {
   if (err instanceof ToolError) return err.message;
   if (err instanceof NetworkError) {
     const base = err.timedOut
       ? `Tickr did not answer within 30 seconds at ${ctx.baseUrl}.`
       : `Tickr is unreachable at ${ctx.baseUrl}.`;
-    return base + (ctx.isWrite ? WRITE_HINT : "");
+    return base + (mayHaveWritten(err, ctx.isWrite) ? WRITE_HINT : "");
   }
   if (err instanceof UnreadableResponseError) {
     return `Tickr's answer${err.status !== undefined ? ` (HTTP ${err.status})` : ""} could not be read or did not have the expected shape.` +
-      (ctx.isWrite ? WRITE_HINT : "");
+      (mayHaveWritten(err, ctx.isWrite) ? WRITE_HINT : "");
   }
   if (err instanceof ApiHttpError) {
     return `Tickr answered HTTP ${err.status} with a non-API response (often a proxy or gateway error).` +
-      (err.status >= 500 && ctx.isWrite ? WRITE_HINT : "");
+      (err.status >= 500 && mayHaveWritten(err, ctx.isWrite) ? WRITE_HINT : "");
   }
   if (err instanceof ApiProblemError) {
     return problemMessage(err) +
-      (err.status >= 500 && ctx.isWrite ? WRITE_HINT : "") +
+      (err.status >= 500 && mayHaveWritten(err, ctx.isWrite) ? WRITE_HINT : "") +
       (err.correlationId ? ` (correlation id: ${cleanDetail(err.correlationId)})` : "");
   }
   // Anything else is a bug or an unexpected answer shape, possibly raised while projecting

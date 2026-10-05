@@ -76,4 +76,23 @@ describe("toAgentMessage", () => {
     expect(msg).not.toContain("\n");
     expect(msg).toContain("…[truncated]");
   });
+
+  it("adds the write hint only when the failed request was not a GET", () => {
+    const hint = /may or may not have been applied/;
+    for (const method of ["POST", "PATCH"]) {
+      expect(toAgentMessage(new NetworkError(false, method), write)).toMatch(hint);
+      expect(toAgentMessage(new UnreadableResponseError(201, method), write)).toMatch(hint);
+      expect(toAgentMessage(new ApiHttpError(502, method), write)).toMatch(hint);
+      expect(toAgentMessage(p(503, "service_unavailable", undefined, { method }), write)).toMatch(hint);
+    }
+    expect(toAgentMessage(new NetworkError(true, "GET"), write)).not.toMatch(hint);
+    expect(toAgentMessage(new UnreadableResponseError(200, "GET"), write)).not.toMatch(hint);
+    expect(toAgentMessage(new ApiHttpError(502, "GET"), write)).not.toMatch(hint);
+    expect(toAgentMessage(p(503, "service_unavailable", undefined, { method: "GET" }), write)).not.toMatch(hint);
+  });
+
+  it("keeps the write hint for errors without a request method on a write tool", () => {
+    expect(toAgentMessage(new UnreadableResponseError(undefined), write)).toMatch(/may or may not have been applied/);
+    expect(toAgentMessage(new NetworkError(false), write)).toMatch(/may or may not have been applied/);
+  });
 });

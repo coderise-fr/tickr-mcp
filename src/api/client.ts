@@ -67,7 +67,7 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
         });
       } catch (e) {
         const name = e instanceof Error ? e.name : "";
-        throw new NetworkError(name === "TimeoutError" || name === "AbortError");
+        throw new NetworkError(name === "TimeoutError" || name === "AbortError", method);
       }
 
       if (res.ok) {
@@ -78,13 +78,13 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
           body = res.status === 204 ? undefined : await res.json();
         } catch (e) {
           const name = e instanceof Error ? e.name : "";
-          if (name === "TimeoutError" || name === "AbortError") throw new NetworkError(true);
-          throw new UnreadableResponseError(res.status);
+          if (name === "TimeoutError" || name === "AbortError") throw new NetworkError(true, method);
+          throw new UnreadableResponseError(res.status, method);
         }
         // Checked here, so a missing or null field is reported as an unreadable answer
         // instead of breaking a projection later.
         const parsed = schema.safeParse(body);
-        if (!parsed.success) throw new UnreadableResponseError(res.status);
+        if (!parsed.success) throw new UnreadableResponseError(res.status, method);
         return parsed.data;
       }
 
@@ -95,7 +95,7 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
         await sleep(retryAfter * 1000);
         continue;
       }
-      throw await toError(res, retryAfter);
+      throw await toError(res, retryAfter, method);
     }
   }
 
@@ -123,20 +123,20 @@ function parseRetryAfter(value: string | null): number | undefined {
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
 }
 
-async function toError(res: Response, retryAfterSeconds: number | undefined): Promise<Error> {
+async function toError(res: Response, retryAfterSeconds: number | undefined, method: string): Promise<Error> {
   const contentType = res.headers.get("content-type") ?? "";
   if (!contentType.includes("json")) {
     await res.body?.cancel();
-    return new ApiHttpError(res.status);
+    return new ApiHttpError(res.status, method);
   }
   let parsed: unknown;
   try {
     parsed = await res.json();
   } catch {
-    return new ApiHttpError(res.status);
+    return new ApiHttpError(res.status, method);
   }
   if (typeof parsed !== "object" || parsed === null || typeof (parsed as { type?: unknown }).type !== "string") {
-    return new ApiHttpError(res.status);
+    return new ApiHttpError(res.status, method);
   }
   const body = parsed as { type: string; detail?: unknown; correlationId?: unknown; errors?: unknown };
   return new ApiProblemError({
@@ -146,6 +146,7 @@ async function toError(res: Response, retryAfterSeconds: number | undefined): Pr
     correlationId: typeof body.correlationId === "string" ? body.correlationId : undefined,
     fieldErrors: Array.isArray(body.errors) ? body.errors.filter(isFieldError) : [],
     retryAfterSeconds,
+    method,
   });
 }
 
