@@ -17,7 +17,13 @@ export const listActiveTimersTool = defineTool({
   run: async (_args, { api, now }) => ({ items: (await api.listActiveTimers()).map((e) => toEntry(e, now())) }),
 });
 
-function timerLimitMessage(visible: Entry[]): string {
+function timerLimitMessage(visible: Entry[] | undefined): string {
+  if (visible === undefined) {
+    return (
+      "Three timers are already running for this user (the limit counts every workspace). " +
+      "Stop one with stop_timer, then try again."
+    );
+  }
   const summary = visible.map((e) => ({ id: e.id, description: e.description, project_name: e.project_name, started_at: e.started_at }));
   return (
     "Three timers are already running for this user (the limit counts every workspace). " +
@@ -64,9 +70,14 @@ export const startTimerTool = defineTool({
       return { entry: toEntry(await api.startTimer(body), now()) };
     } catch (e) {
       if (e instanceof ApiProblemError && e.status === 409 && e.detail === "timer_limit_reached") {
-        const visible = await api.listActiveTimers().catch(() => []);
+        let visible: Entry[] | undefined;
+        try {
+          visible = (await api.listActiveTimers()).map((x) => toEntry(x, now()));
+        } catch {
+          visible = undefined;
+        }
         const correlation = e.correlationId ? ` (correlation id: ${cleanDetail(e.correlationId)})` : "";
-        throw new ToolError(timerLimitMessage(visible.map((x) => toEntry(x, now()))) + correlation);
+        throw new ToolError(timerLimitMessage(visible) + correlation);
       }
       throw e;
     }

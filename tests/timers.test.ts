@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { bodyPropertiesOf } from "../src/api/contract.js";
-import { ApiProblemError, ToolError } from "../src/api/errors.js";
+import { ApiProblemError, NetworkError, ToolError } from "../src/api/errors.js";
 import type { EntryDto } from "../src/api/types.js";
 import { KeyGate } from "../src/tools/gate.js";
 import { runTool } from "../src/tools/run.js";
@@ -73,6 +73,33 @@ describe("start_timer", () => {
     expect((err as Error).message).toContain(IDS.entry2);
     expect((err as Error).message).toMatch(/another workspace/);
     expect((err as Error).message).toContain("correlation id: corr-9");
+  });
+
+  it("hides the timer list when reading it fails (network or timeout)", async () => {
+    const api = fakeApi();
+    api.startTimer.mockRejectedValue(new ApiProblemError({
+      status: 409, code: "conflict", detail: "timer_limit_reached", correlationId: "corr-9", fieldErrors: [],
+    }));
+    api.listActiveTimers.mockRejectedValue(new NetworkError(true));
+
+    const err = await startTimerTool.run({}, { api, now: () => NOW }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ToolError);
+    expect((err as Error).message).toMatch(/Three timers/);
+    expect((err as Error).message).not.toMatch(/another workspace/);
+    expect((err as Error).message).not.toMatch(/Running in this workspace/);
+    expect((err as Error).message).toContain("correlation id: corr-9");
+  });
+
+  it("omits 'another workspace' when all three visible timers run in this workspace", async () => {
+    const api = fakeApi();
+    api.startTimer.mockRejectedValue(new ApiProblemError({
+      status: 409, code: "conflict", detail: "timer_limit_reached", fieldErrors: [],
+    }));
+    api.listActiveTimers.mockResolvedValue([running(IDS.entry), running(IDS.entry2), running("0199a000-0000-7000-8000-000000000003")]);
+
+    const err = await startTimerTool.run({}, { api, now: () => NOW }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ToolError);
+    expect((err as Error).message).not.toMatch(/another workspace/);
   });
 });
 
