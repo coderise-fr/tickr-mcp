@@ -168,6 +168,49 @@ describe("createTickrClient", () => {
     });
   });
 
+  describe("Retry-After given as an HTTP date", () => {
+    const CLOCK = Date.parse("2026-10-06T10:00:00Z");
+    const at = (offsetSeconds: number) => new Date(CLOCK + offsetSeconds * 1000).toUTCString();
+
+    async function withClock(responder: (req: RecordedRequest, i: number) => Reply) {
+      const srv = await startServer(responder);
+      close = srv.close;
+      const sleep = vi.fn(async () => {});
+      return { api: createTickrClient({ baseUrl: srv.baseUrl, apiKey: KEY, sleep, now: () => CLOCK }), requests: srv.requests, sleep };
+    }
+
+    it("retries once when the date is 2 seconds ahead", async () => {
+      const { api, requests, sleep } = await withClock((_r, i) =>
+        i === 0 ? problem(429, "rate_limited", "x", {}, { "retry-after": at(2) }) : json(200, entryFixture()));
+      await expect(api.startTimer({})).resolves.toBeDefined();
+      expect(requests).toHaveLength(2);
+      expect(sleep).toHaveBeenCalledWith(2000);
+    });
+
+    it("does not retry and gives the wait in seconds when the date is 60 seconds ahead", async () => {
+      const { api, requests, sleep } = await withClock(() => problem(429, "rate_limited", "x", {}, { "retry-after": at(60) }));
+      const err = await api.startTimer({}).catch((e: unknown) => e);
+      expect(toAgentMessage(err, { baseUrl: "x", isWrite: true })).toMatch(/^Tickr's rate limit is reached. Wait 60 seconds and try again./);
+      expect(requests).toHaveLength(1);
+      expect(sleep).not.toHaveBeenCalled();
+    });
+
+    it("rounds a date in the past to no wait, and retries at once", async () => {
+      const { api, requests, sleep } = await withClock((_r, i) =>
+        i === 0 ? proxyPage(429, { "retry-after": at(-30) }) : json(200, []));
+      await expect(api.listTags()).resolves.toEqual([]);
+      expect(requests).toHaveLength(2);
+      expect(sleep).toHaveBeenCalledWith(0);
+    });
+
+    it("ignores a value that is neither seconds nor a date", async () => {
+      const { api, requests } = await withClock(() => proxyPage(429, { "retry-after": "soon" }));
+      expect(toAgentMessage(await api.listTags().catch((e: unknown) => e), { baseUrl: "x", isWrite: false }))
+        .toBe("Tickr's rate limit is reached. Wait a minute and try again.");
+      expect(requests).toHaveLength(1);
+    });
+  });
+
   it("does not retry a long Retry-After", async () => {
     const { api, requests } = await setup(() => problem(429, "rate_limited", "x", {}, { "retry-after": "30" }));
     const err = await api.listTags().catch((e: unknown) => e);
@@ -347,3 +390,7 @@ describe("createTickrClient", () => {
     });
   });
 });
+
+function proxyPage(status: number, headers: Record<string, string> = {}): Reply {
+  return { status, headers: { "content-type": "text/html", ...headers }, body: "<html>proxy</html>" };
+}

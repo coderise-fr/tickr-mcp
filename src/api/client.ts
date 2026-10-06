@@ -30,6 +30,8 @@ export interface ClientOptions {
   apiKey: string;
   timeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** Current time in milliseconds, to read a Retry-After given as a date. */
+  now?: () => number;
 }
 
 type Query = Record<string, string | number | boolean | undefined>;
@@ -39,6 +41,7 @@ const MAX_RETRY_AFTER_SECONDS = 5;
 export function createTickrClient(opts: ClientOptions): TickrApi {
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = opts.now ?? Date.now;
 
   async function request<S extends z.ZodType>(
     method: string,
@@ -97,7 +100,7 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
         throw new ApiHttpError(res.status, method);
       }
 
-      const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
+      const retryAfter = parseRetryAfter(res.headers.get("retry-after"), now());
       // A 429 was not executed by the server, so one short retry is safe even for writes.
       if (res.status === 429 && attempt === 0 && retryAfter !== undefined && retryAfter <= MAX_RETRY_AFTER_SECONDS) {
         await res.body?.cancel();
@@ -126,10 +129,18 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
   };
 }
 
-function parseRetryAfter(value: string | null): number | undefined {
+/**
+ * Retry-After in seconds (RFC 9110 §10.2.3): delta-seconds, or an HTTP date turned into the
+ * whole seconds left from now (0 when it is past). Anything else is ignored.
+ */
+function parseRetryAfter(value: string | null, nowMs: number): number | undefined {
   if (value === null) return undefined;
   const seconds = Number(value);
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+  if (Number.isFinite(seconds)) return seconds >= 0 ? seconds : undefined;
+  // An HTTP date names its day and month ("Tue, 06 Oct 2026 10:00:02 GMT").
+  if (!/[A-Za-z]/.test(value)) return undefined;
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? undefined : Math.max(0, Math.ceil((date - nowMs) / 1000));
 }
 
 /** Media type without parameters, trimmed and lower-cased ("" when absent). */
