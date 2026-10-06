@@ -59,19 +59,39 @@ function decodeCursor(cursor: string): CursorPayload {
   }
 }
 
+const queryOf = (nameContains: string | undefined): string | null =>
+  nameContains !== undefined ? nameContains.toLowerCase() : null;
+
+function checkBinding(c: CursorPayload, f: FilterKey, q: string | null): void {
+  if (c.t !== f.t || c.p !== f.p || c.q !== q || c.a !== f.a) throw new ToolError(CURSOR_MISMATCH);
+}
+
+/**
+ * Checks a cursor before anything is downloaded: it must decode, and be bound to the same tool,
+ * project, name filter and archived filter. Returns the message for the agent, or undefined.
+ */
+export function cursorProblem(cursor: string, filterKey: FilterKey, nameContains: string | undefined): string | undefined {
+  try {
+    checkBinding(decodeCursor(cursor), filterKey, queryOf(nameContains));
+    return undefined;
+  } catch (e) {
+    if (e instanceof ToolError) return e.message;
+    throw e;
+  }
+}
+
 /** Local keyset paging over a list the API returns whole (projects, tasks, tags). */
 export function pageReferenceList<T extends { id: string; name: string }>(items: T[], req: PageRequest): PageResult<T> {
   if (items.length > MAX_REFERENCE_ITEMS) throw new ToolError(TOO_LARGE);
 
-  const q = req.nameContains !== undefined ? req.nameContains.toLowerCase() : null;
+  const q = queryOf(req.nameContains);
   const filtered = (q === null ? [...items] : items.filter((i) => i.name.toLowerCase().includes(q)))
     .sort((x, y) => compareKeys(keyOf(x), keyOf(y)));
 
   let start = 0;
   if (req.cursor !== undefined) {
     const c = decodeCursor(req.cursor);
-    const f = req.filterKey;
-    if (c.t !== f.t || c.p !== f.p || c.q !== q || c.a !== f.a) throw new ToolError(CURSOR_MISMATCH);
+    checkBinding(c, req.filterKey, q);
     const idx = filtered.findIndex((i) => compareKeys(keyOf(i), c.k) > 0);
     start = idx === -1 ? filtered.length : idx;
   }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { NetworkError, ToolError } from "../api/errors.js";
-import { pageReferenceList, TOO_LARGE } from "./paging.js";
+import { cursorProblem, pageReferenceList, TOO_LARGE, type FilterKey } from "./paging.js";
 import { projectSchema, tagSchema, taskSchema, toProject, toTag, toTask } from "./shapes.js";
 import { defineTool, id, READ_ANNOTATIONS, strictInput, UNTRUSTED } from "./tool.js";
 
@@ -20,6 +20,23 @@ const pageFields = {
   cursor: z.string().min(1).optional(),
 };
 
+interface PageArgs { name_contains?: string; cursor?: string }
+
+/**
+ * Input check of a list cursor, run by the SDK before the tool: an invalid cursor, or one issued
+ * for another list or other filters, is refused before any request is sent to Tickr.
+ */
+const cursorCheck = <A extends PageArgs>(filterKeyOf: (a: A) => FilterKey) => (a: A, ctx: z.RefinementCtx) => {
+  if (a.cursor === undefined) return;
+  const message = cursorProblem(a.cursor, filterKeyOf(a), a.name_contains);
+  if (message !== undefined) ctx.addIssue({ code: "custom", path: ["cursor"], message });
+};
+
+const projectsKey = (a: PageArgs & { include_archived?: boolean }): FilterKey => ({ t: "list_projects", p: null, a: a.include_archived ?? false });
+const tasksKey = (a: PageArgs & { project_id: string; include_archived?: boolean }): FilterKey =>
+  ({ t: "list_tasks", p: a.project_id, a: a.include_archived ?? false });
+const TAGS_KEY: FilterKey = { t: "list_tags", p: null, a: null };
+
 const listOf = <S extends z.ZodType>(item: S) =>
   z.strictObject({ items: z.array(item), total: z.int(), has_more: z.boolean(), next_cursor: z.string().nullable() });
 
@@ -32,13 +49,13 @@ export const listProjectsTool = defineTool({
   title: "List projects",
   description: `Lists the projects visible to the key's user, to find a project_id. ${PAGING} ${UNTRUSTED}`,
   access: "read",
-  inputSchema: strictInput({ include_archived: z.boolean().optional(), ...pageFields }),
+  inputSchema: strictInput({ include_archived: z.boolean().optional(), ...pageFields }).superRefine(cursorCheck(projectsKey)),
   outputSchema: listOf(projectSchema),
   annotations: READ_ANNOTATIONS,
   run: async (a, { api }) => {
     const archived = a.include_archived ?? false;
     const projects = (await fetchWhole(() => api.listProjects({ archived }))).map(toProject);
-    return pageReferenceList(projects, { nameContains: a.name_contains, filterKey: { t: "list_projects", p: null, a: archived }, limit: a.limit, cursor: a.cursor });
+    return pageReferenceList(projects, { nameContains: a.name_contains, filterKey: projectsKey(a), limit: a.limit, cursor: a.cursor });
   },
 });
 
@@ -47,14 +64,14 @@ export const listTasksTool = defineTool({
   title: "List tasks of a project",
   description: `Lists the tasks of one project (project_id from list_projects), to find a task_id. ${PAGING} ${UNTRUSTED}`,
   access: "read",
-  inputSchema: strictInput({ project_id: id, include_archived: z.boolean().optional(), ...pageFields }),
+  inputSchema: strictInput({ project_id: id, include_archived: z.boolean().optional(), ...pageFields }).superRefine(cursorCheck(tasksKey)),
   outputSchema: listOf(taskSchema),
   annotations: READ_ANNOTATIONS,
   run: async (a, { api }) => {
     const archived = a.include_archived ?? false;
     const tasks = (await fetchWhole(() => api.listTasks({ project_id: a.project_id, archived }))).map(toTask);
     return pageReferenceList(tasks, {
-      nameContains: a.name_contains, filterKey: { t: "list_tasks", p: a.project_id, a: archived }, limit: a.limit, cursor: a.cursor,
+      nameContains: a.name_contains, filterKey: tasksKey(a), limit: a.limit, cursor: a.cursor,
     });
   },
 });
@@ -64,11 +81,11 @@ export const listTagsTool = defineTool({
   title: "List tags",
   description: `Lists the workspace tags, to find tag ids. ${PAGING} ${UNTRUSTED}`,
   access: "read",
-  inputSchema: strictInput(pageFields),
+  inputSchema: strictInput(pageFields).superRefine(cursorCheck(() => TAGS_KEY)),
   outputSchema: listOf(tagSchema),
   annotations: READ_ANNOTATIONS,
   run: async (a, { api }) => {
     const tags = (await fetchWhole(() => api.listTags())).map(toTag);
-    return pageReferenceList(tags, { nameContains: a.name_contains, filterKey: { t: "list_tags", p: null, a: null }, limit: a.limit, cursor: a.cursor });
+    return pageReferenceList(tags, { nameContains: a.name_contains, filterKey: TAGS_KEY, limit: a.limit, cursor: a.cursor });
   },
 });

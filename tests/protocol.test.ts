@@ -5,7 +5,7 @@ import { createServer } from "../src/server.js";
 import { KeyGate } from "../src/tools/gate.js";
 import { MAX_INPUT_ELEMENTS } from "../src/tools/tool.js";
 import { fakeApi } from "./helpers/fakeApi.js";
-import { NOW } from "./helpers/fixtures.js";
+import { IDS, NOW } from "./helpers/fixtures.js";
 
 async function connect(api = fakeApi()) {
   const server = createServer({ api, gate: new KeyGate(api), now: () => NOW, baseUrl: "https://t.example.com", apiKey: "tkr_test" });
@@ -114,6 +114,18 @@ describe("MCP protocol", () => {
       expect(text.length).toBeLessThan(500);
       expect(text).not.toMatch(/WWWW|VVVV|‮/);
     });
+  });
+
+  it.each([
+    ["a malformed cursor", "not-a-cursor", /Invalid cursor/],
+    ["a cursor of another list", Buffer.from(JSON.stringify({ k: ["a", IDS.tag], q: null, t: "list_tags", p: null, a: null })).toString("base64url"), /another list/],
+  ])("rejects %s before any request to Tickr", async (_label, cursor, message) => {
+    const { client, api } = await connect();
+    const res = await client.callTool({ name: "list_projects", arguments: { cursor } });
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).toMatch(message);
+    expect(api.me).not.toHaveBeenCalled();
+    expect(api.listProjects).not.toHaveBeenCalled();
   });
 
   it("turns API failures into isError results", async () => {
