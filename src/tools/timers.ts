@@ -90,7 +90,8 @@ export const stopTimerTool = defineTool({
   description:
     "Stops a running timer. With entry_id, stops that timer. Without it: if exactly one timer runs it is stopped; " +
     "if none runs, status is none_running; if several run, nothing is stopped and status is multiple_running with " +
-    "the candidates, so ask the user which one. stopped_at defaults to now. " + UNTRUSTED,
+    "the candidates, so ask the user which one. stopped_at defaults to now; when given it needs an explicit offset " +
+    "(ISO 8601), and for relative times call get_context and use user.timezone. " + UNTRUSTED,
   access: "write",
   inputSchema: z.strictObject({ entry_id: id.optional(), stopped_at: offsetDateTime.optional() }),
   outputSchema: z.strictObject({

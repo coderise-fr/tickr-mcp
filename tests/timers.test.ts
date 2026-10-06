@@ -106,6 +106,11 @@ describe("start_timer", () => {
 describe("stop_timer", () => {
   const d = (api: ReturnType<typeof fakeApi>) => ({ api, now: () => NOW });
 
+  it("tells the agent that stopped_at needs an explicit offset and where to find the timezone", () => {
+    expect(stopTimerTool.description).toMatch(/stopped_at[^.]*explicit offset/);
+    expect(stopTimerTool.description).toMatch(/get_context.*user\.timezone/);
+  });
+
   it("stops the given id with the optional stop time", async () => {
     const api = fakeApi();
     const out = await stopTimerTool.run({ entry_id: IDS.entry, stopped_at: "2026-10-02T12:00:00+02:00" }, d(api));
