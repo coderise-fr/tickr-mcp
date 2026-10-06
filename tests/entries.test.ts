@@ -32,6 +32,14 @@ describe("list_entries", () => {
     expect(out.items).toHaveLength(1);
   });
 
+  it("declares the API cursor as a bounded base64 string in its output schema", () => {
+    const out = { items: [], has_more: true };
+    expect(listEntriesTool.outputSchema.safeParse({ ...out, next_cursor: "eyJrIjoiYSJ9+/=_-" }).success).toBe(true);
+    expect(listEntriesTool.outputSchema.safeParse({ ...out, next_cursor: null }).success).toBe(true);
+    expect(listEntriesTool.outputSchema.safeParse({ ...out, next_cursor: "c".repeat(1025) }).success).toBe(false);
+    expect(listEntriesTool.outputSchema.safeParse({ ...out, next_cursor: "a\u0007b" }).success).toBe(false);
+  });
+
   it("validates limit and the from/to order", () => {
     expect(listEntriesTool.inputSchema.safeParse({ limit: 201 }).success).toBe(false);
     expect(listEntriesTool.inputSchema.safeParse({ from: STOP, to: START }).success).toBe(false);

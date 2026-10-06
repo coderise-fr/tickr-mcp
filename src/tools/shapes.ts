@@ -1,35 +1,36 @@
 import { z } from "zod";
+import { apiDateTime, apiId } from "../api/dto.js";
 import { ROLE_CODES, type EntryDto, type MeDto, type ProjectDto, type RoleCode, type TagDto, type TaskDto } from "../api/types.js";
 import { cleanDescription, cleanName, cleanNullableName } from "../sanitize.js";
 
 // Allow-listed result shapes. Strict: any extra field is a bug.
 export const entrySchema = z.strictObject({
-  id: z.string(),
+  id: apiId,
   description: z.string(),
-  project_id: z.string().nullable(),
+  project_id: apiId.nullable(),
   project_name: z.string().nullable(),
   client_name: z.string().nullable(),
-  task_id: z.string().nullable(),
-  tag_ids: z.array(z.string()),
-  started_at: z.string(),
-  stopped_at: z.string().nullable(),
+  task_id: apiId.nullable(),
+  tag_ids: z.array(apiId),
+  started_at: apiDateTime,
+  stopped_at: apiDateTime.nullable(),
   duration_seconds: z.number().int().nonnegative(),
   duration: z.string(),
   billable: z.boolean(),
   running: z.boolean(),
 });
 export const projectSchema = z.strictObject({
-  id: z.string(), name: z.string(), client_name: z.string().nullable(), archived: z.boolean(),
+  id: apiId, name: z.string(), client_name: z.string().nullable(), archived: z.boolean(),
 });
 export const taskSchema = z.strictObject({
-  id: z.string(), project_id: z.string(), name: z.string(), archived: z.boolean(),
+  id: apiId, project_id: apiId, name: z.string(), archived: z.boolean(),
 });
-export const tagSchema = z.strictObject({ id: z.string(), name: z.string() });
+export const tagSchema = z.strictObject({ id: apiId, name: z.string() });
 export const contextSchema = z.strictObject({
-  user: z.strictObject({ id: z.string(), display_name: z.string(), email: z.string(), timezone: z.string() }),
-  workspace: z.strictObject({ id: z.string(), name: z.string(), timezone: z.string() }),
+  user: z.strictObject({ id: apiId, display_name: z.string(), email: z.string(), timezone: z.string() }),
+  workspace: z.strictObject({ id: apiId, name: z.string(), timezone: z.string() }),
   role: z.enum(ROLE_CODES),
-  server_time: z.string(),
+  server_time: apiDateTime,
 });
 
 export type Entry = z.infer<typeof entrySchema>;

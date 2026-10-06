@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { apiCursor } from "../api/dto.js";
 import { entrySchema, toEntry } from "./shapes.js";
 import { compact, defineTool, id, isAfter, offsetDateTime, READ_ANNOTATIONS, toUtc, UNTRUSTED } from "./tool.js";
 
@@ -27,7 +28,7 @@ export const listEntriesTool = defineTool({
       error: "to must be after from.",
       path: ["to"],
     }),
-  outputSchema: z.strictObject({ items: z.array(entrySchema), has_more: z.boolean(), next_cursor: z.string().nullable() }),
+  outputSchema: z.strictObject({ items: z.array(entrySchema), has_more: z.boolean(), next_cursor: apiCursor.nullable() }),
   annotations: READ_ANNOTATIONS,
   run: async (a, { api, now }) => {
     const res = await api.listEntries(compact({

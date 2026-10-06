@@ -7,7 +7,7 @@ import { BAD_ME_CONTRACT, KeyGate } from "../src/tools/gate.js";
 import { runTool } from "../src/tools/run.js";
 import { toEntry } from "../src/tools/shapes.js";
 import { listTagsTool } from "../src/tools/reference.js";
-import { entryFixture, meFixture, NOW } from "./helpers/fixtures.js";
+import { entryFixture, IDS, meFixture, NOW, projectFixture, tagFixture, taskFixture } from "./helpers/fixtures.js";
 import { json, problem, startServer, type Reply, type RecordedRequest } from "./helpers/httpServer.js";
 
 const KEY = "tkr_secret_value";
@@ -256,6 +256,49 @@ describe("createTickrClient", () => {
       expect(err).toBeInstanceOf(UnreadableResponseError);
       expect((err as UnreadableResponseError).status).toBe(200);
       expect(toAgentMessage(err, { baseUrl: "x", isWrite: false })).toMatch(/HTTP 200.*could not be read or did not have the expected shape/);
+    });
+
+    const page = (data: unknown[], next_cursor: string | null = null) => ({ data, page: { next_cursor, has_more: next_cursor !== null } });
+
+    it.each([
+      ["a 5001-character entry id", page([entryFixture({ id: "\u0007" + "x".repeat(5000) })])],
+      ["a project id that is not a UUID", page([entryFixture({ projectId: "p1" })])],
+      ["a tag id that is not a UUID", page([entryFixture({ tagIds: ["meeting"] })])],
+      ["a startedAt that is not a datetime, with a duration", page([entryFixture({ startedAt: "not-a-date‮", durationSeconds: 123 })])],
+      ["a stoppedAt without offset", page([entryFixture({ stoppedAt: "2026-10-02T09:30:00" })])],
+      ["a 5001-character cursor", page([entryFixture()], "\u0007" + "c".repeat(5000))],
+      ["a cursor with characters outside base64", page([entryFixture()], "abc def")],
+    ])("rejects an entry page with %s as unreadable", async (_label, body) => {
+      const { api } = await setup(() => json(200, body));
+      const err = await api.listEntries({ limit: 50 }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnreadableResponseError);
+      expect(toAgentMessage(err, { baseUrl: "x", isWrite: false })).toMatch(/could not be read or did not have the expected shape/);
+    });
+
+    it("rejects /me with a serverTime that is not a datetime, or a user id that is not a UUID", async () => {
+      const { api } = await setup((_r, i) => json(200, i === 0
+        ? meFixture({ serverTime: "yesterday" })
+        : { ...meFixture(), user: { ...meFixture().user, id: "u1" } }));
+      await expect(api.me()).rejects.toBeInstanceOf(UnreadableResponseError);
+      await expect(api.me()).rejects.toBeInstanceOf(UnreadableResponseError);
+    });
+
+    it("rejects a project, task or tag whose id is not a UUID", async () => {
+      const { api } = await setup((r) => json(200, [
+        r.url.startsWith("/api/v1/projects") ? projectFixture({ id: "p1" })
+          : r.url.startsWith("/api/v1/tasks") ? taskFixture({ projectId: "p1" })
+          : tagFixture({ id: "t1" }),
+      ]));
+      await expect(api.listProjects({ archived: false })).rejects.toBeInstanceOf(UnreadableResponseError);
+      await expect(api.listTasks({ project_id: IDS.projectA, archived: false })).rejects.toBeInstanceOf(UnreadableResponseError);
+      await expect(api.listTags()).rejects.toBeInstanceOf(UnreadableResponseError);
+    });
+
+    it("accepts 7-digit fractions, +00:00 and Z offsets, and a base64 cursor", async () => {
+      const { api } = await setup(() => json(200, page([
+        entryFixture({ startedAt: "2026-10-02T08:00:00.1234567+00:00", stoppedAt: "2026-10-02T09:30:00Z" }),
+      ], "eyJrIjpbImEiLCJiIl19+/=_-")));
+      await expect(api.listEntries({ limit: 50 })).resolves.toMatchObject({ page: { has_more: true } });
     });
 
     it("rejects /me answering 200 null as unreadable", async () => {

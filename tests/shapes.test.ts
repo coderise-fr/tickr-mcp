@@ -54,6 +54,24 @@ describe("projections keep only allow-listed fields", () => {
   it("output schemas reject extra fields", () => {
     expect(() => tagSchema.parse({ id: IDS.tag, name: "x", usage_count: 1 })).toThrow();
   });
+
+  it("output schemas hold ids to UUIDs and datetimes to offset datetimes", () => {
+    const e = toEntry(entryFixture(), NOW);
+    for (const bad of [
+      { id: "x".repeat(5000) }, { project_id: "p1" }, { task_id: "t1" }, { tag_ids: ["meeting"] },
+      { started_at: "not-a-date" }, { stopped_at: "2026-10-02T09:30:00" },
+    ]) {
+      expect(entrySchema.safeParse({ ...e, ...bad }).success, JSON.stringify(bad).slice(0, 40)).toBe(false);
+    }
+    expect(entrySchema.safeParse({ ...e, stopped_at: null }).success).toBe(true);
+    expect(projectSchema.safeParse({ ...toProject(projectFixture()), id: "p1" }).success).toBe(false);
+    expect(taskSchema.safeParse({ ...toTask(taskFixture()), project_id: "p1" }).success).toBe(false);
+    expect(tagSchema.safeParse({ ...toTag(tagFixture()), id: "t1" }).success).toBe(false);
+    const c = toContext(meFixture());
+    expect(contextSchema.safeParse({ ...c, server_time: "yesterday" }).success).toBe(false);
+    expect(contextSchema.safeParse({ ...c, user: { ...c.user, id: "u1" } }).success).toBe(false);
+    expect(contextSchema.safeParse({ ...c, workspace: { ...c.workspace, id: "w1" } }).success).toBe(false);
+  });
 });
 
 describe("running timers", () => {
