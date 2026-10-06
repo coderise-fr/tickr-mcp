@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { apiCursor } from "../api/dto.js";
+import type { CreateEntryBody, ListEntriesQuery, UpdateEntryBody } from "../api/types.js";
 import { entrySchema, toEntry } from "./shapes.js";
 import { compact, DATES, defineTool, id, isAfter, offsetDateTime, READ_ANNOTATIONS, strictInput, toUtc, UNTRUSTED } from "./tool.js";
 
@@ -29,7 +30,7 @@ export const listEntriesTool = defineTool({
     const res = await api.listEntries(compact({
       from: toUtc(a.from), to: toUtc(a.to), project_id: a.project_id, task_id: a.task_id, tag_id: a.tag_id,
       cursor: a.cursor, limit: a.limit ?? 50,
-    }));
+    } satisfies ListEntriesQuery));
     return {
       items: res.data.map((e) => toEntry(e, now())),
       has_more: res.page.has_more,
@@ -67,7 +68,7 @@ export const createEntryTool = defineTool({
       description: a.description,
       tagIds: a.tag_ids,
       isBillable: a.billable,
-    });
+    } satisfies CreateEntryBody);
     return { entry: toEntry(await api.createEntry(body), now()) };
   },
 });
@@ -130,7 +131,7 @@ export const updateEntryTool = defineTool({
       stoppedAt: toUtc(a.stopped_at),
       tagIds: a.tag_ids,
       isBillable: a.billable,
-    });
+    } satisfies UpdateEntryBody);
     return { entry: toEntry(await api.updateEntry(a.entry_id, body), now()) };
   },
 });

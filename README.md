@@ -72,7 +72,8 @@ There is no delete tool.
 - Project, task, tag and client names and entry descriptions are written by
   other workspace members. The server marks them as data, bounds and cleans
   them, but an agent can still be misled by text shaped like instructions.
-  With a Workspace-user key, the worst case is limited to your own entries.
+  With a Workspace-user key, what this server can change is limited to your
+  own entries; it cannot limit the other tools your agent has in the client.
   Review what your agent proposes to change.
 
 ## Troubleshooting

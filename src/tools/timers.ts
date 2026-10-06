@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ApiProblemError, ToolError } from "../api/errors.js";
+import type { StartTimerBody, StopTimerBody } from "../api/types.js";
 import { cleanDetail } from "../sanitize.js";
 import { entrySchema, toEntry, type Entry } from "./shapes.js";
 import { compact, DATES, defineTool, id, offsetDateTime, READ_ANNOTATIONS, strictInput, toUtc, UNTRUSTED } from "./tool.js";
@@ -63,7 +64,7 @@ export const startTimerTool = defineTool({
       tagIds: a.tag_ids,
       startedAt: toUtc(a.started_at),
       isBillable: a.billable,
-    });
+    } satisfies StartTimerBody);
     try {
       return { entry: toEntry(await api.startTimer(body), now()) };
     } catch (e) {
@@ -99,7 +100,7 @@ export const stopTimerTool = defineTool({
   }),
   annotations: WRITE,
   run: async (a, { api, now }) => {
-    const body = compact({ stoppedAt: toUtc(a.stopped_at) });
+    const body = compact({ stoppedAt: toUtc(a.stopped_at) } satisfies StopTimerBody);
     if (a.entry_id !== undefined) {
       return { status: "stopped" as const, entry: toEntry(await api.stopTimer(a.entry_id, body), now()) };
     }
