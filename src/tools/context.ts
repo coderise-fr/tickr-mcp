@@ -1,7 +1,6 @@
-import { z } from "zod";
 import { fetchMe } from "./gate.js";
 import { contextSchema, toContext } from "./shapes.js";
-import { defineTool, READ_ANNOTATIONS, UNTRUSTED } from "./tool.js";
+import { defineTool, READ_ANNOTATIONS, strictInput, UNTRUSTED } from "./tool.js";
 
 export const getContextTool = defineTool({
   name: "get_context",
@@ -11,7 +10,7 @@ export const getContextTool = defineTool({
     "server's current time. Call it first whenever the user speaks in relative dates or times (today, yesterday, " +
     "this morning): interpret them in user.timezone and send datetimes with an explicit offset. " + UNTRUSTED,
   access: "read",
-  inputSchema: z.strictObject({}),
+  inputSchema: strictInput({}),
   outputSchema: contextSchema,
   annotations: READ_ANNOTATIONS,
   run: async (_args, { api }) => toContext(await fetchMe(api)),

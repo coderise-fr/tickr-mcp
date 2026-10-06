@@ -39,6 +39,29 @@ export const id = z.guid({ error: "Expected a Tickr id (UUID) obtained from a li
 
 export const READ_ANNOTATIONS: ToolAnnotations = { readOnlyHint: true, openWorldHint: true };
 
+/**
+ * Most array elements and object members one call's arguments may hold, checked by the MCP SDK
+ * before validation. It bounds the number of validation issues, so the error text stays short.
+ */
+export const MAX_INPUT_ELEMENTS = 100;
+
+/**
+ * Input schema of a tool: an object that refuses unknown parameters. The SDK validates arguments
+ * before the tool runs and returns the issue messages as is, so no message may echo caller text:
+ * unknown parameters are counted, never named, and the allowed (our own) names are listed.
+ */
+export function strictInput<S extends z.core.$ZodLooseShape>(shape: S) {
+  const allowed = Object.keys(shape);
+  return z.strictObject(shape, {
+    error: (iss) => {
+      if (iss.code !== "unrecognized_keys") return undefined;
+      const n = iss.keys.length;
+      return `${n} unknown parameter${n === 1 ? "" : "s"}. ` +
+        (allowed.length > 0 ? `Allowed parameters: ${allowed.join(", ")}.` : "This tool takes no parameters.");
+    },
+  });
+}
+
 /** Drops undefined properties so request bodies hold only what the caller set. */
 export function compact<T extends object>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as T;

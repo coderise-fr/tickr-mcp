@@ -2,7 +2,7 @@ import { z } from "zod";
 import { NetworkError, ToolError } from "../api/errors.js";
 import { pageReferenceList, TOO_LARGE } from "./paging.js";
 import { projectSchema, tagSchema, taskSchema, toProject, toTag, toTask } from "./shapes.js";
-import { defineTool, id, READ_ANNOTATIONS, UNTRUSTED } from "./tool.js";
+import { defineTool, id, READ_ANNOTATIONS, strictInput, UNTRUSTED } from "./tool.js";
 
 /** A whole-list download that times out gets the dedicated "too large" message. */
 async function fetchWhole<T>(load: () => Promise<T[]>): Promise<T[]> {
@@ -32,7 +32,7 @@ export const listProjectsTool = defineTool({
   title: "List projects",
   description: `Lists the projects visible to the key's user, to find a project_id. ${PAGING} ${UNTRUSTED}`,
   access: "read",
-  inputSchema: z.strictObject({ include_archived: z.boolean().optional(), ...pageFields }),
+  inputSchema: strictInput({ include_archived: z.boolean().optional(), ...pageFields }),
   outputSchema: listOf(projectSchema),
   annotations: READ_ANNOTATIONS,
   run: async (a, { api }) => {
@@ -47,7 +47,7 @@ export const listTasksTool = defineTool({
   title: "List tasks of a project",
   description: `Lists the tasks of one project (project_id from list_projects), to find a task_id. ${PAGING} ${UNTRUSTED}`,
   access: "read",
-  inputSchema: z.strictObject({ project_id: id, include_archived: z.boolean().optional(), ...pageFields }),
+  inputSchema: strictInput({ project_id: id, include_archived: z.boolean().optional(), ...pageFields }),
   outputSchema: listOf(taskSchema),
   annotations: READ_ANNOTATIONS,
   run: async (a, { api }) => {
@@ -64,7 +64,7 @@ export const listTagsTool = defineTool({
   title: "List tags",
   description: `Lists the workspace tags, to find tag ids. ${PAGING} ${UNTRUSTED}`,
   access: "read",
-  inputSchema: z.strictObject(pageFields),
+  inputSchema: strictInput(pageFields),
   outputSchema: listOf(tagSchema),
   annotations: READ_ANNOTATIONS,
   run: async (a, { api }) => {

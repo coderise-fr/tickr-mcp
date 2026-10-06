@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { apiCursor } from "../api/dto.js";
 import { entrySchema, toEntry } from "./shapes.js";
-import { compact, defineTool, id, isAfter, offsetDateTime, READ_ANNOTATIONS, toUtc, UNTRUSTED } from "./tool.js";
+import { compact, defineTool, id, isAfter, offsetDateTime, READ_ANNOTATIONS, strictInput, toUtc, UNTRUSTED } from "./tool.js";
 
 const DATES =
   "Datetimes need an explicit offset; for relative dates call get_context and interpret them in user.timezone. " +
@@ -14,16 +14,15 @@ export const listEntriesTool = defineTool({
     "Lists the key owner's own time entries, newest first, optionally between from (inclusive) and to (exclusive) " +
     `on start time, and filtered by project, task or tag id. Follow next_cursor while has_more is true. ${DATES} ${UNTRUSTED}`,
   access: "read",
-  inputSchema: z
-    .strictObject({
-      from: offsetDateTime.optional(),
-      to: offsetDateTime.optional(),
-      project_id: id.optional(),
-      task_id: id.optional(),
-      tag_id: id.optional(),
-      limit: z.int().min(1).max(200).optional(),
-      cursor: z.string().min(1).optional(),
-    })
+  inputSchema: strictInput({
+    from: offsetDateTime.optional(),
+    to: offsetDateTime.optional(),
+    project_id: id.optional(),
+    task_id: id.optional(),
+    tag_id: id.optional(),
+    limit: z.int().min(1).max(200).optional(),
+    cursor: z.string().min(1).optional(),
+  })
     .refine((a) => a.from === undefined || a.to === undefined || isAfter(a.to, a.from), {
       error: "to must be after from.",
       path: ["to"],
@@ -50,16 +49,15 @@ export const createEntryTool = defineTool({
     "Creates a finished time entry for the key's user (use start_timer for a running one). task_id requires " +
     `project_id and must belong to it. Not idempotent: if the call fails without an answer, check list_entries before retrying. ${DATES} ${UNTRUSTED}`,
   access: "write",
-  inputSchema: z
-    .strictObject({
-      started_at: offsetDateTime,
-      stopped_at: offsetDateTime,
-      project_id: id.optional(),
-      task_id: id.optional(),
-      description: z.string().optional(),
-      tag_ids: z.array(id).optional(),
-      billable: z.boolean().optional(),
-    })
+  inputSchema: strictInput({
+    started_at: offsetDateTime,
+    stopped_at: offsetDateTime,
+    project_id: id.optional(),
+    task_id: id.optional(),
+    description: z.string().optional(),
+    tag_ids: z.array(id).optional(),
+    billable: z.boolean().optional(),
+  })
     .refine((a) => isAfter(a.stopped_at, a.started_at), { error: "stopped_at must be after started_at.", path: ["stopped_at"] })
     .refine((a) => a.task_id === undefined || a.project_id !== undefined, { error: "task_id requires project_id.", path: ["task_id"] }),
   outputSchema: z.strictObject({ entry: entrySchema }),
@@ -78,19 +76,18 @@ export const createEntryTool = defineTool({
   },
 });
 
-const updateInput = z
-  .strictObject({
-    entry_id: id,
-    project_id: id.optional(),
-    task_id: id.optional(),
-    clear_project: z.boolean().optional(),
-    clear_task: z.boolean().optional(),
-    description: z.string().optional(),
-    started_at: offsetDateTime.optional(),
-    stopped_at: offsetDateTime.optional(),
-    tag_ids: z.array(id).optional(),
-    billable: z.boolean().optional(),
-  })
+const updateInput = strictInput({
+  entry_id: id,
+  project_id: id.optional(),
+  task_id: id.optional(),
+  clear_project: z.boolean().optional(),
+  clear_task: z.boolean().optional(),
+  description: z.string().optional(),
+  started_at: offsetDateTime.optional(),
+  stopped_at: offsetDateTime.optional(),
+  tag_ids: z.array(id).optional(),
+  billable: z.boolean().optional(),
+})
   .superRefine((a, ctx) => {
     if (a.clear_project && a.project_id !== undefined) {
       ctx.addIssue({ code: "custom", path: ["clear_project"], message: "clear_project and project_id cannot be combined." });

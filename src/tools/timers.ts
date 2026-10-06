@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ApiProblemError, ToolError } from "../api/errors.js";
 import { cleanDetail } from "../sanitize.js";
 import { entrySchema, toEntry, type Entry } from "./shapes.js";
-import { compact, defineTool, id, offsetDateTime, READ_ANNOTATIONS, toUtc, UNTRUSTED } from "./tool.js";
+import { compact, defineTool, id, offsetDateTime, READ_ANNOTATIONS, strictInput, toUtc, UNTRUSTED } from "./tool.js";
 
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
 
@@ -11,7 +11,7 @@ export const listActiveTimersTool = defineTool({
   title: "List running timers",
   description: `Lists the timers currently running for the key's user in this workspace. ${UNTRUSTED}`,
   access: "read",
-  inputSchema: z.strictObject({}),
+  inputSchema: strictInput({}),
   outputSchema: z.strictObject({ items: z.array(entrySchema) }),
   annotations: READ_ANNOTATIONS,
   run: async (_args, { api, now }) => ({ items: (await api.listActiveTimers()).map((e) => toEntry(e, now())) }),
@@ -42,15 +42,14 @@ export const startTimerTool = defineTool({
     "defaults to now; for relative times call get_context and use user.timezone. Up to three timers may run at once. " +
     UNTRUSTED,
   access: "write",
-  inputSchema: z
-    .strictObject({
-      project_id: id.optional(),
-      task_id: id.optional(),
-      description: z.string().optional(),
-      tag_ids: z.array(id).optional(),
-      billable: z.boolean().optional(),
-      started_at: offsetDateTime.optional(),
-    })
+  inputSchema: strictInput({
+    project_id: id.optional(),
+    task_id: id.optional(),
+    description: z.string().optional(),
+    tag_ids: z.array(id).optional(),
+    billable: z.boolean().optional(),
+    started_at: offsetDateTime.optional(),
+  })
     .refine((a) => a.task_id === undefined || a.project_id !== undefined, {
       error: "task_id requires project_id.",
       path: ["task_id"],
@@ -93,7 +92,7 @@ export const stopTimerTool = defineTool({
     "the candidates, so ask the user which one. stopped_at defaults to now; when given it needs an explicit offset " +
     "(ISO 8601), and for relative times call get_context and use user.timezone. " + UNTRUSTED,
   access: "write",
-  inputSchema: z.strictObject({ entry_id: id.optional(), stopped_at: offsetDateTime.optional() }),
+  inputSchema: strictInput({ entry_id: id.optional(), stopped_at: offsetDateTime.optional() }),
   outputSchema: z.strictObject({
     status: z.enum(["stopped", "none_running", "multiple_running"]),
     entry: entrySchema.optional(),
