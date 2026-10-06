@@ -8,6 +8,7 @@ const INVISIBLE = [
   "\u2060", "\u2061", "\u2062", "\u2063", "\u2064",
   "\u2066", "\u2067", "\u2068", "\u2069",
   "\uFEFF",
+  "\u061C", "\u180E",
 ];
 
 describe("invisible formatting characters", () => {
