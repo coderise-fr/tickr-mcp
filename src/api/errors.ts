@@ -42,7 +42,7 @@ export class ApiProblemError extends Error {
 
 /** Non-API response (proxy page, empty body). Its body is never kept. */
 export class ApiHttpError extends Error {
-  constructor(readonly status: number, readonly method?: string) {
+  constructor(readonly status: number, readonly method?: string, readonly retryAfterSeconds?: number) {
     super(`HTTP ${status}`);
     this.name = "ApiHttpError";
   }
@@ -107,6 +107,7 @@ export function toAgentMessage(err: unknown, ctx: { baseUrl: string; isWrite: bo
       (mayHaveWritten(err, ctx.isWrite) ? WRITE_HINT : "");
   }
   if (err instanceof ApiHttpError) {
+    if (err.status === 429) return rateLimitMessage(err.retryAfterSeconds);
     return `Tickr answered HTTP ${err.status} with a non-API response (often a proxy or gateway error).` +
       (err.status >= 500 && mayHaveWritten(err, ctx.isWrite) ? WRITE_HINT : "");
   }
@@ -118,6 +119,13 @@ export function toAgentMessage(err: unknown, ctx: { baseUrl: string; isWrite: bo
   // Anything else is a bug or an unexpected answer shape, possibly raised while projecting
   // the result of a write that already succeeded: keep the "check before retrying" hint.
   return "Unexpected error in the Tickr MCP server." + (ctx.isWrite ? WRITE_HINT : "");
+}
+
+function rateLimitMessage(retryAfterSeconds: number | undefined): string {
+  const wait = retryAfterSeconds === undefined
+    ? "a minute"
+    : `${retryAfterSeconds} second${retryAfterSeconds === 1 ? "" : "s"}`;
+  return `Tickr's rate limit is reached. Wait ${wait} and try again.`;
 }
 
 function problemMessage(e: ApiProblemError): string {
@@ -151,12 +159,7 @@ function problemMessage(e: ApiProblemError): string {
       return `Tickr rejected the input: ${fields || detail || "validation failed"}.`;
     }
     case 429:
-    {
-      const wait = e.retryAfterSeconds === undefined
-        ? "a minute"
-        : `${e.retryAfterSeconds} second${e.retryAfterSeconds === 1 ? "" : "s"}`;
-      return `Tickr's rate limit is reached. Wait ${wait} and try again.`;
-    }
+      return rateLimitMessage(e.retryAfterSeconds);
     default:
       if (e.status >= 500) return `Tickr returned a server error (HTTP ${e.status}).`;
       return `Tickr returned HTTP ${e.status} (${cleanDetail(e.code)}${detail ? `: ${detail}` : ""}).`;

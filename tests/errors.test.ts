@@ -70,6 +70,17 @@ describe("toAgentMessage", () => {
     expect(toAgentMessage(new UnreadableResponseError(undefined), ctx)).not.toMatch(/applied/);
   });
 
+  it("reports a non-API 429 as a rate limit, without the write hint, like a problem 429", () => {
+    for (const method of ["GET", "POST"]) {
+      const problem = toAgentMessage(p(429, "rate_limited", undefined, { retryAfterSeconds: 30, method }), write);
+      expect(toAgentMessage(new ApiHttpError(429, method, 30), write)).toBe("Tickr's rate limit is reached. Wait 30 seconds and try again.");
+      expect(problem).toMatch(/^Tickr's rate limit is reached\. Wait 30 seconds and try again\./);
+    }
+    expect(toAgentMessage(new ApiHttpError(429, "POST", 1), write)).toBe("Tickr's rate limit is reached. Wait 1 second and try again.");
+    expect(toAgentMessage(new ApiHttpError(429, "POST"), write)).toBe("Tickr's rate limit is reached. Wait a minute and try again.");
+    expect(toAgentMessage(new ApiHttpError(429, "POST", 30), write)).not.toMatch(/applied|proxy/);
+  });
+
   it("reports a non-API response by status only", () => {
     expect(toAgentMessage(new ApiHttpError(502), ctx)).toBe(
       "Tickr answered HTTP 502 with a non-API response (often a proxy or gateway error).",

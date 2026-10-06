@@ -103,6 +103,44 @@ describe("createTickrClient", () => {
     expect(sleep).toHaveBeenCalledWith(2000);
   });
 
+  describe("429 whose body is not an API problem", () => {
+    const proxy429 = (headers: Record<string, string> = {}) => ({
+      status: 429,
+      headers: { "content-type": "text/html", ...headers },
+      body: "<html>secret proxy page</html>",
+    });
+    const ask = (api: Awaited<ReturnType<typeof setup>>["api"]) => api.startTimer({}).catch((e: unknown) => e);
+
+    it("reports the rate limit and the wait time, never the body, after one request", async () => {
+      const { api, requests } = await setup(() => proxy429({ "retry-after": "30" }));
+      const err = await ask(api);
+      const msg = toAgentMessage(err, { baseUrl: "x", isWrite: true });
+      expect(msg).toBe("Tickr's rate limit is reached. Wait 30 seconds and try again.");
+      expect(JSON.stringify(err)).not.toContain("secret proxy page");
+      expect(requests).toHaveLength(1);
+    });
+
+    it("retries once after a short Retry-After, then succeeds", async () => {
+      const { api, requests, sleep } = await setup((_r, i) => (i === 0 ? proxy429({ "retry-after": "2" }) : json(200, entryFixture())));
+      await expect(api.startTimer({})).resolves.toBeDefined();
+      expect(requests).toHaveLength(2);
+      expect(sleep).toHaveBeenCalledWith(2000);
+    });
+
+    it("asks to wait a minute without a usable Retry-After", async () => {
+      const { api, requests } = await setup(() => proxy429());
+      expect(toAgentMessage(await ask(api), { baseUrl: "x", isWrite: true }))
+        .toBe("Tickr's rate limit is reached. Wait a minute and try again.");
+      expect(requests).toHaveLength(1);
+    });
+
+    it("reports a malformed JSON 429 the same way", async () => {
+      const { api } = await setup(() => ({ status: 429, headers: { "content-type": "application/json", "retry-after": "30" }, body: "{oops" }));
+      expect(toAgentMessage(await ask(api), { baseUrl: "x", isWrite: true }))
+        .toBe("Tickr's rate limit is reached. Wait 30 seconds and try again.");
+    });
+  });
+
   it("does not retry a long Retry-After", async () => {
     const { api, requests } = await setup(() => problem(429, "rate_limited", "x", {}, { "retry-after": "30" }));
     const err = await api.listTags().catch((e: unknown) => e);

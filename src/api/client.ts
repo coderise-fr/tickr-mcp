@@ -134,16 +134,16 @@ async function toError(res: Response, retryAfterSeconds: number | undefined, met
   const contentType = res.headers.get("content-type") ?? "";
   if (!contentType.includes("json")) {
     await res.body?.cancel();
-    return new ApiHttpError(res.status, method);
+    return new ApiHttpError(res.status, method, retryAfterSeconds);
   }
   let parsed: unknown;
   try {
     parsed = await res.json();
   } catch {
-    return new ApiHttpError(res.status, method);
+    return new ApiHttpError(res.status, method, retryAfterSeconds);
   }
   if (typeof parsed !== "object" || parsed === null || typeof (parsed as { type?: unknown }).type !== "string") {
-    return new ApiHttpError(res.status, method);
+    return new ApiHttpError(res.status, method, retryAfterSeconds);
   }
   const body = parsed as { type: string; detail?: unknown; correlationId?: unknown; errors?: unknown };
   return new ApiProblemError({
