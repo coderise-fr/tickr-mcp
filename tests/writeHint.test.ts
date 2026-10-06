@@ -3,7 +3,9 @@ import { createTickrClient } from "../src/api/client.js";
 import { KeyGate } from "../src/tools/gate.js";
 import { runTool } from "../src/tools/run.js";
 import { startTimerTool, stopTimerTool } from "../src/tools/timers.js";
-import { meFixture, NOW } from "./helpers/fixtures.js";
+import type { EntryDto } from "../src/api/types.js";
+import { fakeApi } from "./helpers/fakeApi.js";
+import { entryFixture, IDS, meFixture, NOW } from "./helpers/fixtures.js";
 import { json, problem, startServer, type RecordedRequest, type Reply } from "./helpers/httpServer.js";
 
 // The "may or may not have been applied" hint, end to end through the real client.
@@ -53,5 +55,28 @@ describe("write hint", () => {
     const res = await runTool(startTimerTool, {}, deps);
     expect(text(res)).toMatch(HINT);
     expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual(["GET /api/v1/me", "POST /api/v1/timers/start"]);
+  });
+});
+
+describe("write hint after an unexpected failure", () => {
+  const fakeDeps = (api = fakeApi()) => ({ api, now: () => NOW, gate: new KeyGate(api), baseUrl: "https://t.example.com", apiKey: "tkr_test" });
+
+  it("is not given when stop_timer without id fails while projecting the candidates (only reads were sent)", async () => {
+    const api = fakeApi();
+    const broken = { ...entryFixture({ id: IDS.entry2, stoppedAt: null, durationSeconds: null }), tagIds: undefined } as unknown as EntryDto;
+    api.listActiveTimers.mockResolvedValue([entryFixture({ stoppedAt: null, durationSeconds: null }), broken]);
+    const res = await runTool(stopTimerTool, {}, fakeDeps(api));
+    expect(res.isError).toBe(true);
+    expect(text(res)).toMatch(/Unexpected error/);
+    expect(text(res)).not.toMatch(HINT);
+    expect(api.stopTimer).not.toHaveBeenCalled();
+  });
+
+  it("is given when stop_timer fails while projecting the timer it stopped", async () => {
+    const api = fakeApi();
+    api.listActiveTimers.mockResolvedValue([entryFixture({ stoppedAt: null, durationSeconds: null })]);
+    api.stopTimer.mockResolvedValue({ ...entryFixture(), tagIds: undefined } as unknown as EntryDto);
+    const res = await runTool(stopTimerTool, {}, fakeDeps(api));
+    expect(text(res)).toMatch(HINT);
   });
 });

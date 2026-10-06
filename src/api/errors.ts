@@ -85,40 +85,53 @@ const MAX_FIELD_ERRORS = 10;
 const WRITE_HINT =
   " The change may or may not have been applied: check with list_entries or list_active_timers before trying again.";
 
-/**
- * True when the failed request may have changed data: the tool is a write and the request
- * that failed was not a read. An error without a method (raised after the requests, e.g. while
- * checking the answer of a write that succeeded) counts as a write when the tool is one.
- */
-function mayHaveWritten(err: { method?: string }, isWrite: boolean): boolean {
-  return isWrite && err.method !== "GET";
+export interface MessageContext {
+  baseUrl: string;
+  /** The tool is a write tool. */
+  isWrite: boolean;
+  /**
+   * A write request (POST, PATCH) was sent during this call. Decides the hint for an error raised
+   * outside a request (e.g. while checking an answer). Unknown (undefined) counts as sent.
+   */
+  writeAttempted?: boolean;
 }
 
-export function toAgentMessage(err: unknown, ctx: { baseUrl: string; isWrite: boolean }): string {
+/**
+ * True when the failure may have changed data. An error of a request counts when the tool is a
+ * write and that request was not a read. An error without a method (raised after the requests,
+ * e.g. while checking the answer of a write that succeeded) counts when a write was sent.
+ */
+function mayHaveWritten(err: { method?: string }, ctx: MessageContext): boolean {
+  if (!ctx.isWrite) return false;
+  if (err.method !== undefined) return err.method !== "GET";
+  return ctx.writeAttempted ?? true;
+}
+
+export function toAgentMessage(err: unknown, ctx: MessageContext): string {
   if (err instanceof ToolError) return err.message;
   if (err instanceof NetworkError) {
     const base = err.timedOut
       ? `Tickr did not answer within 30 seconds at ${ctx.baseUrl}.`
       : `Tickr is unreachable at ${ctx.baseUrl}.`;
-    return base + (mayHaveWritten(err, ctx.isWrite) ? WRITE_HINT : "");
+    return base + (mayHaveWritten(err, ctx) ? WRITE_HINT : "");
   }
   if (err instanceof UnreadableResponseError) {
     return `Tickr's answer${err.status !== undefined ? ` (HTTP ${err.status})` : ""} could not be read or did not have the expected shape.` +
-      (mayHaveWritten(err, ctx.isWrite) ? WRITE_HINT : "");
+      (mayHaveWritten(err, ctx) ? WRITE_HINT : "");
   }
   if (err instanceof ApiHttpError) {
     if (err.status === 429) return rateLimitMessage(err.retryAfterSeconds);
     return `Tickr answered HTTP ${err.status} with a non-API response (often a proxy or gateway error).` +
-      (err.status >= 500 && mayHaveWritten(err, ctx.isWrite) ? WRITE_HINT : "");
+      (err.status >= 500 && mayHaveWritten(err, ctx) ? WRITE_HINT : "");
   }
   if (err instanceof ApiProblemError) {
     return problemMessage(err) +
-      (err.status >= 500 && mayHaveWritten(err, ctx.isWrite) ? WRITE_HINT : "") +
+      (err.status >= 500 && mayHaveWritten(err, ctx) ? WRITE_HINT : "") +
       (err.correlationId ? ` (correlation id: ${cleanDetail(err.correlationId)})` : "");
   }
   // Anything else is a bug or an unexpected answer shape, possibly raised while projecting
-  // the result of a write that already succeeded: keep the "check before retrying" hint.
-  return "Unexpected error in the Tickr MCP server." + (ctx.isWrite ? WRITE_HINT : "");
+  // the result of a write that already succeeded: keep the "check before retrying" hint then.
+  return "Unexpected error in the Tickr MCP server." + (mayHaveWritten({}, ctx) ? WRITE_HINT : "");
 }
 
 function rateLimitMessage(retryAfterSeconds: number | undefined): string {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import type { TickrApi } from "../src/api/client.js";
 import { ApiHttpError, ApiProblemError } from "../src/api/errors.js";
 import type { MeDto, RoleCode } from "../src/api/types.js";
 import { BAD_ME_CONTRACT, KeyGate, TOO_OLD, TOO_OLD_OR_NOT_TICKR } from "../src/tools/gate.js";
@@ -94,13 +95,23 @@ describe("KeyGate via runTool", () => {
   });
 
   it("reports an output that breaks the schema after a write as unconfirmed, without a second call", async () => {
-    const { deps: d } = deps("workspace_user");
+    const { api, deps: d } = deps("workspace_user");
     let calls = 0;
-    const broken = { ...echo("write"), run: async () => { calls++; return { ok: "yes" }; } };
+    const broken = { ...echo("write"), run: async (_a: unknown, t: { api: TickrApi }) => { calls++; await t.api.startTimer({}); return { ok: "yes" }; } };
     const res = await runTool(broken, {}, d);
     expect(res.isError).toBe(true);
     expect(JSON.stringify(res.content)).toMatch(/may or may not have been applied/);
     expect(calls).toBe(1);
+    expect(api.startTimer).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report an output that breaks the schema as unconfirmed when no write was called", async () => {
+    const { deps: d } = deps("workspace_user");
+    const broken = { ...echo("write"), run: async (_a: unknown, t: { api: TickrApi }) => { await t.api.listActiveTimers(); return { ok: "yes" }; } };
+    const res = await runTool(broken, {}, d);
+    expect(res.isError).toBe(true);
+    expect(JSON.stringify(res.content)).toMatch(/could not be read/);
+    expect(JSON.stringify(res.content)).not.toMatch(/may or may not have been applied/);
   });
 
   it("does not cache a failed /me", async () => {
