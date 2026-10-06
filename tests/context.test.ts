@@ -40,7 +40,7 @@ describe("get_context", () => {
   it("reports an unknown effective role as an unreadable answer", async () => {
     const api = fakeApi();
     api.me.mockResolvedValue(meFixture({ role: "superuser" }));
-    const res = await runTool(getContextTool, {}, { api, now: () => NOW, gate: new KeyGate(api), baseUrl: "https://t.example.com" });
+    const res = await runTool(getContextTool, {}, { api, now: () => NOW, gate: new KeyGate(api), baseUrl: "https://t.example.com", apiKey: "tkr_test" });
     expect(res.isError).toBe(true);
     expect(JSON.stringify(res.content)).toMatch(/could not be read or did not have the expected shape/);
     expect(JSON.stringify(res.content)).not.toContain("superuser");

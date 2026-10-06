@@ -324,7 +324,7 @@ describe("createTickrClient", () => {
       const srv = await startServer(() => json(200, body));
       close = srv.close;
       const api = createTickrClient({ baseUrl: srv.baseUrl, apiKey: KEY });
-      const res = await runTool(listTagsTool, {}, { api, now: () => NOW, gate: new KeyGate(api), baseUrl: srv.baseUrl });
+      const res = await runTool(listTagsTool, {}, { api, now: () => NOW, gate: new KeyGate(api), baseUrl: srv.baseUrl, apiKey: KEY });
       expect(res.isError).toBe(true);
       expect(res.content).toEqual([{ type: "text", text: BAD_ME_CONTRACT }]);
       expect(srv.requests.map((r) => r.url)).toEqual(["/api/v1/me"]);

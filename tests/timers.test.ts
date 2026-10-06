@@ -54,7 +54,7 @@ describe("start_timer", () => {
     // The API accepted the start, but its answer lacks tagIds: toEntry throws a TypeError
     // inside tool.run, before any output-schema check.
     api.startTimer.mockResolvedValue({ id: IDS.entry, description: "x", startedAt: "2026-10-02T09:00:00+00:00", stoppedAt: null } as unknown as EntryDto);
-    const res = await runTool(startTimerTool, {}, { api, now: () => NOW, gate: new KeyGate(api), baseUrl: "https://t.example.com" });
+    const res = await runTool(startTimerTool, {}, { api, now: () => NOW, gate: new KeyGate(api), baseUrl: "https://t.example.com", apiKey: "tkr_test" });
 
     expect(res.isError).toBe(true);
     expect(JSON.stringify(res.content)).toMatch(/may or may not have been applied/);

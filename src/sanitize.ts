@@ -19,3 +19,20 @@ export const cleanName = (v: string): string => clean(v, 200, CONTROL_ALL);
 export const cleanNullableName = (v: string | null): string | null => (v === null ? null : cleanName(v));
 export const cleanDescription = (v: string): string => clean(v, 1000, CONTROL_KEEP_NEWLINE);
 export const cleanDetail = (v: string): string => clean(v, 300, CONTROL_ALL);
+
+export const REDACTED = "[redacted]";
+
+/**
+ * Replaces every occurrence of a secret (the configured API key) in a string, or in every string
+ * of a JSON value (arrays and plain objects, values only). An empty secret changes nothing.
+ */
+export function redact<T>(value: T, secret: string): T {
+  if (!secret) return value;
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") return v.split(secret).join(REDACTED);
+    if (Array.isArray(v)) return v.map(walk);
+    if (typeof v === "object" && v !== null) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(value) as T;
+}

@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { cleanDescription, cleanDetail, cleanName } from "../src/sanitize.js";
+import { cleanDescription, cleanDetail, cleanName, redact } from "../src/sanitize.js";
 
 const INVISIBLE = [
   "\u200B", "\u200C", "\u200D", "\u200E", "\u200F",
@@ -27,6 +27,17 @@ describe("invisible formatting characters", () => {
 
   it("hides a right-to-left override that would reverse what a human reads", () => {
     expect(cleanName("invoice\u202Etxt.exe")).toBe("invoicetxt.exe");
+  });
+});
+
+describe("redact", () => {
+  it("replaces a secret in every string value of nested arrays and objects, keeping other values", () => {
+    expect(redact({ a: "xSECRETy", b: ["SECRET", 1, null, { c: "SECRETSECRET" }], d: true }, "SECRET"))
+      .toStrictEqual({ a: "x[redacted]y", b: ["[redacted]", 1, null, { c: "[redacted][redacted]" }], d: true });
+  });
+
+  it("changes nothing for an empty secret", () => {
+    expect(redact("abc", "")).toBe("abc");
   });
 });
 

@@ -17,7 +17,9 @@ async function main(): Promise<void> {
     throw e;
   }
   const api = createTickrClient({ baseUrl: config.baseUrl, apiKey: config.apiKey });
-  const server = createServer({ api, gate: new KeyGate(api), now: () => new Date(), baseUrl: config.baseUrl });
+  const server = createServer({
+    api, gate: new KeyGate(api), now: () => new Date(), baseUrl: config.baseUrl, apiKey: config.apiKey,
+  });
   await server.connect(new StdioServerTransport());
 }
 

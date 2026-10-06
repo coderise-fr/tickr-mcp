@@ -18,7 +18,7 @@ const echo = (access: "read" | "write") => defineTool({
 function deps(role: RoleCode) {
   const api = fakeApi();
   api.me.mockResolvedValue(meFixture({ keyRole: role }));
-  return { api, deps: { api, now: () => NOW, gate: new KeyGate(api), baseUrl: "https://t.example.com" } };
+  return { api, deps: { api, now: () => NOW, gate: new KeyGate(api), baseUrl: "https://t.example.com", apiKey: "tkr_test" } };
 }
 
 describe("KeyGate via runTool", () => {

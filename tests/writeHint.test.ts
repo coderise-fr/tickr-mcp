@@ -16,7 +16,7 @@ async function depsFor(responder: (req: RecordedRequest) => Reply) {
   const srv = await startServer(responder);
   close = srv.close;
   const api = createTickrClient({ baseUrl: srv.baseUrl, apiKey: "tkr_test" });
-  return { requests: srv.requests, deps: { api, now: () => NOW, gate: new KeyGate(api), baseUrl: srv.baseUrl } };
+  return { requests: srv.requests, deps: { api, now: () => NOW, gate: new KeyGate(api), baseUrl: srv.baseUrl, apiKey: "tkr_test" } };
 }
 
 const text = (res: { content: unknown }) => JSON.stringify(res.content);
@@ -24,7 +24,7 @@ const text = (res: { content: unknown }) => JSON.stringify(res.content);
 describe("write hint", () => {
   it("is not given when /me is unreachable before a write tool runs", async () => {
     const api = createTickrClient({ baseUrl: "http://127.0.0.1:1", apiKey: "tkr_test" });
-    const res = await runTool(startTimerTool, {}, { api, now: () => NOW, gate: new KeyGate(api), baseUrl: "http://127.0.0.1:1" });
+    const res = await runTool(startTimerTool, {}, { api, now: () => NOW, gate: new KeyGate(api), baseUrl: "http://127.0.0.1:1", apiKey: "tkr_test" });
     expect(res.isError).toBe(true);
     expect(text(res)).toMatch(/unreachable/);
     expect(text(res)).not.toMatch(HINT);

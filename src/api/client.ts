@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { redact } from "../sanitize.js";
 import { VERSION } from "../version.js";
 import {
   entryDtoSchema, meDtoSchema, pagedEntriesDtoSchema, projectDtoSchema, tagDtoSchema, taskDtoSchema,
@@ -84,8 +85,9 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
           throw new UnreadableResponseError(res.status, method);
         }
         // Checked here, so a missing or null field is reported as an unreadable answer
-        // instead of breaking a projection later.
-        const parsed = schema.safeParse(body);
+        // instead of breaking a projection later. The key is redacted first, before any text is
+        // cleaned or cut, so no part of it can survive a truncation.
+        const parsed = schema.safeParse(redact(body, opts.apiKey));
         if (!parsed.success) throw new UnreadableResponseError(res.status, method);
         return parsed.data;
       }
@@ -102,7 +104,7 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
         await sleep(retryAfter * 1000);
         continue;
       }
-      throw await toError(res, retryAfter, method);
+      throw await toError(res, retryAfter, method, opts.apiKey);
     }
   }
 
@@ -135,7 +137,7 @@ function mediaType(res: Response): string {
   return (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
 }
 
-async function toError(res: Response, retryAfterSeconds: number | undefined, method: string): Promise<Error> {
+async function toError(res: Response, retryAfterSeconds: number | undefined, method: string, apiKey: string): Promise<Error> {
   // Only an RFC 7807 problem document is a Tickr error. Any other body (a proxy or gateway page,
   // even in JSON) is reported by its status alone, and never read.
   if (mediaType(res) !== "application/problem+json") {
@@ -151,7 +153,7 @@ async function toError(res: Response, retryAfterSeconds: number | undefined, met
   if (typeof parsed !== "object" || parsed === null || typeof (parsed as { type?: unknown }).type !== "string") {
     return new ApiHttpError(res.status, method, retryAfterSeconds);
   }
-  const body = parsed as { type: string; detail?: unknown; correlationId?: unknown; errors?: unknown };
+  const body = redact(parsed, apiKey) as { type: string; detail?: unknown; correlationId?: unknown; errors?: unknown };
   return new ApiProblemError({
     status: res.status,
     code: problemCode(body.type),

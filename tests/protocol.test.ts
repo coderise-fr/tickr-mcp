@@ -7,7 +7,7 @@ import { fakeApi } from "./helpers/fakeApi.js";
 import { NOW } from "./helpers/fixtures.js";
 
 async function connect(api = fakeApi()) {
-  const server = createServer({ api, gate: new KeyGate(api), now: () => NOW, baseUrl: "https://t.example.com" });
+  const server = createServer({ api, gate: new KeyGate(api), now: () => NOW, baseUrl: "https://t.example.com", apiKey: "tkr_test" });
   const client = new Client({ name: "test", version: "0.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
