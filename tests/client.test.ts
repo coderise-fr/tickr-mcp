@@ -68,6 +68,33 @@ describe("createTickrClient", () => {
     });
   });
 
+  it("treats a plain JSON error body as a non-API response, even with a type and detail", async () => {
+    const { api } = await setup(() => json(403, { type: "ProxyError", detail: "proxy internal detail" }));
+    const err = await api.listTags().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiHttpError);
+    expect((err as ApiHttpError).status).toBe(403);
+    const msg = toAgentMessage(err, { baseUrl: "x", isWrite: false });
+    expect(msg).toBe("Tickr answered HTTP 403 with a non-API response (often a proxy or gateway error).");
+    expect(JSON.stringify(err) + msg).not.toContain("proxy internal detail");
+  });
+
+  it("parses a problem whose media type carries parameters, in any case", async () => {
+    const { api } = await setup(() => ({
+      ...problem(409, "conflict", "entry_locked"),
+      headers: { "content-type": " Application/Problem+JSON ; charset=utf-8" },
+    }));
+    const err = await api.listTags().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiProblemError);
+    expect(err).toMatchObject({ status: 409, detail: "entry_locked" });
+  });
+
+  it("keeps the wait time of a plain JSON 429", async () => {
+    const { api } = await setup(() => json(429, { type: "x", detail: "slow down" }, { "retry-after": "30" }));
+    const err = await api.listTags().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiHttpError);
+    expect(toAgentMessage(err, { baseUrl: "x", isWrite: false })).toBe("Tickr's rate limit is reached. Wait 30 seconds and try again.");
+  });
+
   it("never keeps the body of a non-API response", async () => {
     const { api } = await setup(() => ({ status: 502, headers: { "content-type": "text/html" }, body: "<html>secret proxy page</html>" }));
     const err = await api.listTags().catch((e: unknown) => e);

@@ -130,9 +130,15 @@ function parseRetryAfter(value: string | null): number | undefined {
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
 }
 
+/** Media type without parameters, trimmed and lower-cased ("" when absent). */
+function mediaType(res: Response): string {
+  return (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+}
+
 async function toError(res: Response, retryAfterSeconds: number | undefined, method: string): Promise<Error> {
-  const contentType = res.headers.get("content-type") ?? "";
-  if (!contentType.includes("json")) {
+  // Only an RFC 7807 problem document is a Tickr error. Any other body (a proxy or gateway page,
+  // even in JSON) is reported by its status alone, and never read.
+  if (mediaType(res) !== "application/problem+json") {
     await res.body?.cancel();
     return new ApiHttpError(res.status, method, retryAfterSeconds);
   }
