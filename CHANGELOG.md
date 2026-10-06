@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-10-06
 
 First release published by CI. Ten tools: get_context, list_active_timers,
 start_timer, stop_timer, list_entries, create_entry, update_entry,
