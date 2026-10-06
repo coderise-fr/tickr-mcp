@@ -3,7 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it } from "vitest";
 import { createServer } from "../src/server.js";
 import { KeyGate } from "../src/tools/gate.js";
-import { MAX_INPUT_ELEMENTS } from "../src/tools/tool.js";
+import { DATES, MAX_INPUT_ELEMENTS } from "../src/tools/tool.js";
 import { fakeApi } from "./helpers/fakeApi.js";
 import { IDS, NOW } from "./helpers/fixtures.js";
 
@@ -33,6 +33,19 @@ describe("MCP protocol", () => {
       expect(t.outputSchema?.type).toBe("object");
       expect(t.annotations?.openWorldHint).toBe(true);
       expect(typeof t.annotations?.readOnlyHint).toBe("boolean");
+    }
+  });
+
+  it("gives the same date guidance to every tool that takes a datetime", async () => {
+    const { client } = await connect();
+    const { tools } = await client.listTools();
+    const byName = new Map(tools.map((t) => [t.name, t.description ?? ""]));
+    for (const name of ["start_timer", "stop_timer", "list_entries", "create_entry", "update_entry"]) {
+      const description = byName.get(name)!;
+      expect(description, name).toContain(DATES);
+      expect(description, name).toContain("If a local time is ambiguous or does not exist (daylight-saving change), ask the user.");
+      expect(description, name).toMatch(/explicit offset/);
+      expect(description, name).toMatch(/get_context.*user\.timezone/);
     }
   });
 

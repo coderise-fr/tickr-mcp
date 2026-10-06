@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ApiProblemError, ToolError } from "../api/errors.js";
 import { cleanDetail } from "../sanitize.js";
 import { entrySchema, toEntry, type Entry } from "./shapes.js";
-import { compact, defineTool, id, offsetDateTime, READ_ANNOTATIONS, strictInput, toUtc, UNTRUSTED } from "./tool.js";
+import { compact, DATES, defineTool, id, offsetDateTime, READ_ANNOTATIONS, strictInput, toUtc, UNTRUSTED } from "./tool.js";
 
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
 
@@ -39,8 +39,7 @@ export const startTimerTool = defineTool({
   description:
     "Starts a running timer for the key's user. All fields are optional; project_id, task_id and tag_ids are ids " +
     "from list_projects, list_tasks and list_tags. task_id requires project_id and must belong to it. started_at " +
-    "defaults to now; for relative times call get_context and use user.timezone. Up to three timers may run at once. " +
-    UNTRUSTED,
+    `defaults to now. Up to three timers may run at once. ${DATES} ${UNTRUSTED}`,
   access: "write",
   inputSchema: strictInput({
     project_id: id.optional(),
@@ -90,7 +89,7 @@ export const stopTimerTool = defineTool({
     "Stops a running timer. With entry_id, stops that timer. Without it: if exactly one timer runs it is stopped; " +
     "if none runs, status is none_running; if several run, nothing is stopped and status is multiple_running with " +
     "the candidates, so ask the user which one. stopped_at defaults to now; when given it needs an explicit offset " +
-    "(ISO 8601), and for relative times call get_context and use user.timezone. " + UNTRUSTED,
+    `(ISO 8601). ${DATES} ${UNTRUSTED}`,
   access: "write",
   inputSchema: strictInput({ entry_id: id.optional(), stopped_at: offsetDateTime.optional() }),
   outputSchema: z.strictObject({

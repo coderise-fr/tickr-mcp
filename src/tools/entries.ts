@@ -1,11 +1,7 @@
 import { z } from "zod";
 import { apiCursor } from "../api/dto.js";
 import { entrySchema, toEntry } from "./shapes.js";
-import { compact, defineTool, id, isAfter, offsetDateTime, READ_ANNOTATIONS, strictInput, toUtc, UNTRUSTED } from "./tool.js";
-
-const DATES =
-  "Datetimes need an explicit offset; for relative dates call get_context and interpret them in user.timezone. " +
-  "If a local time is ambiguous or does not exist (daylight-saving change), ask the user.";
+import { compact, DATES, defineTool, id, isAfter, offsetDateTime, READ_ANNOTATIONS, strictInput, toUtc, UNTRUSTED } from "./tool.js";
 
 export const listEntriesTool = defineTool({
   name: "list_entries",
