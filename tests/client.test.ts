@@ -318,6 +318,25 @@ describe("createTickrClient", () => {
       expect(toAgentMessage(err, { baseUrl: "x", isWrite: false })).toMatch(/could not be read or did not have the expected shape/);
     });
 
+    it.each([
+      ["a negative duration", -5],
+      ["a fractional duration", 12.5],
+    ])("rejects an entry with %s as unreadable", async (_label, durationSeconds) => {
+      const { api } = await setup(() => json(200, page([entryFixture({ durationSeconds })])));
+      const err = await api.listEntries({ limit: 50 }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnreadableResponseError);
+      expect(toAgentMessage(err, { baseUrl: "x", isWrite: false })).toMatch(/could not be read or did not have the expected shape/);
+    });
+
+    it.each([
+      ["a zero duration", 0],
+      ["a null duration (running timer)", null],
+    ])("accepts an entry with %s", async (_label, durationSeconds) => {
+      const { api } = await setup(() => json(200, page([entryFixture({ durationSeconds })])));
+      const res = await api.listEntries({ limit: 50 });
+      expect(res.data[0]!.durationSeconds).toBe(durationSeconds);
+    });
+
     it("rejects /me with a serverTime that is not a datetime, or a user id that is not a UUID", async () => {
       const { api } = await setup((_r, i) => json(200, i === 0
         ? meFixture({ serverTime: "yesterday" })

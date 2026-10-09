@@ -26,7 +26,7 @@ export const entryDtoSchema = z.looseObject({
   description: nullableString,
   startedAt: apiDateTime,
   stoppedAt: apiDateTime.nullable(),
-  durationSeconds: z.number().nullable(),
+  durationSeconds: z.number().int().nonnegative().nullable(),
   tagIds: z.array(apiId),
   isBillable: z.boolean(),
 });
