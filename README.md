@@ -53,7 +53,7 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
     "tickr": {
       "command": "npx",
       "args": ["-y", "@coderise-fr/tickr-mcp@0.1.0"],
-      "env": { "TICKR_API_KEY": "<your key>" }
+      "env": { "TICKR_API_KEY": "YOUR_TICKR_API_KEY" }
     }
   }
 }
@@ -65,7 +65,7 @@ On Windows, if the client cannot find `npx`, use `"command": "cmd"` and
 **Claude Code:**
 
 ```bash
-claude mcp add tickr --scope user --env TICKR_API_KEY=<your key> -- npx -y @coderise-fr/tickr-mcp@0.1.0
+claude mcp add tickr --scope user --env TICKR_API_KEY=YOUR_TICKR_API_KEY -- npx -y @coderise-fr/tickr-mcp@0.1.0
 ```
 
 `--scope user` (all your projects) and the default `local` scope keep the key
@@ -73,7 +73,7 @@ in your own Claude Code settings. Do not use `--scope project`: it writes the
 server, key included, to a `.mcp.json` file meant to be committed.
 
 **Self-hosted Tickr:** add `TICKR_BASE_URL`, for example
-`"env": { "TICKR_API_KEY": "<your key>", "TICKR_BASE_URL": "https://tickr.example.com" }`.
+`"env": { "TICKR_API_KEY": "YOUR_TICKR_API_KEY", "TICKR_BASE_URL": "https://tickr.example.com" }`.
 
 Keep the version pinned: a new release of this package is never run with your
 key until you change the version. Pinning fixes this package's version only:
