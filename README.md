@@ -128,13 +128,13 @@ timers per user, counted across all workspaces.
 | `has the admin role` / `has the owner role` | Create a key with the Workspace user role (see section 1) |
 | `has the analyst role, which is read-only` | Expected with an analyst key; use a Workspace-user key to make changes |
 | `not a member of this project` | Pick a project you belong to (`list_projects`) |
-| `Three timers are already running` | Stop one (`stop_timer`); the limit counts every workspace |
+| `Three timers are already running` | The limit counts every workspace. If the message lists timers of this workspace, stop one (`stop_timer`). If it says others run in another workspace, this server cannot see or stop them: stop one in the Tickr UI or through the MCP server configured for that workspace |
 | `rate limit is reached` | Wait the time given, then retry |
 | `may or may not have been applied` | Check your entries in Tickr before asking the agent to retry |
 | `unexpected answer to GET /api/v1/me` | Tickr and this server disagree on the API contract: upgrade the server |
 | `instance is too old` / `does not point to a Tickr instance` | Upgrade Tickr, or check `TICKR_BASE_URL` |
 | `unreachable at …` | Check `TICKR_BASE_URL` and your network |
-| `list is too large` | More than 5,000 projects, tasks or tags: ask your Tickr administrator |
+| `list is too large` | Either the list holds more than 5,000 projects, tasks or tags, or downloading it took more than 30 seconds (slow instance or network): retry later, check `TICKR_BASE_URL` and your network, or ask your Tickr administrator |
 | `Invalid cursor` / `cursor was issued for another list` | Restart the list from the first page |
 
 ## Release checklist (maintainers)
