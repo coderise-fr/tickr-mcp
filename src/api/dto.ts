@@ -14,7 +14,8 @@ export const apiId = z.guid();
 /** Tickr datetimes always carry an offset ("Z" or "+00:00"), with up to 7 fractional digits. */
 export const apiDateTime = z.iso.datetime({ offset: true });
 /** The opaque cursor of GET /api/v1/entries: base64 text of bounded length. */
-export const apiCursor = z.string().regex(/^[A-Za-z0-9_\-+/=]{1,1024}$/);
+export const cursorOf = (error?: string) => z.string().regex(/^[A-Za-z0-9_\-+/=]{1,1024}$/, error);
+export const apiCursor = cursorOf();
 
 export const entryDtoSchema = z.looseObject({
   id: apiId,

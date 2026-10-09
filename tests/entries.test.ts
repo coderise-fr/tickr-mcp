@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { bodyPropertiesOf } from "../src/api/contract.js";
 import { createEntryTool, listEntriesTool, updateEntryTool } from "../src/tools/entries.js";
@@ -16,6 +17,31 @@ describe("list_entries", () => {
     const api = fakeApi();
     await listEntriesTool.run(listEntriesTool.inputSchema.parse({ from: START, project_id: IDS.projectA, cursor: "abc" }), d(api));
     expect(api.listEntries).toHaveBeenCalledWith({ from: START_UTC, project_id: IDS.projectA, cursor: "abc", limit: 50 });
+  });
+
+  describe("cursor input", () => {
+    const recorded = JSON.parse(readFileSync(new URL("./fixtures/api/entries.json", import.meta.url), "utf8")) as {
+      body: { page: { next_cursor: string } };
+    };
+
+    it.each([
+      ["a space", "abc def"],
+      ["1025 characters", "c".repeat(1025)],
+      ["an empty string", ""],
+    ])("rejects a cursor with %s", (_label, cursor) => {
+      const res = listEntriesTool.inputSchema.safeParse({ cursor });
+      expect(res.success).toBe(false);
+      if (!res.success) {
+        expect(res.error.issues[0]!.message).toMatch(/^Invalid cursor: use next_cursor from the previous list_entries result/);
+      }
+    });
+
+    it("accepts a recorded next_cursor and passes it through unchanged", async () => {
+      const api = fakeApi();
+      const cursor = recorded.body.page.next_cursor;
+      await listEntriesTool.run(listEntriesTool.inputSchema.parse({ cursor }), d(api));
+      expect(api.listEntries).toHaveBeenCalledWith({ cursor, limit: 50 });
+    });
   });
 
   it("sends from and to as the same instants in UTC", async () => {

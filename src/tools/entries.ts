@@ -1,8 +1,10 @@
 import { z } from "zod";
-import { apiCursor } from "../api/dto.js";
+import { apiCursor, cursorOf } from "../api/dto.js";
 import type { CreateEntryBody, ListEntriesQuery, UpdateEntryBody } from "../api/types.js";
 import { entrySchema, toEntry } from "./shapes.js";
 import { compact, DATES, defineTool, id, isAfter, offsetDateTime, READ_ANNOTATIONS, strictInput, toUtc, UNTRUSTED } from "./tool.js";
+
+const BAD_CURSOR = "Invalid cursor: use next_cursor from the previous list_entries result, or start again without cursor.";
 
 export const listEntriesTool = defineTool({
   name: "list_entries",
@@ -18,7 +20,7 @@ export const listEntriesTool = defineTool({
     task_id: id.optional(),
     tag_id: id.optional(),
     limit: z.int().min(1).max(200).optional(),
-    cursor: z.string().min(1).optional(),
+    cursor: cursorOf(BAD_CURSOR).optional(),
   })
     .refine((a) => a.from === undefined || a.to === undefined || isAfter(a.to, a.from), {
       error: "to must be after from.",

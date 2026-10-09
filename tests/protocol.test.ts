@@ -141,6 +141,17 @@ describe("MCP protocol", () => {
     expect(api.listProjects).not.toHaveBeenCalled();
   });
 
+  it("rejects an invalid list_entries cursor before any request to Tickr, without echoing it", async () => {
+    const { client, api } = await connect();
+    const cursor = "secret value " + "Z".repeat(2000);
+    const res = await client.callTool({ name: "list_entries", arguments: { cursor } });
+    expect(res.isError).toBe(true);
+    const text = JSON.stringify(res.content);
+    expect(text).toMatch(/Invalid cursor: use next_cursor from the previous list_entries result/);
+    expect(text).not.toMatch(/secret value|ZZZZ/);
+    expect(Object.values(api).some((fn) => fn.mock.calls.length > 0)).toBe(false);
+  });
+
   it("turns API failures into isError results", async () => {
     const api = fakeApi();
     api.me.mockResolvedValue({ ...(await api.me()), keyRole: "owner" });
