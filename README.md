@@ -8,17 +8,44 @@ Requires Node 20+ and a Tickr version that provides `GET /api/v1/me`.
 ## 1. Create a dedicated API key
 
 In Tickr, open **Settings → API keys** and create a key with the
-**Workspace user** role. The server refuses `admin` and `owner` keys: those
-can change other members' entries, and an agent can be misled by text it
-reads. An `analyst` key works read-only. One key = one workspace.
+**Workspace user** role. One key = one user in one workspace.
 
-Depending on your Tickr version, creating API keys may be reserved to
-workspace admins: if you cannot create one, ask an admin. If your key has an
-expiry date, create a new one when it expires.
+What the server does depends on the role chosen when the key was created:
+
+| Key role | What the server allows |
+|---|---|
+| `workspace_user` (recommended) | Every tool, on the key owner's own entries |
+| `project_lead` | Every tool, on the key owner's own entries |
+| `analyst` | Read tools only; every change is refused (`read-only`) |
+| `admin` | Refused by every tool |
+| `owner` | Refused by every tool (Tickr does not issue owner keys) |
+
+**Why admin keys are refused.** In Tickr, an `admin` (or `owner`) key may
+create and change the entries of every member of the workspace. An agent can
+be misled by text it reads — a project name or an entry description written by
+someone else — and with such a key a mistake could rewrite other people's
+time. The server therefore only works with keys that Tickr itself limits to
+their owner's entries.
+
+**You are a workspace admin?** You don't need an admin key: create a key for
+yourself and pick the **Workspace user** role when creating it. The key's role
+is fixed at creation; it does not follow later changes of your own role.
+
+Notes:
+
+- The role is checked on the first tool call, not at startup: a refused key
+  starts fine, then every tool answers with the reason and what to do.
+- If your own role in the workspace is later lowered below the key's role,
+  Tickr rejects the key (`rejected the API key`): create a new one.
+- Depending on your Tickr version, creating API keys may be reserved to
+  workspace admins: if you cannot create one, ask an admin. If your key has an
+  expiry date, create a new one when it expires.
 
 ## 2. Configure your MCP client
 
-Claude Desktop (`claude_desktop_config.json`) or any client using the same format:
+**Claude Desktop**, or any client using the same format. Edit
+`claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`,
+Windows: `%APPDATA%\Claude\`), then restart the app:
 
 ```json
 {
@@ -32,11 +59,21 @@ Claude Desktop (`claude_desktop_config.json`) or any client using the same forma
 }
 ```
 
-Claude Code:
+On Windows, if the client cannot find `npx`, use `"command": "cmd"` and
+`"args": ["/c", "npx", "-y", "@coderise-fr/tickr-mcp@0.1.0"]`.
+
+**Claude Code:**
 
 ```bash
-claude mcp add tickr --env TICKR_API_KEY=<your key> -- npx -y @coderise-fr/tickr-mcp@0.1.0
+claude mcp add tickr --scope user --env TICKR_API_KEY=<your key> -- npx -y @coderise-fr/tickr-mcp@0.1.0
 ```
+
+`--scope user` (all your projects) and the default `local` scope keep the key
+in your own Claude Code settings. Do not use `--scope project`: it writes the
+server, key included, to a `.mcp.json` file meant to be committed.
+
+**Self-hosted Tickr:** add `TICKR_BASE_URL`, for example
+`"env": { "TICKR_API_KEY": "<your key>", "TICKR_BASE_URL": "https://tickr.example.com" }`.
 
 Keep the version pinned: a new release of this package is never run with your
 key until you change the version. Pinning fixes this package's version only:
@@ -49,7 +86,11 @@ its own key.
 | Variable | Required | Default |
 |---|---|---|
 | `TICKR_API_KEY` | yes | — |
-| `TICKR_BASE_URL` | no | `https://tickr.coderise.cloud` (self-hosted: your URL; `http` only for localhost) |
+| `TICKR_BASE_URL` | no | `https://tickr.coderise.cloud` (self-hosted: your URL, `https` required; `http` only for localhost) |
+
+Invalid settings (missing key, key with spaces, `http` on another host, URL
+with credentials, query or fragment) stop the server at startup with a
+message on stderr.
 
 ## Tools
 
@@ -62,7 +103,9 @@ its own key.
 | `create_entry` / `update_entry` | Add a finished entry / change one |
 | `list_projects` / `list_tasks` / `list_tags` | Find ids, with `name_contains` |
 
-There is no delete tool.
+There is no delete tool. Datetimes are always given with an explicit offset
+(the agent calls `get_context` for your timezone). Tickr allows three running
+timers per user, counted across all workspaces.
 
 ## Security notes
 
@@ -81,12 +124,18 @@ There is no delete tool.
 | Message | Fix |
 |---|---|
 | `TICKR_API_KEY is not set` | Add the key to the server's `env` |
-| `rejected the API key` | Key revoked, expired or role changed: create a new one |
-| `unexpected answer to GET /api/v1/me` | Tickr and this server disagree on the API contract: upgrade the server |
+| `rejected the API key` | Key revoked, expired or your role changed: create a new one |
+| `has the admin role` / `has the owner role` | Create a key with the Workspace user role (see section 1) |
+| `has the analyst role, which is read-only` | Expected with an analyst key; use a Workspace-user key to make changes |
+| `not a member of this project` | Pick a project you belong to (`list_projects`) |
+| `Three timers are already running` | Stop one (`stop_timer`); the limit counts every workspace |
+| `rate limit is reached` | Wait the time given, then retry |
 | `may or may not have been applied` | Check your entries in Tickr before asking the agent to retry |
-| `has the admin role` / `owner role` | Create a Workspace-user key |
-| `instance is too old` | Upgrade Tickr, or check `TICKR_BASE_URL` |
+| `unexpected answer to GET /api/v1/me` | Tickr and this server disagree on the API contract: upgrade the server |
+| `instance is too old` / `does not point to a Tickr instance` | Upgrade Tickr, or check `TICKR_BASE_URL` |
 | `unreachable at …` | Check `TICKR_BASE_URL` and your network |
+| `list is too large` | More than 5,000 projects, tasks or tags: ask your Tickr administrator |
+| `Invalid cursor` / `cursor was issued for another list` | Restart the list from the first page |
 
 ## Release checklist (maintainers)
 
