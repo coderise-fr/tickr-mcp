@@ -32,8 +32,8 @@
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "vitest run",
-    "test:contract": "vitest run --config vitest.contract.config.ts"
+    "test": "node scripts/vitest.mjs run",
+    "test:contract": "node scripts/vitest.mjs run --config vitest.contract.config.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.0",
