@@ -1,11 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- A completed entry (with `stoppedAt`) whose `durationSeconds` is null is reported
+  as unreadable instead of being given a duration computed from its timestamps.
+
 ## 0.1.1 — 2026-10-09
 
-- Answers from Tickr with a negative or fractional `durationSeconds` are reported as
-  unreadable instead of being turned into a duration of 0.
+- Answers from Tickr whose `durationSeconds` is not a non-negative integer are
+  reported as unreadable. Previously a negative value was shown as 0 and a
+  fractional value was passed through.
 - The `list_entries` cursor is checked before calling Tickr (same format and
-  1,024-character bound as the cursor Tickr returns).
+  1,024-character bound as the cursor Tickr returns); an invalid cursor gets a
+  new "Invalid cursor" message.
 - README: a shell-safe key placeholder in the client commands, guidance for the
   timer limit across workspaces, and both causes of the "list is too large" message.
 
