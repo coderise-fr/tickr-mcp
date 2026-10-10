@@ -18,4 +18,10 @@ const { bin } = require(join(vitestDir, "package.json"));
 const entry = join(vitestDir, typeof bin === "string" ? bin : bin.vitest);
 
 const result = spawnSync(process.execPath, [entry, ...process.argv.slice(2)], { cwd, stdio: "inherit" });
-process.exit(result.status ?? 1);
+if (result.error) {
+  console.error(`Could not start Vitest: ${result.error.message}`);
+  process.exit(1);
+}
+// End the same way Vitest did: on its signal (Ctrl+C, SIGTERM, crash), otherwise with its exit code.
+if (result.signal) process.kill(process.pid, result.signal);
+else process.exit(result.status ?? 1);
