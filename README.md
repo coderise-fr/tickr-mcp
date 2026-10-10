@@ -52,7 +52,7 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
   "mcpServers": {
     "tickr": {
       "command": "npx",
-      "args": ["-y", "@coderise-fr/tickr-mcp@0.1.1"],
+      "args": ["-y", "@coderise-fr/tickr-mcp@0.1.2"],
       "env": { "TICKR_API_KEY": "YOUR_TICKR_API_KEY" }
     }
   }
@@ -60,12 +60,12 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
 ```
 
 On Windows, if the client cannot find `npx`, use `"command": "cmd"` and
-`"args": ["/c", "npx", "-y", "@coderise-fr/tickr-mcp@0.1.1"]`.
+`"args": ["/c", "npx", "-y", "@coderise-fr/tickr-mcp@0.1.2"]`.
 
 **Claude Code:**
 
 ```bash
-claude mcp add tickr --scope user --env TICKR_API_KEY=YOUR_TICKR_API_KEY -- npx -y @coderise-fr/tickr-mcp@0.1.1
+claude mcp add tickr --scope user --env TICKR_API_KEY=YOUR_TICKR_API_KEY -- npx -y @coderise-fr/tickr-mcp@0.1.2
 ```
 
 `--scope user` (all your projects) and the default `local` scope keep the key

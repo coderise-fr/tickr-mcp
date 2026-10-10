@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 — 2026-10-10
 
 - A completed entry (with `stoppedAt`) whose `durationSeconds` is null is reported
   as unreadable instead of being given a duration computed from its timestamps.
+- Development: `npm test` also works when the shell reports the working directory
+  with a lower-case drive letter (Windows).
 
 ## 0.1.1 — 2026-10-09
 
