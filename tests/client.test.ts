@@ -329,12 +329,41 @@ describe("createTickrClient", () => {
     });
 
     it.each([
-      ["a zero duration", 0],
-      ["a null duration (running timer)", null],
-    ])("accepts an entry with %s", async (_label, durationSeconds) => {
-      const { api } = await setup(() => json(200, page([entryFixture({ durationSeconds })])));
+      ["a zero duration on a completed entry", { durationSeconds: 0 }],
+      ["a null duration on a running entry", { stoppedAt: null, durationSeconds: null }],
+    ])("accepts an entry with %s", async (_label, over) => {
+      const { api } = await setup(() => json(200, page([entryFixture(over)])));
       const res = await api.listEntries({ limit: 50 });
-      expect(res.data[0]!.durationSeconds).toBe(durationSeconds);
+      expect(res.data[0]!.durationSeconds).toBe(over.durationSeconds);
+    });
+
+    describe("a completed entry without a duration", () => {
+      const completed = () => entryFixture({ durationSeconds: null });
+      const unreadable = async (call: () => Promise<unknown>) => {
+        const err = await call().catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(UnreadableResponseError);
+        expect(toAgentMessage(err, { baseUrl: "x", isWrite: false })).toMatch(/could not be read or did not have the expected shape/);
+      };
+
+      it("is rejected as unreadable when created", async () => {
+        const { api } = await setup(() => json(200, completed()));
+        await unreadable(() => api.createEntry({ startedAt: "a", stoppedAt: "b" }));
+      });
+
+      it("is rejected as unreadable when a timer is stopped", async () => {
+        const { api } = await setup(() => json(200, completed()));
+        await unreadable(() => api.stopTimer("e1", {}));
+      });
+
+      it("is rejected as unreadable inside an entry page", async () => {
+        const { api } = await setup(() => json(200, page([entryFixture(), completed()])));
+        await unreadable(() => api.listEntries({ limit: 50 }));
+      });
+
+      it("is rejected as unreadable inside the active timers", async () => {
+        const { api } = await setup(() => json(200, [completed()]));
+        await unreadable(() => api.listActiveTimers());
+      });
     });
 
     it("rejects /me with a serverTime that is not a datetime, or a user id that is not a UUID", async () => {

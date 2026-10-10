@@ -17,7 +17,7 @@ export const apiDateTime = z.iso.datetime({ offset: true });
 export const cursorOf = (error?: string) => z.string().regex(/^[A-Za-z0-9_\-+/=]{1,1024}$/, error);
 export const apiCursor = cursorOf();
 
-export const entryDtoSchema = z.looseObject({
+const entryObjectSchema = z.looseObject({
   id: apiId,
   projectId: apiId.nullable(),
   projectName: nullableString,
@@ -30,6 +30,12 @@ export const entryDtoSchema = z.looseObject({
   durationSeconds: z.number().int().nonnegative().nullable(),
   tagIds: z.array(apiId),
   isBillable: z.boolean(),
+});
+
+// Tickr computes the duration of a completed entry and sends null only while its timer runs.
+export const entryDtoSchema = entryObjectSchema.refine((entry) => entry.stoppedAt === null || entry.durationSeconds !== null, {
+  path: ["durationSeconds"],
+  error: "a completed entry must have a duration",
 });
 
 export const pagedEntriesDtoSchema = z.looseObject({
