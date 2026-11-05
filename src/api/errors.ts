@@ -40,6 +40,15 @@ export class ApiProblemError extends Error {
   }
 }
 
+/** Tickr refused the write because the workspace is busy; the change was rolled back. */
+export function isWorkspaceBusy(e: unknown): e is ApiProblemError {
+  return e instanceof ApiProblemError && e.status === 503 && e.detail === "workspace_busy";
+}
+
+export const workspaceBusyMessage = (retryAfterSeconds: number | undefined): string =>
+  "Tickr is busy with another change in this workspace (for example a timesheet submission) and nothing was changed. " +
+  `Wait ${retryAfterSeconds === undefined ? "a few seconds" : `${retryAfterSeconds} second${retryAfterSeconds === 1 ? "" : "s"}`} and try again.`;
+
 /** Non-API response (proxy page, empty body). Its body is never kept. */
 export class ApiHttpError extends Error {
   constructor(readonly status: number, readonly method?: string, readonly retryAfterSeconds?: number) {
@@ -126,7 +135,7 @@ export function toAgentMessage(err: unknown, ctx: MessageContext): string {
   }
   if (err instanceof ApiProblemError) {
     return problemMessage(err) +
-      (err.status >= 500 && mayHaveWritten(err, ctx) ? WRITE_HINT : "") +
+      (err.status >= 500 && !isWorkspaceBusy(err) && mayHaveWritten(err, ctx) ? WRITE_HINT : "") +
       (err.correlationId ? ` (correlation id: ${cleanDetail(err.correlationId)})` : "");
   }
   // Anything else is a bug or an unexpected answer shape, possibly raised while projecting
@@ -173,6 +182,9 @@ function problemMessage(e: ApiProblemError): string {
     }
     case 429:
       return rateLimitMessage(e.retryAfterSeconds);
+    case 503:
+      if (isWorkspaceBusy(e)) return workspaceBusyMessage(e.retryAfterSeconds);
+      return `Tickr returned a server error (HTTP 503).`;
     default:
       if (e.status >= 500) return `Tickr returned a server error (HTTP ${e.status}).`;
       return `Tickr returned HTTP ${e.status} (${cleanDetail(e.code)}${detail ? `: ${detail}` : ""}).`;

@@ -80,3 +80,25 @@ describe("write hint after an unexpected failure", () => {
     expect(text(res)).toMatch(HINT);
   });
 });
+
+describe("workspace busy", () => {
+  const meOr = (other: () => Reply) => (r: RecordedRequest) => (r.url === "/api/v1/me" ? json(200, meFixture()) : other());
+
+  it("tells the agent nothing changed after two workspace_busy answers, without the write hint", async () => {
+    const { deps, requests } = await depsFor(meOr(() => problem(503, "service_unavailable", "workspace_busy", {}, { "retry-after": "0" })));
+    const res = await runTool(startTimerTool, {}, deps);
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(2);
+    expect(text(res)).toMatch(/nothing was changed/);
+    expect(text(res)).not.toMatch(HINT);
+  });
+
+  it("keeps the write hint for a 503 without a problem document", async () => {
+    const { deps } = await depsFor(meOr(() => ({ status: 503, headers: { "content-type": "text/html" }, body: "<html>" })));
+    expect(text(await runTool(startTimerTool, {}, deps))).toMatch(HINT);
+  });
+
+  it("keeps the write hint for a 503 problem with another detail", async () => {
+    const { deps } = await depsFor(meOr(() => problem(503, "service_unavailable", "overloaded")));
+    expect(text(await runTool(startTimerTool, {}, deps))).toMatch(HINT);
+  });
+});

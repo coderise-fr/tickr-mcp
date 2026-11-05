@@ -4,8 +4,10 @@ import { VERSION } from "../version.js";
 import {
   entryDtoSchema, meDtoSchema, pagedEntriesDtoSchema, projectDtoSchema, tagDtoSchema, taskDtoSchema,
 } from "./dto.js";
+import { AGENT_HEADER, AGENT_ORIGIN, ORIGIN_HEADER } from "./agent.js";
 import {
-  ApiHttpError, ApiProblemError, NetworkError, UnreadableResponseError, problemCode, type FieldError,
+  ApiHttpError, ApiProblemError, NetworkError, UnreadableResponseError, isWorkspaceBusy, problemCode,
+  type FieldError,
 } from "./errors.js";
 import type {
   CreateEntryBody, EntryDto, ListEntriesQuery, MeDto, PagedDto, ProjectDto, StartTimerBody,
@@ -32,6 +34,11 @@ export interface ClientOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Current time in milliseconds, to read a Retry-After given as a date. */
   now?: () => number;
+  /**
+   * Identity of the MCP client ("name/version"), read at each write. When absent, no Tickr-*
+   * header is sent.
+   */
+  agent?: () => string;
 }
 
 type Query = Record<string, string | number | boolean | undefined>;
@@ -59,6 +66,11 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
       "User-Agent": `tickr-mcp/${VERSION}`,
     };
     if (init.body !== undefined) headers["Content-Type"] = "application/json";
+    // Reads carry no provenance; every write is marked as made by an agent.
+    if (method !== "GET" && opts.agent) {
+      headers[ORIGIN_HEADER] = AGENT_ORIGIN;
+      headers[AGENT_HEADER] = opts.agent();
+    }
 
     for (let attempt = 0; ; attempt++) {
       let res: Response;
@@ -107,7 +119,13 @@ export function createTickrClient(opts: ClientOptions): TickrApi {
         await sleep(retryAfter * 1000);
         continue;
       }
-      throw await toError(res, retryAfter, method, opts.apiKey);
+      const error = await toError(res, retryAfter, method, opts.apiKey);
+      // "workspace_busy" is rolled back by Tickr: nothing was written, so one short retry is safe.
+      if (isWorkspaceBusy(error) && attempt === 0 && retryAfter !== undefined && retryAfter <= MAX_RETRY_AFTER_SECONDS) {
+        await sleep(retryAfter * 1000);
+        continue;
+      }
+      throw error;
     }
   }
 

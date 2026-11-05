@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { agentHeaderValue } from "./api/agent.js";
 import { ALL_TOOLS } from "./tools/index.js";
 import { runTool, type RunDeps } from "./tools/run.js";
 import { MAX_INPUT_ELEMENTS } from "./tools/tool.js";
@@ -20,4 +21,9 @@ export function createServer(deps: RunDeps): McpServer {
     );
   }
   return server;
+}
+
+/** Identity of the connected MCP client as "name/version", known once `initialize` is done. */
+export function clientAgent(server: McpServer): () => string {
+  return () => agentHeaderValue(server.server.getClientVersion());
 }

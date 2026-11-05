@@ -120,3 +120,10 @@ describe("toAgentMessage", () => {
     expect(toAgentMessage(new NetworkError(false), write)).toMatch(/may or may not have been applied/);
   });
 });
+
+describe("workspace busy", () => {
+  const busy = (retryAfterSeconds?: number) => p(503, "service_unavailable", "workspace_busy", { retryAfterSeconds, method: "POST" });
+  it("gives the busy wait in seconds", () => expect(toAgentMessage(busy(30), write)).toMatch(/Wait 30 seconds/));
+  it("falls back to a few seconds", () => expect(toAgentMessage(busy(), write)).toMatch(/Wait a few seconds/));
+  it("never adds the write hint", () => expect(toAgentMessage(busy(1), write)).not.toMatch(/may or may not/));
+});
