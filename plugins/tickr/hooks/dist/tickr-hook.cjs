@@ -102,8 +102,9 @@ function readPluginConfig(env) {
 var import_node_crypto = require("node:crypto");
 var import_node_fs = require("node:fs");
 var import_node_path = require("node:path");
-var LINKED_FILE = "linked.json";
+var LINKS_DIR = "linked";
 var MAX_LINKS = 500;
+var KEY_PATTERN = /^[0-9a-f]{64}$/;
 function realDir(dir) {
   try {
     return import_node_fs.realpathSync.native(dir);
@@ -114,34 +115,51 @@ function realDir(dir) {
 function linkKey(mappingDir, mappingHash) {
   return (0, import_node_crypto.createHash)("sha256").update(JSON.stringify([realDir(mappingDir), mappingHash]), "utf8").digest("hex");
 }
-function readLinks(dataDir) {
-  try {
-    const doc = JSON.parse((0, import_node_fs.readFileSync)((0, import_node_path.join)(dataDir, LINKED_FILE), "utf8"));
-    return Array.isArray(doc?.links) ? doc.links.filter((l) => typeof l === "string") : [];
-  } catch {
-    return [];
-  }
+function isLinkKeyActive(dataDir, key) {
+  return KEY_PATTERN.test(key) && (0, import_node_fs.existsSync)((0, import_node_path.join)(dataDir, LINKS_DIR, key));
 }
 function isLinked(dataDir, mappingDir, mappingHash) {
-  return readLinks(dataDir).includes(linkKey(mappingDir, mappingHash));
+  return isLinkKeyActive(dataDir, linkKey(mappingDir, mappingHash));
+}
+function pruneLinks(dir, keep) {
+  let names;
+  try {
+    names = (0, import_node_fs.readdirSync)(dir).filter((n) => KEY_PATTERN.test(n));
+  } catch {
+    return;
+  }
+  if (names.length <= MAX_LINKS) return;
+  const dated = names.filter((n) => n !== keep).map((n) => {
+    try {
+      return { n, t: (0, import_node_fs.statSync)((0, import_node_path.join)(dir, n)).mtimeMs };
+    } catch {
+      return { n, t: 0 };
+    }
+  }).sort((a, b) => a.t - b.t || (a.n < b.n ? -1 : 1));
+  for (const { n } of dated.slice(0, names.length - MAX_LINKS)) {
+    try {
+      (0, import_node_fs.unlinkSync)((0, import_node_path.join)(dir, n));
+    } catch {
+    }
+  }
 }
 function recordLink(dataDir, mappingDir, mappingHash) {
   const key = linkKey(mappingDir, mappingHash);
-  const temp = (0, import_node_path.join)(dataDir, `.${LINKED_FILE}.${process.pid}.tmp`);
+  const dir = (0, import_node_path.join)(dataDir, LINKS_DIR);
+  const file = (0, import_node_path.join)(dir, key);
   try {
-    (0, import_node_fs.mkdirSync)(dataDir, { recursive: true });
-    const links = readLinks(dataDir).filter((l) => l !== key);
-    links.push(key);
-    (0, import_node_fs.writeFileSync)(temp, JSON.stringify({ version: 1, links: links.slice(-MAX_LINKS) }), { flag: "w" });
-    (0, import_node_fs.renameSync)(temp, (0, import_node_path.join)(dataDir, LINKED_FILE));
-    return true;
+    (0, import_node_fs.mkdirSync)(dir, { recursive: true });
+    (0, import_node_fs.writeFileSync)(file, "", { flag: "w" });
   } catch {
-    try {
-      (0, import_node_fs.unlinkSync)(temp);
-    } catch {
-    }
     return false;
   }
+  try {
+    const now = /* @__PURE__ */ new Date();
+    (0, import_node_fs.utimesSync)(file, now, now);
+  } catch {
+  }
+  pruneLinks(dir, key);
+  return true;
 }
 
 // src/api/agent.ts

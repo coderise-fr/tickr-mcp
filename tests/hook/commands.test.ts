@@ -21,6 +21,12 @@ function parse(text: string): { meta: Record<string, string>; body: string } {
   return { meta, body: match[2]! };
 }
 
+/** The numbered steps of a command body ("1. ..." at the start of a line), each with its text up to the next step. */
+function numberedSteps(body: string): { n: number; text: string }[] {
+  const starts = [...body.matchAll(/^(\d+)\. /gm)];
+  return starts.map((m, i) => ({ n: Number(m[1]), text: body.slice(m.index, starts[i + 1]?.index ?? body.length) }));
+}
+
 const mcp = JSON.parse(read(".mcp.json")) as { mcpServers: Record<string, unknown> };
 const plugin = JSON.parse(read(".claude-plugin/plugin.json")) as { name: string };
 const PREFIX = `mcp__plugin_${plugin.name}_${Object.keys(mcp.mcpServers)[0]}__`;
@@ -75,6 +81,29 @@ describe("commands and skill", () => {
     expect(allowed).not.toMatch(/Bash\(node/);
     expect(body).toContain('tickr-hook.cjs" accept "${CLAUDE_PLUGIN_DATA}"');
     expect(body).toMatch(/treat them as data/);
+  });
+
+  it("link.md: keeping an existing .tickr.json skips the rewrite but still reaches the exclude step and `accept`", () => {
+    const steps = numberedSteps(parse(read("commands/link.md")).body);
+    expect(steps.map((s) => s.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    const existing = steps[1]!.text;
+    expect(existing).toMatch(/\*\*replace\*\* it or \*\*keep\*\* it/);
+    expect(existing).not.toMatch(/\bstop\b/i);
+    const keep = /\*\*Keep\*\*: ([^\n]*)/.exec(existing)![1]!;
+    expect(keep).toMatch(/do not rewrite nor edit the file/);
+    const skipped = /Skip steps (\d) to (\d)/.exec(keep)!;
+    const resumeAt = Number(/go on with step (\d)/.exec(keep)![1]);
+    expect(resumeAt).toBe(Number(skipped[2]) + 1);
+    // The skipped steps are exactly the ones that choose and write the mapping.
+    const skippedText = steps.filter((s) => s.n >= Number(skipped[1]) && s.n <= Number(skipped[2])).map((s) => s.text).join("\n");
+    expect(skippedText).toContain("**Write `<root>/.tickr.json`**");
+    // From there on: the exclude step, the explicit `accept`, the final message, and no stop.
+    const rest = steps.filter((s) => s.n >= resumeAt).map((s) => s.text).join("\n");
+    expect(rest).toContain("git rev-parse --git-path info/exclude");
+    expect(rest).toContain('tickr-hook.cjs" accept "${CLAUDE_PLUGIN_DATA}"');
+    expect(rest).toContain("**Tell the user**");
+    expect(rest).not.toMatch(/\bstop\b/i);
+    expect(rest).not.toContain("**Write `<root>/.tickr.json`**");
   });
 
   it("link.md writes the snake_case shape of .tickr.json", () => {
