@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "tickr": {
+      "command": "npx",
+      "args": ["-y", "@coderise-fr/tickr-mcp@0.2.0"],
+      "env": {
+        "TICKR_API_KEY": "${user_config.api_key}",
+        "TICKR_BASE_URL": "${user_config.base_url}"
+      }
+    }
+  }
+}

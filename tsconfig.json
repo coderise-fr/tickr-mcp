@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["src", "tests", "vitest.config.ts", "vitest.contract.config.ts"]
+  "include": ["src", "hook-src", "tests", "vitest.config.ts", "vitest.contract.config.ts", "vitest.hook.config.ts"]
 }

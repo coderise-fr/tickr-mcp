@@ -1,0 +1,36 @@
+{
+  "name": "tickr",
+  "version": "0.1.0",
+  "description": "Tracks your Claude Code sessions as Tickr time entries and lets Claude start, stop and edit your Tickr time entries.",
+  "author": {
+    "name": "Coderise",
+    "url": "https://github.com/coderise-fr"
+  },
+  "homepage": "https://github.com/coderise-fr/tickr-mcp#readme",
+  "repository": "https://github.com/coderise-fr/tickr-mcp",
+  "license": "AGPL-3.0-only",
+  "keywords": ["tickr", "time-tracking", "mcp"],
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "Tickr API key",
+      "description": "An API key created in Tickr (Settings → API keys). Stored as a secret.",
+      "sensitive": true,
+      "required": true
+    },
+    "base_url": {
+      "type": "string",
+      "title": "Tickr URL",
+      "description": "Address of your Tickr instance.",
+      "default": "https://tickr.coderise.cloud"
+    },
+    "idle_minutes": {
+      "type": "number",
+      "title": "Idle minutes",
+      "description": "Minutes without activity after which a tracked session segment ends.",
+      "default": 15,
+      "min": 5,
+      "max": 120
+    }
+  }
+}

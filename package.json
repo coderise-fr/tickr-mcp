@@ -33,7 +33,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "node scripts/vitest.mjs run",
-    "test:contract": "node scripts/vitest.mjs run --config vitest.contract.config.ts"
+    "test:contract": "node scripts/vitest.mjs run --config vitest.contract.config.ts",
+    "test:hook": "node scripts/vitest.mjs run --config vitest.hook.config.ts",
+    "build:hook": "node scripts/build-hook.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.0",
@@ -41,6 +43,7 @@
   },
   "devDependencies": {
     "@types/node": "22.20.5",
+    "esbuild": "0.28.2",
     "eslint": "10.11.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.71.0",

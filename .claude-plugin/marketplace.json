@@ -1,0 +1,17 @@
+{
+  "name": "tickr-mcp",
+  "owner": {
+    "name": "Coderise",
+    "url": "https://github.com/coderise-fr"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for Tickr time tracking."
+  },
+  "plugins": [
+    {
+      "name": "tickr",
+      "source": "./plugins/tickr",
+      "description": "Tracks your Claude Code sessions as Tickr time entries and lets Claude start, stop and edit your Tickr time entries."
+    }
+  ]
+}
