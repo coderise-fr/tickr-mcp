@@ -4,7 +4,16 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { FALLBACK_DIR, writeFallback } from "../../hook-src/fallback.js";
 import { createAgentApi, OFFLINE_API } from "../../hook-src/flusher/api.js";
 import { claimOwnership, guarded, OWNER_STALE_MS, RELEASED_HEARTBEAT } from "../../hook-src/flusher/owner.js";
-import { type FlusherDeps, runFlusher } from "../../hook-src/flusher/run.js";
+import { REQUEST_TIMEOUT_MS } from "../../hook-src/flusher/api.js";
+import {
+  type FlusherDeps,
+  MAX_SUCCESSOR_DELAY_MS,
+  POLL_MS,
+  runFlusher,
+  SEND_RESERVE_MS,
+  SUCCESSOR_MIN_INTERVAL_MS,
+} from "../../hook-src/flusher/run.js";
+import { writeWorkspace } from "../../hook-src/flusher/sender.js";
 import { type FlusherBoundary, STAGE_NAMES, type StageName, type StageRun } from "../../hook-src/flusher/stages.js";
 import { ulid } from "../../hook-src/ids.js";
 import { recordEvent } from "../../hook-src/intake.js";
@@ -33,10 +42,11 @@ function event(sessionId = "s-1", agoMs = 0): JournalEvent {
   };
 }
 
-/** Fake clocks: sleeping advances the monotonic clock. */
-function deps(dir: string, extra: Partial<FlusherDeps> = {}) {
+/** Fake clocks: sleeping advances the monotonic clock (onSleep runs after each sleep). */
+function deps(dir: string, extra: Partial<FlusherDeps> = {}, onSleep: (mono: number) => void = () => undefined) {
   let mono = 0;
   const sleeps: number[] = [];
+  const handovers: number[] = [];
   const d: FlusherDeps = {
     now: () => new Date(),
     uptime: () => 1000,
@@ -47,12 +57,16 @@ function deps(dir: string, extra: Partial<FlusherDeps> = {}) {
     sleep: (ms) => {
       sleeps.push(ms);
       mono += ms;
+      onSleep(mono);
       return Promise.resolve();
     },
+    handover: (ms) => void handovers.push(ms),
     ...extra,
   };
-  return { deps: d, sleeps, advance: (ms: number) => (mono += ms) };
+  return { deps: d, sleeps, handovers, advance: (ms: number) => (mono += ms), mono: () => mono };
 }
+
+const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
 describe("runFlusher", () => {
   it("creates and migrates the store, imports the fallback files, runs the stages in order and releases the instance", async () => {
@@ -96,6 +110,13 @@ describe("runFlusher", () => {
     store.close();
   });
 
+  it("nothing left to do ⇒ released without a successor", async () => {
+    const dir = tempDir();
+    const { deps: d, handovers } = deps(dir);
+    expect(await runFlusher(dir, d)).toBe("done");
+    expect(handovers).toEqual([]);
+  });
+
   it("gives every stage a context bound to its generation", async () => {
     const dir = tempDir();
     const { deps: d } = deps(dir, {
@@ -125,7 +146,55 @@ describe("runFlusher", () => {
     });
     expect(await runFlusher(dir, d)).toBe("done");
     expect(passes).toBe(3);
-    expect(sleeps).toEqual([1000, 1000]);
+    // Each wait is slept in slices of at most POLL_MS, watching for new work.
+    expect(sum(sleeps)).toBe(2000);
+    expect(sleeps.every((ms) => ms > 0 && ms <= POLL_MS)).toBe(true);
+  });
+
+  it("a sleeping flusher wakes within a poll slice when a hook journals an event", async () => {
+    const dir = tempDir();
+    const path = join(dir, DB_FILE);
+    const passAt: number[] = [];
+    let journalled = false;
+    const c = deps(dir, {}, (mono) => {
+      if (journalled || mono < 2500) return;
+      // Stop arrives 2.5 s into a 58 s wait; its hook saw a fresh heartbeat and started nobody.
+      journalled = true;
+      const hook = flusherStore(path);
+      hook.journal(event());
+      hook.close();
+    });
+    c.deps.stages = { segmentation: () => (passAt.push(c.mono()), passAt.length === 1 ? { dueInMs: 58_000 } : {}) };
+    expect(await runFlusher(dir, c.deps)).toBe("done");
+    expect(passAt).toHaveLength(2);
+    expect(passAt[1]!).toBeGreaterThanOrEqual(2500);
+    expect(passAt[1]!).toBeLessThanOrEqual(2500 + POLL_MS);
+    expect(c.handovers).toEqual([]);
+  });
+
+  it("a sleeping flusher wakes within a poll slice when a fallback file appears", async () => {
+    const dir = tempDir();
+    const passAt: number[] = [];
+    let written = false;
+    const c = deps(dir, {}, (mono) => {
+      if (written || mono < 1000) return;
+      written = true;
+      writeFallback(join(dir, FALLBACK_DIR), event());
+    });
+    c.deps.stages = { segmentation: () => (passAt.push(c.mono()), passAt.length === 1 ? { dueInMs: 58_000 } : {}) };
+    expect(await runFlusher(dir, c.deps)).toBe("done");
+    expect(passAt).toHaveLength(2);
+    expect(passAt[1]!).toBeLessThanOrEqual(1000 + POLL_MS);
+    expect(listJson(join(dir, FALLBACK_DIR))).toEqual([]);
+  });
+
+  it("a wait with no new work sleeps the whole due time, then runs the pass", async () => {
+    const dir = tempDir();
+    const passAt: number[] = [];
+    const c = deps(dir);
+    c.deps.stages = { segmentation: () => (passAt.push(c.mono()), passAt.length === 1 ? { dueInMs: 58_000 } : {}) };
+    expect(await runFlusher(dir, c.deps)).toBe("done");
+    expect(passAt).toEqual([0, 58_000]);
   });
 
   it("keeps the instance for one more pass when an event arrived during the pass", async () => {
@@ -150,7 +219,7 @@ describe("runFlusher", () => {
     expect(passes).toBe(2);
   });
 
-  it("releases at the end of the budget even when work keeps arriving", async () => {
+  it("releases at the end of the budget even when work keeps arriving, and hands it over to a successor", async () => {
     const dir = tempDir();
     let passes = 0;
     const clock = deps(dir);
@@ -166,6 +235,95 @@ describe("runFlusher", () => {
     };
     expect(await runFlusher(dir, d)).toBe("done");
     expect(passes).toBe(3);
+    // The successor starts at once, but never sooner than SUCCESSOR_MIN_INTERVAL_MS after this one.
+    expect(clock.handovers).toEqual([SUCCESSOR_MIN_INTERVAL_MS - 1200]);
+    const store = flusherStore(join(dir, DB_FILE));
+    expect(store.readOwner()!.heartbeat).toBe(RELEASED_HEARTBEAT);
+    store.close();
+  });
+
+  it("a stage cut short by the budget hands the rest over to a successor (no wait for a hook)", async () => {
+    const dir = tempDir();
+    const clock = deps(dir);
+    clock.deps.stages = { segmentation: () => (clock.advance(60_000), { dueInMs: 0 }) };
+    expect(await runFlusher(dir, clock.deps)).toBe("done");
+    expect(clock.handovers).toEqual([0]);
+  });
+
+  it("a send retry due after the budget is handed over to a successor started that much later", async () => {
+    const dir = tempDir();
+    const { deps: d, handovers, sleeps } = deps(dir, { stages: { send: () => ({ dueInMs: 90_000 }) } });
+    expect(await runFlusher(dir, d)).toBe("done");
+    expect(sleeps).toEqual([]);
+    expect(handovers).toEqual([90_000]);
+  });
+
+  it("a send retry further away than MAX_SUCCESSOR_DELAY_MS, or a later non-send due, is left to the next hook", async () => {
+    const farDir = tempDir();
+    const far = deps(farDir, { stages: { send: () => ({ dueInMs: MAX_SUCCESSOR_DELAY_MS + 1 }) } });
+    expect(await runFlusher(farDir, far.deps)).toBe("done");
+    expect(far.handovers).toEqual([]);
+    const refreshDir = tempDir();
+    const refresh = deps(refreshDir, { stages: { revisions: () => ({ dueInMs: 90_000 }) } });
+    expect(await runFlusher(refreshDir, refresh.deps)).toBe("done");
+    expect(refresh.handovers).toEqual([]);
+  });
+
+  it("a successor waits its start delay before it opens the store", async () => {
+    const dir = tempDir();
+    const order: string[] = [];
+    const c = deps(dir, { startDelayMs: 3000, onBoundary: (b) => order.push(`${b}@${c.mono()}`) });
+    expect(await runFlusher(dir, c.deps)).toBe("done");
+    expect(c.sleeps[0]).toBe(3000);
+    expect(order[0]).toBe("claimed@3000");
+  });
+
+  it("the send stage of a pass that committed revisions gets at least one request, once per run, and the run ends", async () => {
+    const dir = tempDir();
+    const c = deps(dir);
+    c.deps.wakeBudgetMs = 3000;
+    const seen: number[] = [];
+    let passes = 0;
+    c.deps.stages = {
+      revisions: (ctx) => {
+        passes += 1;
+        c.advance(100);
+        ctx.guarded(() => writeWorkspace(ctx.store, { workspaceId: WS, workspaceName: "Acme", checkedAt: new Date().toISOString(), skewMs: 0 }));
+        ctx.boundary("revision_committed");
+        return {};
+      },
+      send: (ctx) => {
+        seen.push(ctx.remainingMs());
+        if (ctx.remainingMs() < REQUEST_TIMEOUT_MS) return { dueInMs: 0, outOfBudget: true };
+        c.advance(1000);
+        return { dueInMs: 0 };
+      },
+    };
+    expect(await runFlusher(dir, c.deps)).toBe("done");
+    // Pass 1: 2.9 s left after the commit, below one request: extended to SEND_RESERVE_MS. Pass 2:
+    // no second extension; the starved send ends the run and hands the rest over.
+    expect(SEND_RESERVE_MS).toBeGreaterThanOrEqual(REQUEST_TIMEOUT_MS);
+    expect(seen).toEqual([SEND_RESERVE_MS, SEND_RESERVE_MS - 1000 - 100]);
+    expect(passes).toBe(2);
+    expect(c.handovers).toEqual([SUCCESSOR_MIN_INTERVAL_MS - 1200]);
+  });
+
+  it("no revision committed in the pass, or an instance that cannot send ⇒ the send stage gets no extension", async () => {
+    const dir = tempDir();
+    const c = deps(dir);
+    c.deps.wakeBudgetMs = 1000;
+    const seen: number[] = [];
+    c.deps.stages = { send: (ctx) => (seen.push(ctx.remainingMs()), {}) };
+    expect(await runFlusher(dir, c.deps)).toBe("done");
+    expect(seen).toEqual([1000]);
+
+    const offline = tempDir();
+    const o = deps(offline);
+    o.deps.wakeBudgetMs = 1000;
+    const offlineSeen: number[] = [];
+    o.deps.stages = { revisions: (ctx) => (ctx.boundary("revision_committed"), {}), send: (ctx) => (offlineSeen.push(ctx.remainingMs()), {}) };
+    expect(await runFlusher(offline, o.deps)).toBe("done"); // no workspace check yet: nothing can be sent
+    expect(offlineSeen).toEqual([1000]);
   });
 
   it("a halting stage skips the later stages of the pass", async () => {
@@ -249,6 +407,77 @@ describe("flusher processes", () => {
     const db = rawDb(join(dir, DB_FILE));
     expect((db.prepare("SELECT generation FROM owner").get() as { generation: number }).generation).toBe(1);
     db.close();
+  });
+
+  async function until<T>(probe: () => T | undefined, timeoutMs = 15_000): Promise<T> {
+    const end = Date.now() + timeoutMs;
+    for (;;) {
+      let value: T | undefined;
+      try {
+        value = probe();
+      } catch {
+        value = undefined; // locked by a flusher for a moment
+      }
+      if (value !== undefined) return value;
+      if (Date.now() > end) throw new Error("condition not met in time");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  it("a flusher process sleeping until a stage is due wakes within about a second when a hook journals an event", async () => {
+    const dir = tempDir();
+    const path = join(dir, DB_FILE);
+    flusherStore(path).close();
+    const child = startChild(bundle, ["flush", dir, JSON.stringify({ firstDueInMs: 25_000 })]);
+    try {
+      await child.waitFor(/^at stage:bounds$/);
+      // A Stop hook journals meanwhile; it sees a fresh heartbeat and starts no flusher.
+      const journalled = performance.now();
+      const hook = flusherStore(path);
+      hook.journal(event("s-stop"));
+      hook.close();
+      expect(await child.waitFor(/^outcome /, 10_000)).toBe("outcome done");
+      expect(performance.now() - journalled).toBeLessThan(3000);
+      expect(child.lines.filter((l) => l === "at stage:bounds")).toHaveLength(2);
+      const after = flusherStore(path);
+      expect(after.pendingEventSessions()).toEqual([]);
+      expect(after.segmentsForSession("s-stop")).toHaveLength(1);
+      after.close();
+    } finally {
+      await child.kill();
+    }
+  });
+
+  it("a flusher process whose budget ran out with work left behind starts a successor that does it", async () => {
+    const dir = tempDir();
+    const path = join(dir, DB_FILE);
+    flusherStore(path).close();
+    const child = startChild(bundle, ["flush", dir, JSON.stringify({ wakeBudgetMs: 1000, holdStage: "bounds", holdMs: 1500, handover: true })]);
+    await child.waitFor(/^holding$/);
+    // SessionEnd journals while the budget runs out; its hook saw a fresh heartbeat.
+    const hook = flusherStore(path);
+    hook.journal(event("s-end"));
+    hook.close();
+    const handover = await child.waitFor(/^handover /);
+    expect(Number(handover.split(" ")[1])).toBeLessThanOrEqual(SUCCESSOR_MIN_INTERVAL_MS);
+    expect(await child.waitFor(/^outcome /)).toBe("outcome done");
+    await child.exited;
+
+    // The successor (detached, the same harness without options) waits its delay, claims the
+    // instance (generation 2), segments the event and releases.
+    await until(() => {
+      const db = rawDb(path);
+      try {
+        const owner = db.prepare("SELECT generation, heartbeat FROM owner").get() as { generation: number; heartbeat: string };
+        return owner.generation === 2 && owner.heartbeat === RELEASED_HEARTBEAT ? true : undefined;
+      } finally {
+        db.close();
+      }
+    });
+    const after = flusherStore(path);
+    expect(after.pendingEventSessions()).toEqual([]);
+    expect(after.segmentsForSession("s-end")).toHaveLength(1);
+    after.close();
   });
 
   const BOUNDARIES: FlusherBoundary[] = [
@@ -359,6 +588,108 @@ describe("flusher processes", () => {
       }
     },
   );
+
+  it("Stop and SessionEnd of a short session are delivered within a poll slice, final revision included", async () => {
+    // The hooks of one short session run one after another: SessionStart and UserPromptSubmit,
+    // PostToolUse 2.5 s later, Stop 2.5 s later, SessionEnd 1.5 s later. The flusher started by
+    // PostToolUse waits ~57.5 s for the lease refresh; Stop sees its fresh heartbeat and starts
+    // nobody. One fake clock drives the wall clock, the uptime and the budget.
+    let mono = 0;
+    const base = Date.now();
+    const now = () => new Date(base + mono);
+    const uptime = () => 1000 + mono / 1000;
+    const finals: number[] = [];
+    const stops: number[] = [];
+    const seen = new Set<string>();
+    const server = await startServer((req: RecordedRequest) => {
+      if (req.url === "/api/v1/me") {
+        return json(200, { user: { id: "u", displayName: "D", email: "d@example.test", timezone: "UTC" }, workspace: { id: WS, name: "Acme", timezone: "UTC" }, role: "workspace_user", serverTime: now().toISOString() });
+      }
+      if (req.method === "PUT") {
+        const body = JSON.parse(req.body) as { final?: boolean; working?: boolean };
+        if (body.final === true) finals.push(mono);
+        else if (body.working === false) stops.push(mono);
+      }
+      const created = !seen.has(req.url);
+      seen.add(req.url);
+      return json(created ? 201 : 200, { id: "e", agentFinalized: false, agentDetached: false });
+    });
+    try {
+      const root = tempDir();
+      const cwd = writeMapping(join(root, "repo"));
+      const data = join(root, "data");
+      const cfg = pluginConfig(data);
+      const dir = instanceFor(data);
+      const api = createAgentApi({ baseUrl: server.baseUrl, apiKey: cfg.apiKey, timeoutMs: 3000 });
+      // A hook that sees no fresh owner starts a flusher: it runs once the current one is done.
+      let toStart = 0;
+      const at: Record<string, number> = {};
+      const fire = (name: string) => {
+        at[name] = mono;
+        recordEvent(hookInput(name, cwd, { session_id: "s-live" }), cfg, Date.now() + 1000, { now, uptime, startFlusher: () => void (toStart += 1) });
+      };
+      const later = [
+        { after: 2500, name: "PostToolUse" },
+        { after: 5000, name: "Stop" },
+        { after: 6500, name: "SessionEnd" },
+      ];
+      // The hooks due by now fire while a flusher sleeps.
+      const fireDue = () => {
+        while (later.length > 0 && mono >= later[0]!.after) fire(later.shift()!.name);
+      };
+      const run = () =>
+        runFlusher(dir, {
+          now,
+          uptime,
+          api,
+          config: cfg,
+          wakeBudgetMs: 60_000,
+          clock: () => mono,
+          sleep: (ms) => {
+            mono += ms;
+            fireDue();
+            return Promise.resolve();
+          },
+        });
+
+      fire("SessionStart");
+      fire("UserPromptSubmit");
+      const flushersAt: number[] = [];
+      while (toStart > 0 || later.length > 0) {
+        if (toStart === 0) {
+          mono = Math.max(mono, later[0]!.after); // nobody runs: the clock jumps to the next hook
+          fireDue();
+          continue;
+        }
+        toStart -= 1;
+        flushersAt.push(mono);
+        expect(await run()).toBe("done");
+      }
+
+      // Stop was handled by the sleeping owner within a poll slice (no flusher started for it);
+      // the SessionEnd that came after its release started one, which delivered the final revision.
+      expect(flushersAt).not.toContain(at.Stop);
+      expect(stops[0]! - at.Stop!).toBeLessThanOrEqual(POLL_MS);
+      expect(finals).toHaveLength(1);
+      expect(finals[0]! - at.SessionEnd!).toBeLessThanOrEqual(POLL_MS);
+      expect(mono).toBeLessThan(10_000); // not the 57.5 s of the refresh wait
+      const store = flusherStore(join(dir, DB_FILE));
+      try {
+        expect(store.pendingOutboxCount()).toBe(0);
+        const segments = store.segmentsForSession("s-live");
+        expect(segments).toHaveLength(1);
+        expect(segments[0]).toMatchObject({ final: true, createdOnServer: true });
+        const last = store.getLastCommitted("segment", segments[0]!.id)!;
+        expect(JSON.parse(last.bodyJson)).toMatchObject({ final: true, working: false });
+        expect((JSON.parse(last.bodyJson) as { usageQuality: string }).usageQuality).not.toBe("pending");
+        expect(server.requests.some((r) => r.method === "PUT" && r.body === last.bodyJson)).toBe(true);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await server.close();
+    }
+  });
 
   it("guarded writes of a killed flusher never reach the store (killed inside a transaction)", async () => {
     const dir = tempDir();

@@ -315,13 +315,13 @@ describe("sendDue", () => {
     expect(readPause(t.h.store)).toBeNull();
   });
 
-  it("stops at the end of the budget, leaving the rest for the next wake-up", async () => {
+  it("stops at the end of the budget, the rest due at once (out of budget, for a successor)", async () => {
     const t = await setup(() => ok(201));
     await t.check();
     t.activity(NOW, { sessionId: "a" });
     t.activity(NOW, { sessionId: "b" });
     const out = await sendDue(t.h.store, t.h.ctx.generation, t.h.ctx.api, t.h.ctx.now, 60_000, { remainingMs: () => 2999 });
-    expect(out).toEqual({ dueInMs: null });
+    expect(out).toEqual({ dueInMs: 0, outOfBudget: true });
     expect(t.puts()).toHaveLength(0);
     expect(t.h.store.pendingOutboxCount()).toBe(2);
   });

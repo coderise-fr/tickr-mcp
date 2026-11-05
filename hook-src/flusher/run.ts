@@ -2,6 +2,21 @@
 // run passes (fallback import, then the PIPELINE stages) until nothing is due within the wake
 // budget or the budget is spent. It never prints anything (stdio is ignored by the spawner).
 //
+// Waiting and handing over (a hook that sees a fresh heartbeat starts no flusher, and the
+// SessionEnd of a session is its last hook, so the owner must not leave work behind):
+//
+//   - a wait for a due stage is slept in slices of POLL_MS; the flusher wakes at once when an
+//     event or a fallback file arrived since the pass started;
+//   - the send stage of a pass that committed revisions gets at least SEND_RESERVE_MS (one
+//     request), past the wake budget when needed, once per run (a run always ends);
+//   - after releasing the instance, a flusher that leaves work behind hands it over to ONE
+//     successor (FlusherDeps.handover, a new detached flusher): at once for events or fallback
+//     files that arrived, for a stage cut short by the budget or due within SUCCESSOR_HORIZON_MS;
+//     after the delay of a send retry due within MAX_SUCCESSOR_DELAY_MS. A successor never starts
+//     sooner than SUCCESSOR_MIN_INTERVAL_MS after its predecessor, and the chain is capped
+//     (spawn.ts). Anything else (a lease refresh or idle finalisation later on, a longer
+//     Retry-After) waits for the next hook, as before.
+//
 // With TICKR_PLUGIN_DEBUG=1 in its environment, the flusher appends one JSON line per step to
 // <instance>/debug.log (kept under DEBUG_MAX_BYTES). A line is built field by field from an
 // allow-list (DebugRecord): fixed step names, stage names, counts and durations. Never a key, a
@@ -12,12 +27,23 @@ import type { PluginConfig } from "../config.js";
 import { FALLBACK_DIR, importFallback, pendingFallbackCount } from "../fallback.js";
 import { DB_FILE, openStore } from "../store/db.js";
 import { SCHEMA_VERSION } from "../store/schema.js";
-import type { AgentApi } from "./api.js";
+import { type AgentApi, REQUEST_TIMEOUT_MS } from "./api.js";
 import { claimOwnership, guarded, LostOwnership, releaseOwnership } from "./owner.js";
+import { canSend, MAX_BACKOFF_MS } from "./sender.js";
 import { type FlusherBoundary, PIPELINE, STAGE_NAMES, type StageContext, type StageName, type StageRun } from "./stages.js";
 
 export const FLUSHER_BUSY_TIMEOUT_MS = 5000;
 export const WAKE_BUDGET_MS = 60_000;
+/** A wait is slept in slices of this length, watching for new events and fallback files. */
+export const POLL_MS = 250;
+/** Time the send stage of a pass that committed revisions gets at least (one request and a margin). */
+export const SEND_RESERVE_MS = REQUEST_TIMEOUT_MS + 1000;
+/** Work due within this time when the flusher stops is handed over to a successor at once. */
+export const SUCCESSOR_HORIZON_MS = 5000;
+/** A send retry due within this time is handed over to a successor started that much later. */
+export const MAX_SUCCESSOR_DELAY_MS = MAX_BACKOFF_MS;
+/** A successor never starts sooner than this after its predecessor started. */
+export const SUCCESSOR_MIN_INTERVAL_MS = 5000;
 
 /** Environment switch of the debug log ("1" turns it on). */
 export const DEBUG_ENV = "TICKR_PLUGIN_DEBUG";
@@ -27,7 +53,7 @@ export const DEBUG_MAX_BYTES = 1_000_000;
 
 /** One debug line. Only these fields, with these types, are ever written. */
 export interface DebugRecord {
-  step: "start" | "claimed" | "pass" | "stage" | "boundary" | "end";
+  step: "start" | "claimed" | "pass" | "stage" | "boundary" | "handover" | "end";
   stage?: StageName;
   point?: FlusherBoundary;
   outcome?: FlushOutcome;
@@ -39,7 +65,7 @@ export interface DebugRecord {
   terminalItems?: number;
 }
 
-const STEPS = new Set<DebugRecord["step"]>(["start", "claimed", "pass", "stage", "boundary", "end"]);
+const STEPS = new Set<DebugRecord["step"]>(["start", "claimed", "pass", "stage", "boundary", "handover", "end"]);
 const OUTCOMES = new Set<FlushOutcome>(["done", "not_owner", "newer_schema", "lost_ownership"]);
 const BOUNDARY = /^(claimed|fallback_committed|revision_committed|sent|acknowledged|released|stage:[a-z]+)$/;
 const NUMBERS = ["generation", "pass", "dueInMs", "ms", "pendingRevisions", "terminalItems"] as const;
@@ -95,6 +121,13 @@ export interface FlusherDeps {
   onBoundary?: (point: FlusherBoundary) => void;
   /** The debug log (TICKR_PLUGIN_DEBUG=1), see debugLogger. */
   debug?: (rec: DebugRecord) => void;
+  /**
+   * Starts a successor flusher that waits delayMs before it claims the instance, called after
+   * the release when work is left behind (spawn.ts spawnSuccessor). Absent: nobody is started.
+   */
+  handover?: (delayMs: number) => void;
+  /** Milliseconds to wait before opening the store (a successor's start delay). */
+  startDelayMs?: number;
 }
 
 /**
@@ -106,18 +139,73 @@ export type FlushOutcome = "done" | "not_owner" | "newer_schema" | "lost_ownersh
 
 const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** What a run leaves behind when it stops. */
+export interface LeftBehind {
+  /** An event or a fallback file arrived after the last pass started. */
+  arrived: boolean;
+  /** The earliest due of the last pass (any stage), or null. */
+  dueInMs: number | null;
+  /** The due of the send stage in the last pass (a retry, a row not due yet), or null. */
+  sendDueInMs: number | null;
+}
+
+/**
+ * The start delay of the successor that takes over what a run of `ranMs` leaves behind, or null
+ * when the next hook can take it: at once for arrived work or work due within
+ * SUCCESSOR_HORIZON_MS, after the retry delay for a send due within MAX_SUCCESSOR_DELAY_MS; never
+ * sooner than SUCCESSOR_MIN_INTERVAL_MS after the run started (no spawn storm).
+ */
+export function successorDelay(left: LeftBehind, ranMs: number): number | null {
+  let delay: number | null = null;
+  if (left.arrived) delay = 0;
+  else if (left.dueInMs !== null && left.dueInMs <= SUCCESSOR_HORIZON_MS) delay = left.dueInMs;
+  else if (left.sendDueInMs !== null && left.sendDueInMs <= MAX_SUCCESSOR_DELAY_MS) delay = left.sendDueInMs;
+  if (delay === null) return null;
+  return Math.max(0, delay, SUCCESSOR_MIN_INTERVAL_MS - ranMs);
+}
+
+interface PassResult {
+  due: number | null;
+  sendDue: number | null;
+  /** A stage stopped for lack of budget: its work is due at once. */
+  outOfBudget: boolean;
+}
+
+function minDue(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
+
+/**
+ * Sleeps up to `ms` in slices of POLL_MS, and returns as soon as `arrived()` holds (an event or a
+ * fallback file came in: a hook that saw this flusher alive started no other one).
+ */
+async function waitForWork(ms: number, clock: () => number, sleep: (ms: number) => Promise<void>, arrived: () => boolean): Promise<void> {
+  const wakeAt = clock() + ms;
+  for (;;) {
+    if (arrived()) return;
+    const rest = wakeAt - clock();
+    if (rest <= 0) return;
+    await sleep(Math.min(POLL_MS, rest));
+  }
+}
+
 export async function runFlusher(instanceDir: string, deps: FlusherDeps): Promise<FlushOutcome> {
   const clock = deps.clock ?? (() => performance.now());
   const sleep = deps.sleep ?? realSleep;
   const debug = deps.debug ?? (() => undefined);
+  let committed = false; // a revision was committed in the current pass
   const boundary = (point: FlusherBoundary) => {
+    if (point === "revision_committed") committed = true;
     deps.onBoundary?.(point);
     if (!point.startsWith("stage:")) debug({ step: "boundary", point });
   };
   const nowIso = () => deps.now().toISOString();
-  const endAt = clock() + deps.wakeBudgetMs;
-  const started = clock();
   debug({ step: "start" });
+  if (deps.startDelayMs !== undefined && deps.startDelayMs > 0) await sleep(deps.startDelayMs);
+  let endAt = clock() + deps.wakeBudgetMs;
+  const started = clock();
 
   const opened = openStore(join(instanceDir, DB_FILE), { role: "flusher", busyTimeoutMs: deps.busyTimeoutMs ?? FLUSHER_BUSY_TIMEOUT_MS });
   if (typeof opened === "string") {
@@ -155,6 +243,28 @@ export async function runFlusher(instanceDir: string, deps: FlusherDeps): Promis
       boundary,
     };
     const fallback = join(instanceDir, FALLBACK_DIR);
+    let reserved = false; // the send reserve is granted once per run, so that a run always ends
+
+    const runStages = async (): Promise<PassResult> => {
+      const out: PassResult = { due: null, sendDue: null, outOfBudget: false };
+      for (const stage of stages) {
+        if (stage.name === "send" && committed && !reserved && endAt - clock() < SEND_RESERVE_MS && canSend(store)) {
+          // Revisions were committed and may be sent: send at least one, past the soft budget if need be.
+          endAt = clock() + SEND_RESERVE_MS;
+          reserved = true;
+        }
+        const stageStart = clock();
+        const result = await stage.run(ctx);
+        debug({ step: "stage", stage: stage.name, ms: clock() - stageStart, dueInMs: result.dueInMs ?? null });
+        boundary(`stage:${stage.name}`);
+        const due = typeof result.dueInMs === "number" ? result.dueInMs : null;
+        out.due = minDue(out.due, due);
+        if (stage.name === "send") out.sendDue = due;
+        if (result.outOfBudget) out.outOfBudget = true;
+        if (result.halt) break;
+      }
+      return out;
+    };
 
     let pass = 0;
     for (;;) {
@@ -163,28 +273,36 @@ export async function runFlusher(instanceDir: string, deps: FlusherDeps): Promis
       ctx.guarded(() => undefined); // heartbeat, and stop early when ownership was lost
       importFallback(store, gen, fallback, { now: deps.now, onCommitted: () => boundary("fallback_committed") });
       const seen = store.maxEventSeq();
-
-      let due: number | null = null;
-      for (const stage of stages) {
-        const stageStart = clock();
-        const result = await stage.run(ctx);
-        debug({ step: "stage", stage: stage.name, ms: clock() - stageStart, dueInMs: result.dueInMs ?? null });
-        boundary(`stage:${stage.name}`);
-        if (typeof result.dueInMs === "number") due = due === null ? result.dueInMs : Math.min(due, result.dueInMs);
-        if (result.halt) break;
-      }
+      const arrived = () => {
+        try {
+          return store.maxEventSeq() !== seen || pendingFallbackCount(fallback) > 0;
+        } catch {
+          return false; // the store is busy for a moment: look again at the next slice
+        }
+      };
+      committed = false;
+      const result = await runStages();
 
       const left = endAt - clock();
-      if (due !== null && due < left) {
-        await sleep(Math.max(0, due));
+      if (!result.outOfBudget && result.due !== null && result.due < left) {
+        await waitForWork(Math.max(0, result.due), clock, sleep, arrived);
         continue;
       }
       // Nothing due within the budget: give the instance up, unless an event or a fallback file
       // arrived during the pass (its hook saw a fresh heartbeat and started no flusher). Once
-      // the budget is spent, the next hook starts a new flusher instead.
-      const idle = () => left <= 0 || (store.maxEventSeq() === seen && pendingFallbackCount(fallback) === 0);
-      if (releaseOwnership(store, gen, nowIso(), idle)) {
+      // the budget is spent, what is left is handed over to a successor.
+      const spent = left <= 0 || result.outOfBudget;
+      if (releaseOwnership(store, gen, nowIso(), () => spent || !arrived())) {
         boundary("released");
+        const delay = successorDelay({ arrived: arrived(), dueInMs: result.due, sendDueInMs: result.sendDue }, clock() - started);
+        if (delay !== null && deps.handover) {
+          debug({ step: "handover", dueInMs: delay });
+          try {
+            deps.handover(delay);
+          } catch {
+            // The next hook starts a flusher instead.
+          }
+        }
         return end("done");
       }
     }

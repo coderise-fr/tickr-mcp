@@ -11,7 +11,7 @@ import { DEBUG_ENV, DEBUG_FILE, debugLogger, runFlusher, WAKE_BUDGET_MS } from "
 import { recordEvent } from "./intake.js";
 import { type HookInput, readHookInput, type Write, writeHookOutput, writeStdout } from "./io.js";
 import { loadSqlite, unsupportedRuntimeMessage } from "./runtime.js";
-import { spawnFlusher } from "./spawn.js";
+import { spawnFlusher, spawnSuccessor, successorStartDelay } from "./spawn.js";
 import { renderStatus } from "./status.js";
 
 /** Global budget of a hook, counted from process start (below the 1.5 s of SessionEnd). */
@@ -71,8 +71,12 @@ async function runHook(event: HookEvent, env: NodeJS.ProcessEnv, io: HookIo): Pr
   writeHookOutput(recordEvent({ ...input, hook_event_name: event }, config, io.deadlineMs, { env, startFlusher }), io.write);
 }
 
-/** The flusher of one instance directory, which must lie inside the plugin data directory. */
-async function runFlush(dir: string | undefined, env: NodeJS.ProcessEnv): Promise<void> {
+/**
+ * The flusher of one instance directory, which must lie inside the plugin data directory. A
+ * flusher of the bundle hands the work it leaves behind over to a successor (same bundle, same
+ * environment); a successor first waits the delay its predecessor gave it.
+ */
+async function runFlush(dir: string | undefined, env: NodeJS.ProcessEnv, bundlePath: string | undefined): Promise<void> {
   if (!dir || loadSqlite() === null) return;
   const config = readPluginConfig(env);
   if ("problem" in config) return;
@@ -81,7 +85,17 @@ async function runFlush(dir: string | undefined, env: NodeJS.ProcessEnv): Promis
   // The key comes from the inherited environment (PD-18), never from argv.
   const api = createAgentApi({ baseUrl: config.baseUrl, apiKey: config.apiKey, timeoutMs: REQUEST_TIMEOUT_MS });
   const debug = env[DEBUG_ENV] === "1" ? debugLogger(join(instanceDir, DEBUG_FILE)) : undefined;
-  await runFlusher(instanceDir, { now: () => new Date(), uptime, api, config, wakeBudgetMs: WAKE_BUDGET_MS, ...(debug ? { debug } : {}) });
+  const handover = bundlePath ? (delayMs: number) => void spawnSuccessor(bundlePath, instanceDir, env, delayMs) : undefined;
+  await runFlusher(instanceDir, {
+    now: () => new Date(),
+    uptime,
+    api,
+    config,
+    wakeBudgetMs: WAKE_BUDGET_MS,
+    startDelayMs: successorStartDelay(env),
+    ...(debug ? { debug } : {}),
+    ...(handover ? { handover } : {}),
+  });
 }
 
 /**
@@ -106,7 +120,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = 
   const [mode] = argv;
   try {
     if (isHookEvent(mode)) await runHook(mode, env, io);
-    else if (mode === "flush") await runFlush(argv[1], env);
+    else if (mode === "flush") await runFlush(argv[1], env, io.bundlePath);
     else if (mode === "status") runStatus(argv[1], env, io.write);
   } catch {
     // A hook never fails the user's session; a failed flusher is started again by the next hook.

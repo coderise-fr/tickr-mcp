@@ -6,7 +6,16 @@ import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { FALLBACK_DIR } from "../../hook-src/fallback.js";
 import { RELEASED_HEARTBEAT } from "../../hook-src/flusher/owner.js";
-import { spawnFlusher } from "../../hook-src/spawn.js";
+import { MAX_SUCCESSOR_DELAY_MS } from "../../hook-src/flusher/run.js";
+import {
+  MAX_SUCCESSOR_CHAIN,
+  spawnFlusher,
+  spawnSuccessor,
+  SUCCESSOR_CHAIN_ENV,
+  SUCCESSOR_DELAY_ENV,
+  successorChain,
+  successorStartDelay,
+} from "../../hook-src/spawn.js";
 import { instanceDir, instanceId } from "../../hook-src/identity.js";
 import { DB_FILE } from "../../hook-src/store/db.js";
 import { problem, startServer } from "../helpers/httpServer.js";
@@ -47,6 +56,57 @@ describe("spawnFlusher", () => {
     const text = await until(() => (existsSync(report) ? readFileSync(report, "utf8") : undefined));
     expect(JSON.parse(text)).toEqual({ args: ["flush", instance], execArgv: ["--no-warnings"], keyInEnv: true });
     expect(text).not.toContain(KEY);
+  });
+});
+
+describe("spawnSuccessor", () => {
+  function fakeBundle(root: string, report: string): string {
+    const fake = join(root, "fake bundle.cjs");
+    writeFileSync(
+      fake,
+      [
+        'const { writeFileSync } = require("node:fs");',
+        `writeFileSync(${JSON.stringify(report)}, JSON.stringify({`,
+        "  args: process.argv.slice(2),",
+        `  keyInEnv: process.env.CLAUDE_PLUGIN_OPTION_API_KEY === ${JSON.stringify(KEY)},`,
+        `  delay: process.env.${SUCCESSOR_DELAY_ENV},`,
+        `  chain: process.env.${SUCCESSOR_CHAIN_ENV},`,
+        "}));",
+      ].join("\n"),
+    );
+    return fake;
+  }
+
+  it("starts the same bundle as `flush <instanceDir>`, the key, its delay and its place in the chain in the environment only", async () => {
+    const root = tempDir("tickr successor ");
+    const instance = join(root, "data", "instance");
+    const report = join(root, "report.json");
+    const env = { ...process.env, ...pluginEnv(join(root, "data")), [SUCCESSOR_CHAIN_ENV]: "2" };
+
+    expect(spawnSuccessor(fakeBundle(root, report), instance, env, 3400.4)).toBe(true);
+
+    const text = await until(() => (existsSync(report) ? readFileSync(report, "utf8") : undefined));
+    expect(JSON.parse(text)).toEqual({ args: ["flush", instance], keyInEnv: true, delay: "3400", chain: "3" });
+    expect(text).not.toContain(KEY);
+  });
+
+  it("starts nothing once the chain is MAX_SUCCESSOR_CHAIN long", async () => {
+    const root = tempDir("tickr successor ");
+    const report = join(root, "report.json");
+    const env = { ...process.env, ...pluginEnv(join(root, "data")), [SUCCESSOR_CHAIN_ENV]: String(MAX_SUCCESSOR_CHAIN) };
+    expect(spawnSuccessor(fakeBundle(root, report), join(root, "data", "instance"), env, 0)).toBe(false);
+    await delay(500);
+    expect(existsSync(report)).toBe(false);
+  });
+
+  it("reads its chain and its bounded start delay from the environment", () => {
+    expect(successorChain({})).toBe(0);
+    expect(successorChain({ [SUCCESSOR_CHAIN_ENV]: "4" })).toBe(4);
+    expect(successorChain({ [SUCCESSOR_CHAIN_ENV]: "x" })).toBe(0);
+    expect(successorStartDelay({})).toBe(0);
+    expect(successorStartDelay({ [SUCCESSOR_DELAY_ENV]: "1500" })).toBe(1500);
+    expect(successorStartDelay({ [SUCCESSOR_DELAY_ENV]: "-5" })).toBe(0);
+    expect(successorStartDelay({ [SUCCESSOR_DELAY_ENV]: String(10 * MAX_SUCCESSOR_DELAY_MS) })).toBe(MAX_SUCCESSOR_DELAY_MS);
   });
 });
 

@@ -58,6 +58,11 @@ export interface StageResult {
   dueInMs?: number | null;
   /** Skip the later stages of this pass (for example a paused instance skips sending). */
   halt?: boolean;
+  /**
+   * The stage stopped because too little of the budget was left for its next step (the send
+   * stage needs one request timeout): the flusher ends the run and hands the rest over.
+   */
+  outOfBudget?: boolean;
 }
 
 export type StageRun = (ctx: StageContext) => StageResult | Promise<StageResult>;

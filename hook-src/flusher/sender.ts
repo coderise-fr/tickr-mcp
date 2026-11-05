@@ -192,6 +192,8 @@ export interface SendOptions {
 export interface SendResult {
   /** Milliseconds until the next row is due, or null when nothing is pending. */
   dueInMs: number | null;
+  /** Rows were due but too little time was left for one request: they are due at once. */
+  outOfBudget?: true;
 }
 
 async function sendRow(store: Store, api: AgentApi, row: OutboxRow): Promise<SendOutcome> {
@@ -260,8 +262,8 @@ export async function sendDue(store: Store, gen: number, api: AgentApi, now: () 
     const rows = store.dueOutbox(now().toISOString(), SEND_BATCH);
     if (rows.length === 0) break;
     for (const row of rows) {
-      // Too little time left for one more request: the next wake-up sends the rest.
-      if (remaining() < timeoutMs) return { dueInMs: null };
+      // Too little time left for one more request: the rest is due at once, for a successor.
+      if (remaining() < timeoutMs) return { dueInMs: 0, outOfBudget: true };
       if (store.isTerminal(row.targetKind, row.targetId)) {
         inTx(() => store.deleteOutboxFor(row.targetKind, row.targetId));
         continue;
@@ -280,11 +282,12 @@ export async function sendDue(store: Store, gen: number, api: AgentApi, now: () 
 
 export function sendStage(opts: Pick<SendOptions, "random"> = {}): StageRun {
   return async (ctx) => {
-    const { dueInMs } = await sendDue(ctx.store, ctx.generation, ctx.api, ctx.now, ctx.remainingMs(), {
+    const { dueInMs, outOfBudget } = await sendDue(ctx.store, ctx.generation, ctx.api, ctx.now, ctx.remainingMs(), {
       ...opts,
       boundary: ctx.boundary,
       remainingMs: ctx.remainingMs,
     });
+    if (outOfBudget) return { dueInMs: 0, outOfBudget };
     return dueInMs === null ? {} : { dueInMs };
   };
 }
