@@ -22,15 +22,22 @@ const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 lines.on("line", (line) => {
   // Recent Claude Code versions first send a "server/discover" probe: wait for `initialize`.
   if (!captured) {
+    let message;
     try {
-      const message = JSON.parse(line);
-      if (message.method === "initialize") {
-        captured = true;
-        const { clientInfo, protocolVersion } = message.params ?? {};
-        writeFileSync(out, JSON.stringify({ params: { protocolVersion, clientInfo } }, null, 2) + "\n");
-      }
+      message = JSON.parse(line);
     } catch {
       // not JSON: passed through unchanged
+    }
+    if (message?.method === "initialize") {
+      const { clientInfo, protocolVersion } = message.params ?? {};
+      try {
+        writeFileSync(out, JSON.stringify({ params: { protocolVersion, clientInfo } }, null, 2) + "\n");
+        captured = true;
+      } catch (error) {
+        console.error(`capture-initialize: cannot write ${out}: ${error.message}`);
+        child.kill();
+        process.exit(1);
+      }
     }
   }
   child.stdin.write(line + "\n");
