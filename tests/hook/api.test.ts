@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { AGENT_NAME, AGENT_VERSION } from "../../src/api/agent.js";
-import { classify, createAgentApi, parseRetryAfter, ROUTE_NOT_FOUND, type SendOutcome, USER_AGENT } from "../../hook-src/flusher/api.js";
+import { bodyPropertiesOf, REST_CONTRACT } from "../../src/api/contract.js";
+import { classify, createAgentApi, parseRetryAfter, ROUTE_NOT_FOUND, type SendOutcome, USAGE_BODY_KEYS, USER_AGENT } from "../../hook-src/flusher/api.js";
 import { SEGMENT_BODY_KEYS, type SegmentBody } from "../../hook-src/flusher/revisions.js";
+import { cleanTempDirs } from "./helpers/env.js";
+import { lastBody, sessionDriver, writeTranscript } from "./helpers/transcript.js";
 import { PLUGIN_VERSION } from "../../hook-src/version.js";
 import { json, problem, type Reply, startServer } from "../helpers/httpServer.js";
 
@@ -174,5 +177,49 @@ describe("classification (PD-12)", () => {
     const [name, version] = agentHeaderValue({ name: "claude-code", version: "unknown" }).split("/");
     expect(name).toMatch(AGENT_NAME);
     expect(version).toMatch(AGENT_VERSION);
+  });
+});
+
+describe("REST contract of the plugin routes", () => {
+  const SEGMENT_ROUTE = "/api/v1/agent-segments/{segmentId}";
+  const USAGE_ROUTE = "/api/v1/entries/{id}/agent-usage";
+  afterEach(() => cleanTempDirs());
+
+  it("lists both routes as PUT, optional against a Tickr without agent provenance, with the plugin's body keys in wire order", () => {
+    expect(REST_CONTRACT.filter((r) => r.method === "put").map((r) => [r.path, r.optional])).toEqual([
+      [SEGMENT_ROUTE, true],
+      [USAGE_ROUTE, true],
+    ]);
+    expect(bodyPropertiesOf("put", SEGMENT_ROUTE)).toEqual([...SEGMENT_BODY_KEYS]);
+    expect(bodyPropertiesOf("put", USAGE_ROUTE)).toEqual([...USAGE_BODY_KEYS]);
+  });
+
+  it("the bodies the revisions stage builds (segment, delegated entry) have exactly these keys", async () => {
+    const s = sessionDriver("2026-11-05T10:00:00.000Z");
+    const entryId = "0190f0c0-5555-7000-8000-0000000000e1";
+    s.ev("UserPromptSubmit", "2026-11-05T10:00:00.000Z", { promptId: "p-1" });
+    s.ev("PostToolUse", "2026-11-05T10:02:00.000Z", { promptId: "p-1", entryId });
+    writeTranscript(s.transcript, [{ id: "m1", at: "2026-11-05T10:01:00.000Z" }]);
+    s.ev("Stop", "2026-11-05T10:03:00.000Z", { promptId: "p-1" });
+    s.ev("SessionEnd", "2026-11-05T10:04:00.000Z");
+    await s.pass("2026-11-05T10:05:00.000Z");
+    const seg = s.h.store.segmentsForSession("s-1")[0]!;
+    expect(Object.keys(lastBody(s.h, "segment", seg.id)!)).toEqual([...bodyPropertiesOf("put", SEGMENT_ROUTE)]);
+    expect(Object.keys(lastBody(s.h, "delegated", entryId)!)).toEqual([...bodyPropertiesOf("put", USAGE_ROUTE)]);
+    s.h.close();
+  });
+
+  it("the client sends each body with the method and path of its contract route", async () => {
+    const { server, api } = await serve(() => json(200, entry()));
+    await api.putSegment(SEGMENT, BODY, "claude-code/unknown");
+    await api.putUsage(ENTRY, { revision: 1, agentSessionId: "s-1", usageQuality: "pending", usage: [] });
+    const toPath = (template: string) => new RegExp(`^${template.replace(/\{[^}]+\}/g, "[^/]+")}$`);
+    expect(server.requests.map((r) => r.method)).toEqual(["PUT", "PUT"]);
+    expect(server.requests[0]!.url).toMatch(toPath(SEGMENT_ROUTE));
+    expect(server.requests[1]!.url).toMatch(toPath(USAGE_ROUTE));
+    for (const r of server.requests) {
+      const route = r.url.startsWith("/api/v1/agent-segments/") ? SEGMENT_ROUTE : USAGE_ROUTE;
+      expect(Object.keys(JSON.parse(r.body) as object).every((k) => bodyPropertiesOf("put", route).includes(k))).toBe(true);
+    }
   });
 });

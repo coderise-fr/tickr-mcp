@@ -4,7 +4,13 @@ import { REST_CONTRACT } from "../../src/api/contract.js";
 // Routes, query parameters and request-body property names (with their exact
 // casing) must exist in the published OpenAPI document. It declares no response schemas,
 // so response shapes are covered by fixtures and the manual E2E checklist only.
-const URL_ = process.env.TICKR_SWAGGER_URL ?? "https://tickr.coderise.cloud/api/docs/v1/swagger.json";
+//
+// Routes marked optional (the plugin routes, served only by a Tickr with agent provenance) are
+// skipped with a message when the default document does not publish them yet. With
+// TICKR_SWAGGER_URL set, every route is required: point it at an instance with agent provenance
+// to check the plugin routes.
+const EXPLICIT_URL = process.env.TICKR_SWAGGER_URL?.trim() || undefined;
+const URL_ = EXPLICIT_URL ?? "https://tickr.coderise.cloud/api/docs/v1/swagger.json";
 
 interface Doc { paths: Record<string, Record<string, Operation>>; components?: { schemas?: Record<string, Schema> } }
 interface Operation { parameters?: { name: string }[]; requestBody?: { content?: Record<string, { schema?: Schema }> } }
@@ -25,8 +31,11 @@ function resolve(schema: Schema | undefined): Schema | undefined {
 
 describe("Tickr OpenAPI contract", () => {
   for (const route of REST_CONTRACT) {
-    it(`${route.method.toUpperCase()} ${route.path}`, () => {
+    it(`${route.method.toUpperCase()} ${route.path}`, (ctx) => {
       const op = doc.paths[route.path]?.[route.method];
+      if (op === undefined && route.optional && EXPLICIT_URL === undefined) {
+        ctx.skip(`not published by ${URL_} (no agent provenance there yet); set TICKR_SWAGGER_URL to an instance that has it to check this route`);
+      }
       expect(op, "route missing from the OpenAPI document").toBeDefined();
       const declared = new Set((op!.parameters ?? []).map((p) => p.name));
       for (const q of route.query) expect(declared, `query parameter ${q}`).toContain(q);

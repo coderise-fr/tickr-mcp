@@ -6,8 +6,8 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { USAGE_BODY_KEYS } from "../../hook-src/flusher/api.js";
-import { SEGMENT_BODY_KEYS, type UsageRow } from "../../hook-src/flusher/revisions.js";
+import { bodyPropertiesOf } from "../../src/api/contract.js";
+import type { UsageRow } from "../../hook-src/flusher/revisions.js";
 import { DEBUG_FILE, debugLine, type DebugRecord } from "../../hook-src/flusher/run.js";
 import { instanceDir, instanceId } from "../../hook-src/identity.js";
 import { main } from "../../hook-src/main.js";
@@ -141,8 +141,8 @@ describe("privacy allow-list (D14)", () => {
         continue;
       }
       const keys = Object.keys(JSON.parse(r.body) as object);
-      if (r.url.startsWith("/api/v1/agent-segments/")) expect(keys).toEqual([...SEGMENT_BODY_KEYS]);
-      else expect(keys).toEqual([...USAGE_BODY_KEYS]);
+      const route = r.url.startsWith("/api/v1/agent-segments/") ? "/api/v1/agent-segments/{segmentId}" : "/api/v1/entries/{id}/agent-usage";
+      expect(keys).toEqual([...bodyPropertiesOf("put", route)]);
     }
   });
 

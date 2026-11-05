@@ -1,11 +1,17 @@
-// Every REST route, query parameter and request-body property the client uses.
-// Checked against the published OpenAPI document by tests/contract, and against
-// the bodies the tools build by the wire-mapping tests.
+// Every REST route, query parameter and request-body property the client and the Claude Code
+// plugin use. Checked against the published OpenAPI document by tests/contract, and against
+// the bodies the tools and the plugin build by the wire-mapping tests.
 export interface RestRoute {
-  method: "get" | "post" | "patch";
+  method: "get" | "post" | "patch" | "put";
   path: string;
   query: readonly string[];
   body: readonly string[] | null;
+  /**
+   * Only served by a Tickr with agent provenance. The contract test skips it, with a message,
+   * when the default (production) document does not publish it yet; never when
+   * TICKR_SWAGGER_URL names the document explicitly.
+   */
+  optional?: true;
 }
 
 export const REST_CONTRACT: readonly RestRoute[] = [
@@ -31,6 +37,18 @@ export const REST_CONTRACT: readonly RestRoute[] = [
   { method: "get", path: "/api/v1/projects", query: ["archived"], body: null },
   { method: "get", path: "/api/v1/tasks", query: ["project_id", "archived"], body: null },
   { method: "get", path: "/api/v1/tags", query: [], body: null },
+  // The Claude Code plugin (plugins/tickr): agent session segments and the usage of delegated entries.
+  {
+    method: "put", path: "/api/v1/agent-segments/{segmentId}", query: [], optional: true,
+    body: [
+      "revision", "agentSessionId", "startedAt", "stoppedAt", "projectId", "taskId", "tagIds", "description",
+      "working", "observedAt", "final", "usageQuality", "usage",
+    ],
+  },
+  {
+    method: "put", path: "/api/v1/entries/{id}/agent-usage", query: [], optional: true,
+    body: ["revision", "agentSessionId", "usageQuality", "usage"],
+  },
 ];
 
 export function bodyPropertiesOf(method: RestRoute["method"], path: string): readonly string[] {
