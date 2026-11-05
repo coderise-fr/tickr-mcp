@@ -104,7 +104,8 @@ var import_node_fs = require("node:fs");
 var import_node_path = require("node:path");
 var LINKS_DIR = "linked";
 var MAX_LINKS = 500;
-var KEY_PATTERN = /^[0-9a-f]{64}$/;
+var KEY_PATTERN = /^[0-9a-f]{32}-[0-9a-f]{64}$/;
+var TAG_LENGTH = 32;
 function realDir(dir) {
   try {
     return import_node_fs.realpathSync.native(dir);
@@ -112,8 +113,10 @@ function realDir(dir) {
     return dir;
   }
 }
+var sha256 = (text) => (0, import_node_crypto.createHash)("sha256").update(text, "utf8").digest("hex");
 function linkKey(mappingDir, mappingHash) {
-  return (0, import_node_crypto.createHash)("sha256").update(JSON.stringify([realDir(mappingDir), mappingHash]), "utf8").digest("hex");
+  const dir = realDir(mappingDir);
+  return `${sha256(JSON.stringify([dir])).slice(0, TAG_LENGTH)}-${sha256(JSON.stringify([dir, mappingHash]))}`;
 }
 function isLinkKeyActive(dataDir, key) {
   return KEY_PATTERN.test(key) && (0, import_node_fs.existsSync)((0, import_node_path.join)(dataDir, LINKS_DIR, key));
@@ -139,6 +142,24 @@ function pruneLinks(dir, keep) {
   for (const { n } of dated.slice(0, names.length - MAX_LINKS)) {
     try {
       (0, import_node_fs.unlinkSync)((0, import_node_path.join)(dir, n));
+    } catch {
+    }
+  }
+}
+function revokeStaleLinks(dataDir, mappingDir, mappingHash) {
+  const key = linkKey(mappingDir, mappingHash);
+  const tag = key.slice(0, TAG_LENGTH + 1);
+  const dir = (0, import_node_path.join)(dataDir, LINKS_DIR);
+  let names;
+  try {
+    names = (0, import_node_fs.readdirSync)(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (name === key || !name.startsWith(tag) || !KEY_PATTERN.test(name)) continue;
+    try {
+      (0, import_node_fs.unlinkSync)((0, import_node_path.join)(dir, name));
     } catch {
     }
   }
@@ -329,7 +350,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path2 = require("node:path");
 
 // hook-src/store/schema.ts
-var SCHEMA_VERSION = 2;
+var SCHEMA_VERSION = 3;
 var V1 = `
 CREATE TABLE meta (
   key TEXT PRIMARY KEY,
@@ -498,7 +519,10 @@ CREATE TABLE usage_snapshots (
   PRIMARY KEY (target_kind, target_id)
 );
 `;
-var MIGRATIONS = [(db) => db.exec(V1), (db) => db.exec(V2)];
+var V3 = `
+ALTER TABLE events ADD COLUMN link_key TEXT NULL;
+`;
+var MIGRATIONS = [(db) => db.exec(V1), (db) => db.exec(V2), (db) => db.exec(V3)];
 function userVersion(db) {
   const row = db.prepare("PRAGMA user_version").get();
   return Number(row?.user_version ?? 0);
@@ -592,7 +616,7 @@ function writeFallback(dir, ev) {
     return false;
   }
 }
-var OPTIONAL = ["transcriptPath", "provider", "promptId", "toolName", "toolUseId", "entryId", "agentId", "agentTranscriptPath"];
+var OPTIONAL = ["transcriptPath", "provider", "promptId", "toolName", "toolUseId", "entryId", "agentId", "agentTranscriptPath", "linkKey"];
 function parseFallback(text) {
   let raw;
   try {
@@ -756,7 +780,8 @@ function toEvent(r) {
     toolUseId: optStr(r.tool_use_id),
     entryId: optStr(r.entry_id),
     agentId: optStr(r.agent_id),
-    agentTranscriptPath: optStr(r.agent_transcript_path)
+    agentTranscriptPath: optStr(r.agent_transcript_path),
+    linkKey: optStr(r.link_key)
   };
 }
 function toSession(r) {
@@ -945,8 +970,8 @@ var Store = class {
   insertEvent(ev) {
     return this.run(
       `INSERT INTO events (event_id, session_id, type, local_time, uptime_s, mapping_version_id, transcript_path, provider,
-           prompt_id, tool_name, tool_use_id, entry_id, agent_id, agent_transcript_path)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING`,
+           prompt_id, tool_name, tool_use_id, entry_id, agent_id, agent_transcript_path, link_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING`,
       ev.eventId,
       ev.sessionId,
       ev.type,
@@ -960,7 +985,8 @@ var Store = class {
       ev.toolUseId,
       ev.entryId,
       ev.agentId,
-      ev.agentTranscriptPath
+      ev.agentTranscriptPath,
+      ev.linkKey
     ) === 1;
   }
   /**
@@ -987,7 +1013,8 @@ var Store = class {
       toolUseId: ev.toolUseId ?? null,
       entryId: ev.entryId ?? null,
       agentId: ev.agentId ?? null,
-      agentTranscriptPath: ev.agentTranscriptPath ?? null
+      agentTranscriptPath: ev.agentTranscriptPath ?? null,
+      linkKey: ev.linkKey ?? null
     });
     if (inserted && ev.entryId !== void 0) {
       const seq = optNum(this.get("SELECT seq FROM events WHERE event_id = ?", ev.eventId)?.seq);
@@ -1068,6 +1095,13 @@ var Store = class {
       `SELECT DISTINCT e.session_id FROM events e LEFT JOIN sessions s ON s.session_id = e.session_id
        WHERE e.seq > COALESCE(s.last_event_seq, 0) ORDER BY e.session_id`
     ).map((r) => str(r.session_id));
+  }
+  /**
+   * The link key of the session's last journalled event: null when the session has no event left,
+   * or when that event was journalled before schema v3.
+   */
+  lastLinkKey(sessionId) {
+    return optStr(this.get("SELECT link_key FROM events WHERE session_id = ? ORDER BY seq DESC LIMIT 1", sessionId)?.link_key);
   }
   maxEventSeq() {
     return num(this.get("SELECT COALESCE(MAX(seq), 0) AS m FROM events")?.m);
@@ -1569,7 +1603,8 @@ var MESSAGES = {
   segments_disabled: "Tickr: this Tickr instance does not accept agent sessions yet. Sending is paused and retried later.",
   clock_skew: "Tickr: this computer's clock is ahead of Tickr. Sending is paused until the clocks agree.",
   workspace_mismatch: "Tickr: .tickr.json names another workspace than the API key's. This session is not tracked; run /tickr:link.",
-  not_project_member: "Tickr: you are not a member of the project named in .tickr.json. Run /tickr:link to pick another one."
+  not_project_member: "Tickr: you are not a member of the project named in .tickr.json. Run /tickr:link to pick another one.",
+  unlinked: "Tickr: this repository is no longer linked on this machine, so its session stopped being tracked. Run /tickr:link to link it again."
 };
 function noticeMessage(kind) {
   return MESSAGES[kind] ?? "Tickr: something needs your attention. Run /tickr:status for details.";
@@ -1885,6 +1920,7 @@ var INGESTION_WINDOW_MS = 30 * 24 * 60 * 6e4;
 var AGENT_VERSION_GRACE_MS = 2 * 6e4;
 var SEND_BATCH = 50;
 var STOPPED_MISMATCH = "stopped_mismatch";
+var UNLINKED = "unlinked";
 var PAUSE_KEY = "send_pause";
 var WORKSPACE_KEY = "workspace";
 function readJson(store, key) {
@@ -1951,6 +1987,33 @@ function stopMismatchedSession(store, sessionId, now) {
     });
   }
   addNotice(store, "workspace_mismatch", now);
+}
+function stopUnlinkedSession(store, sessionId, now) {
+  const row = store.getSession(sessionId);
+  if (row?.state === UNLINKED) return;
+  store.upsertSession({
+    ...row ?? { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, agentVersion: null, provider: null, lateEvents: 0 },
+    state: UNLINKED
+  });
+  const at = now.toISOString();
+  const diagnostic = "The repository is no longer linked on this machine.";
+  for (const seg of store.segmentsForSession(sessionId)) {
+    if (!seg.final) store.upsertSegment({ ...seg, working: false, final: true, finalReason: UNLINKED });
+    store.deleteOutboxFor("segment", seg.id);
+    if (store.isTerminal("segment", seg.id)) continue;
+    store.addTerminal({ targetKind: "segment", targetId: seg.id, revision: seg.lastRevision > 0 ? seg.lastRevision : null, code: UNLINKED, at, diagnostic });
+  }
+  for (const entry of store.delegatedForSession(sessionId)) {
+    store.deleteOutboxFor("delegated", entry.entryId);
+    if (store.isTerminal("delegated", entry.entryId)) continue;
+    const revision = store.getLastCommitted("delegated", entry.entryId)?.revision ?? null;
+    store.addTerminal({ targetKind: "delegated", targetId: entry.entryId, revision, code: UNLINKED, at, diagnostic });
+  }
+  addNotice(store, UNLINKED, now);
+}
+function reactivateLinkedSession(store, sessionId) {
+  const row = store.getSession(sessionId);
+  if (row?.state === UNLINKED) store.upsertSession({ ...row, state: ACTIVE_SESSION });
 }
 function recordTerminal(store, row, code2, diagnostic, now) {
   store.deleteOutboxFor(row.targetKind, row.targetId);
@@ -2810,7 +2873,7 @@ function providerFrom(env) {
   if (enabled(env.CLAUDE_CODE_USE_FOUNDRY)) return "foundry";
   return "anthropic";
 }
-function buildEvent(input, mapping, now, uptimeS, env) {
+function buildEvent(input, mapping, now, uptimeS, env, link) {
   const ev = {
     eventId: ulid(now.getTime()),
     sessionId: input.session_id,
@@ -2826,6 +2889,7 @@ function buildEvent(input, mapping, now, uptimeS, env) {
   if (input.tool_use_id !== void 0) ev.toolUseId = input.tool_use_id;
   if (input.agent_id !== void 0) ev.agentId = input.agent_id;
   if (input.agent_transcript_path !== void 0) ev.agentTranscriptPath = input.agent_transcript_path;
+  if (link !== void 0) ev.linkKey = link;
   const entryId = entryIdForEvent(input.hook_event_name, input.tool_name, input.tool_response);
   if (entryId !== null) ev.entryId = entryId;
   return ev;
@@ -2856,11 +2920,15 @@ function recordEvent(input, cfg, deadlineMs, opts = {}) {
     return input.hook_event_name === "SessionStart" ? { systemMessage: `Tickr: ${found.invalid} This session is not tracked.` } : {};
   }
   if (opts.linked && !opts.linked(found.dir, found.hash)) {
+    try {
+      if (input.hook_event_name !== "PostToolUse") opts.revokeStale?.(found.dir, found.hash);
+    } catch {
+    }
     return input.hook_event_name === "SessionStart" && input.source !== "resume" && input.source !== "compact" ? { systemMessage: NOT_LINKED_MESSAGE } : {};
   }
   const now = (opts.now ?? (() => /* @__PURE__ */ new Date()))();
   const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
-  const ev = buildEvent(input, { hash: found.hash, json: found.json }, now, (opts.uptime ?? import_node_os.uptime)(), env);
+  const ev = buildEvent(input, { hash: found.hash, json: found.json }, now, (opts.uptime ?? import_node_os.uptime)(), env, linkKey(found.dir, found.hash));
   let dirReady = true;
   try {
     writeInstanceInfo(dir, { baseUrl: cfg.baseUrl, workspaceId: found.mapping.workspaceId }, now);
@@ -3247,6 +3315,7 @@ function revisionsStage(sources = REVISION_SOURCES) {
 var CLOCK_SKEW_LIMIT_MS = 4 * 6e4;
 var PROBE_RETRY_KEY = "workspace_probe_retry";
 var MISMATCH_CURSOR_KEY = "workspace_checked_seq";
+var LINK_CHECK_WINDOW_MS = 48 * 36e5;
 function readRetry(store) {
   const raw = store.getMeta(PROBE_RETRY_KEY);
   if (raw === null) return null;
@@ -3276,9 +3345,27 @@ function checkMismatch(store, workspaceId, now) {
   }
   store.setMeta(MISMATCH_CURSOR_KEY, String(last));
 }
+function checkLinks(store, dataDir, now) {
+  const since = new Date(now.getTime() - LINK_CHECK_WINDOW_MS).toISOString();
+  const candidates = new Set(store.pendingEventSessions());
+  for (const s of store.listSessions()) {
+    if (s.state !== ACTIVE_SESSION && s.state !== UNLINKED) continue;
+    if (s.lastEventTime !== null && s.lastEventTime >= since || store.openSegmentFor(s.sessionId) !== null) candidates.add(s.sessionId);
+  }
+  for (const sessionId of candidates) {
+    const state = store.getSession(sessionId)?.state ?? ACTIVE_SESSION;
+    if (state !== ACTIVE_SESSION && state !== UNLINKED) continue;
+    const key = store.lastLinkKey(sessionId);
+    if (key === null) continue;
+    const holds = isLinkKeyActive(dataDir, key);
+    if (!holds && state === ACTIVE_SESSION) stopUnlinkedSession(store, sessionId, now);
+    else if (holds && state === UNLINKED) reactivateLinkedSession(store, sessionId);
+  }
+}
 function workspaceStage(opts = {}) {
   return async (ctx) => {
     const { store } = ctx;
+    ctx.guarded(() => checkLinks(store, ctx.config.dataDir, ctx.now()));
     if (probeDue(store, ctx.now())) {
       const answer = await ctx.api.me();
       const now = ctx.now();
@@ -3757,7 +3844,8 @@ async function runHook(event, env, io) {
   writeHookOutput(recordEvent({ ...input, hook_event_name: event }, config, io.deadlineMs, {
     env,
     startFlusher,
-    linked: (mappingDir, hash) => isLinked(config.dataDir, mappingDir, hash)
+    linked: (mappingDir, hash) => isLinked(config.dataDir, mappingDir, hash),
+    revokeStale: (mappingDir, hash) => revokeStaleLinks(config.dataDir, mappingDir, hash)
   }), io.write);
 }
 async function runFlush(dir, env, bundlePath) {

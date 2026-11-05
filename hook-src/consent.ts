@@ -3,12 +3,15 @@
 // person's choosing. A mapping therefore tracks nothing until /tickr:link (or `accept`) has
 // recorded, on THIS machine, that the user linked this very checkout with this very content.
 //
-// A link key is the SHA-256 of the checkout directory's real path and the mapping's hash. Each
-// link is one empty file <plugin data>/linked/<key>: links are written independently (two
-// `accept` at once never lose one), and a link exists iff its file does. Changing the file (a
-// pull, an edit) or moving the checkout makes the link void until the user links again; deleting
-// the file revokes it, and the flusher then stops the sessions already recorded under it. The
-// files hold nothing but their name: no path, no id.
+// A link key is <checkout tag>-<link hash>: the checkout tag is the first 32 hex digits of the
+// SHA-256 of the checkout directory's real path, the link hash the SHA-256 of that path and the
+// mapping's hash. Each link is one empty file <plugin data>/linked/<key>: links are written
+// independently (two `accept` at once never lose one), and a link exists iff its file does.
+// Changing the file (a pull, an edit) or moving the checkout makes the link void until the user
+// links again. Revoking a link stops the sessions already recorded under it (the flusher checks
+// the link of each session's last event): deleting its file, or a hook of the same checkout that
+// finds another, unlinked content (revokeStaleLinks, the reason for the checkout tag). The files
+// hold nothing but their name: no path, no id.
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -18,7 +21,8 @@ export const LINKS_DIR = "linked";
 /** Links kept at most (the least recently linked are dropped, best effort). */
 export const MAX_LINKS = 500;
 
-const KEY_PATTERN = /^[0-9a-f]{64}$/;
+const KEY_PATTERN = /^[0-9a-f]{32}-[0-9a-f]{64}$/;
+const TAG_LENGTH = 32;
 
 function realDir(dir: string): string {
   try {
@@ -28,9 +32,12 @@ function realDir(dir: string): string {
   }
 }
 
+const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+
 /** The link key of a checkout directory and a mapping hash. */
 export function linkKey(mappingDir: string, mappingHash: string): string {
-  return createHash("sha256").update(JSON.stringify([realDir(mappingDir), mappingHash]), "utf8").digest("hex");
+  const dir = realDir(mappingDir);
+  return `${sha256(JSON.stringify([dir])).slice(0, TAG_LENGTH)}-${sha256(JSON.stringify([dir, mappingHash]))}`;
 }
 
 /** True when the link of this key exists on this machine (one file check). */
@@ -67,6 +74,30 @@ function pruneLinks(dir: string, keep: string): void {
       unlinkSync(join(dir, n));
     } catch {
       // Removed meanwhile, or not removable: the cap is best effort.
+    }
+  }
+}
+
+/**
+ * The checkout's .tickr.json is not linked (a hook found it so): its links made for another
+ * content are revoked, so that the flusher stops the sessions recorded under them. Errors are ignored.
+ */
+export function revokeStaleLinks(dataDir: string, mappingDir: string, mappingHash: string): void {
+  const key = linkKey(mappingDir, mappingHash);
+  const tag = key.slice(0, TAG_LENGTH + 1);
+  const dir = join(dataDir, LINKS_DIR);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (name === key || !name.startsWith(tag) || !KEY_PATTERN.test(name)) continue;
+    try {
+      unlinkSync(join(dir, name));
+    } catch {
+      // Removed meanwhile, or not removable: the next hook tries again.
     }
   }
 }

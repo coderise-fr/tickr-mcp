@@ -2,12 +2,13 @@
 // transcript paths and key all carry a SENTINEL marker goes through the real hook entry point and
 // the real flusher against a local Tickr. Nothing of it may leave the machine nor reach the debug
 // log, /tickr:status or a message shown to the user; each request body has exactly the contract keys.
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { bodyPropertiesOf } from "../../src/api/contract.js";
 import type { UsageRow } from "../../hook-src/flusher/revisions.js";
+import { LINKS_DIR } from "../../hook-src/consent.js";
 import { DEBUG_FILE, debugLine, type DebugRecord } from "../../hook-src/flusher/run.js";
 import { instanceDir, instanceId } from "../../hook-src/identity.js";
 import { main } from "../../hook-src/main.js";
@@ -32,6 +33,7 @@ let instance: string;
 let server: Awaited<ReturnType<typeof startServer>>;
 const messages: string[] = [];
 let status = "";
+let requestsBeforeRevoke = 0;
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -96,6 +98,14 @@ beforeAll(async () => {
   }
   // The flusher, as the hooks' spawn would run it (the key in the environment, never in argv).
   await main(["flush", instance], env);
+  requestsBeforeRevoke = server.requests.length;
+
+  // The link revoked: the flusher stops the session already recorded (terminal items, one
+  // notice); the notice reaches the next hook of the checkout once it is linked again.
+  rmSync(join(data, LINKS_DIR), { recursive: true, force: true });
+  await main(["flush", instance], env);
+  linkCheckout(data, cwd);
+  await hook(env, { ...common, hook_event_name: "UserPromptSubmit", prompt_id: "p-relinked" });
 
   // Messages a user can see in other checkouts: not linked, and an invalid .tickr.json.
   const untracked = join(root, "SENTINEL_UNTRACKED");
@@ -166,6 +176,12 @@ describe("privacy allow-list (D14)", () => {
   it("/tickr:status shows nothing private", () => {
     expect(status).toMatch(/Acme/);
     expectNothingPrivate(status, "status");
+  });
+
+  it("once the link is revoked, nothing more is sent; status lists the stopped items and the user is told once", () => {
+    expect(server.requests.slice(requestsBeforeRevoke).filter((r) => r.method === "PUT")).toEqual([]);
+    expect(status).toMatch(/unlinked, segment/);
+    expect(messages.filter((m) => m.includes("no longer linked on this machine"))).toHaveLength(1);
   });
 
   it("no message shown to the user carries anything private", () => {

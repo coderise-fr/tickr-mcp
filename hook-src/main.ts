@@ -6,7 +6,7 @@
 import { uptime } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { readPluginConfig } from "./config.js";
-import { isLinked, recordLink } from "./consent.js";
+import { isLinked, recordLink, revokeStaleLinks } from "./consent.js";
 import { createAgentApi, REQUEST_TIMEOUT_MS } from "./flusher/api.js";
 import { DEBUG_ENV, DEBUG_FILE, debugLogger, runFlusher, WAKE_BUDGET_MS } from "./flusher/run.js";
 import { recordEvent } from "./intake.js";
@@ -74,6 +74,7 @@ async function runHook(event: HookEvent, env: NodeJS.ProcessEnv, io: HookIo): Pr
       env,
       startFlusher,
       linked: (mappingDir, hash) => isLinked(config.dataDir, mappingDir, hash),
+      revokeStale: (mappingDir, hash) => revokeStaleLinks(config.dataDir, mappingDir, hash),
     }), io.write);
 }
 

@@ -503,6 +503,7 @@ describe("attribution rules (pure)", () => {
     entryId: null,
     agentId: null,
     agentTranscriptPath: null,
+    linkKey: null,
     ...extra,
   });
   const seg = (id: string, startedAt: string, stoppedAt: string, final: boolean): SegmentRow => ({
