@@ -212,8 +212,8 @@ describe("commitIfChanged / acknowledge", () => {
 });
 
 describe("revisions stage", () => {
-  it("is the pipeline's revisions stage, asking the segment source", () => {
-    expect(REVISION_SOURCES).toEqual([segmentRevisions]);
+  it("is the pipeline's revisions stage, asking the segment source first", () => {
+    expect(REVISION_SOURCES[0]).toBe(segmentRevisions);
     expect(PIPELINE.revisions).not.toBe(undefined);
   });
 

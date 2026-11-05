@@ -19,6 +19,9 @@ export interface UsageBody {
   usage: UsageRow[];
 }
 
+/** Every key a usage body carries, in wire order (the REST contract of the usage route). */
+export const USAGE_BODY_KEYS = ["revision", "agentSessionId", "usageQuality", "usage"] as const satisfies readonly (keyof UsageBody)[];
+
 export type PauseReason = "unauthorized" | "forbidden_role" | "segments_disabled" | "clock_skew";
 
 export type SendOutcome =

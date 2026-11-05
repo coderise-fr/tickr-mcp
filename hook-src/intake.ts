@@ -4,6 +4,7 @@
 import { uptime as osUptime } from "node:os";
 import { join } from "node:path";
 import type { PluginConfig } from "./config.js";
+import { entryIdForEvent } from "./delegated.js";
 import { FALLBACK_DIR, recordGap, takeGaps, writeFallback } from "./fallback.js";
 import { isOwnerFresh } from "./flusher/owner.js";
 import { instanceDir, instanceId, writeInstanceInfo } from "./identity.js";
@@ -79,6 +80,9 @@ export function buildEvent(
   if (input.tool_use_id !== undefined) ev.toolUseId = input.tool_use_id;
   if (input.agent_id !== undefined) ev.agentId = input.agent_id;
   if (input.agent_transcript_path !== undefined) ev.agentTranscriptPath = input.agent_transcript_path;
+  // A delegated entry (start_timer / create_entry of the plugin's MCP server): only its id is kept.
+  const entryId = entryIdForEvent(input.hook_event_name, input.tool_name, input.tool_response);
+  if (entryId !== null) ev.entryId = entryId;
   return ev;
 }
 

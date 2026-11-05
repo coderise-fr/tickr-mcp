@@ -1,12 +1,15 @@
 // The "revisions" stage: desired state -> immutable outbox revisions (§7.4).
 //
-// For each target (a segment; Part C adds delegated entries) the desired wire body is derived
+// For each target (a segment, a delegated entry) the desired wire body is derived
 // from local state. When its canonical JSON, without `revision`, differs from the last committed
 // one, revision N + 1 is committed with its full body: the outbox row (sent and replayed byte for
 // byte) and the target's last_committed row (kept after the acknowledgement, for the next
 // comparison) are written in one guarded transaction, before any send.
-import type { CommittedRow, SegmentRow, Store, TargetKind } from "../store/db.js";
+import { buildTurns, delegatedByTurn, type Turn } from "../attribution.js";
+import { LEDGER_WINDOW_MS, totalsFor } from "../ledger.js";
+import type { CommittedRow, DelegatedRow, SegmentRow, Store, TargetKind } from "../store/db.js";
 import { canonicalJson, type NormalizedMapping, parseStoredMapping } from "../mapping.js";
+import type { UsageBody } from "./api.js";
 import { guarded } from "./owner.js";
 import type { StageContext, StageRun } from "./stages.js";
 
@@ -193,8 +196,56 @@ export const segmentRevisions: RevisionSource = (ctx) => {
   return { desired, dueInMs: due };
 };
 
-/** The sources the stage asks, in order. Part C appends the delegated entries. */
-export const REVISION_SOURCES: readonly RevisionSource[] = [segmentRevisions];
+/** Where a delegated entry stands in its turn (D16): the first one receives the turn's tokens. */
+export interface DelegatedPlace {
+  /** The turn the entry was created in, or null when no turn contains it. */
+  turn: Turn | null;
+  /** The first delegated entry of that turn. */
+  first: boolean;
+}
+
+/** The turn of each delegated entry of one session, from its journalled events. */
+export function delegatedPlaces(store: Store, sessionId: string): Map<string, DelegatedPlace> {
+  const events = store.attributionEvents(sessionId);
+  const turns = buildTurns(sessionId, events);
+  const out = new Map<string, DelegatedPlace>();
+  for (const [promptId, entries] of delegatedByTurn(events, turns)) {
+    const turn = turns.find((t) => t.promptId === promptId) ?? null;
+    entries.forEach((entryId, i) => out.set(entryId, { turn, first: i === 0 }));
+  }
+  return out;
+}
+
+/**
+ * The body a delegated entry should have on the server now (without its revision): always both
+ * agentSessionId and usage (the usage route requires usage). The first delegated entry of a turn
+ * carries the turn's tokens as the ledger attributed them (final response included); the others
+ * carry the session link only: usage [] and usageQuality complete.
+ */
+export function desiredDelegatedBody(store: Store, row: DelegatedRow, place: DelegatedPlace | undefined): Omit<UsageBody, "revision"> {
+  if (place === undefined || place.turn === null || !place.first) {
+    return { agentSessionId: row.sessionId, usageQuality: "complete", usage: [] };
+  }
+  const usage = totalsFor(store, { kind: "delegated", entryId: row.entryId });
+  return { agentSessionId: row.sessionId, usageQuality: place.turn.endedAt === null ? "pending" : "complete", usage };
+}
+
+/** Delegated entries: one desired usage body each (PUT /api/v1/entries/{id}/agent-usage). */
+export const delegatedRevisions: RevisionSource = (ctx) => {
+  const now = ctx.now();
+  const rows = ctx.store.delegatedForRevision(new Date(now.getTime() - LEDGER_WINDOW_MS).toISOString());
+  const places = new Map<string, Map<string, DelegatedPlace>>();
+  const desired: DesiredRevision[] = [];
+  for (const row of rows) {
+    if (!places.has(row.sessionId)) places.set(row.sessionId, delegatedPlaces(ctx.store, row.sessionId));
+    const body = desiredDelegatedBody(ctx.store, row, places.get(row.sessionId)!.get(row.entryId));
+    desired.push({ target: { kind: "delegated", id: row.entryId }, body });
+  }
+  return { desired, dueInMs: null };
+};
+
+/** The sources the stage asks, in order: segments, then delegated entries. */
+export const REVISION_SOURCES: readonly RevisionSource[] = [segmentRevisions, delegatedRevisions];
 
 export function revisionsStage(sources: readonly RevisionSource[] = REVISION_SOURCES): StageRun {
   return (ctx) => {

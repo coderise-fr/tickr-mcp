@@ -156,6 +156,17 @@ export interface TranscriptOffsetRow {
   readAt: string | null;
 }
 
+/** A delegated entry (delegated.ts): an entry the agent created through the plugin's MCP server. */
+export interface DelegatedRow {
+  entryId: string;
+  sessionId: string;
+  promptId: string | null;
+  /** Local time of the PostToolUse event that named it. */
+  createdAt: string;
+  /** seq of that event (creation order within a turn). */
+  eventSeq: number | null;
+}
+
 export interface OwnerRow {
   generation: number;
   pid: number;
@@ -265,6 +276,16 @@ function toTerminal(r: Row): TerminalRow {
     code: str(r.code),
     at: str(r.at),
     diagnostic: str(r.diagnostic),
+  };
+}
+
+function toDelegated(r: Row): DelegatedRow {
+  return {
+    entryId: str(r.entry_id),
+    sessionId: str(r.session_id),
+    promptId: optStr(r.prompt_id),
+    createdAt: str(r.created_at),
+    eventSeq: optNum(r.event_seq),
   };
 }
 
@@ -433,7 +454,7 @@ export class Store {
       const hash = createHash("sha256").update(ev.mapping.json, "utf8").digest("hex");
       mappingVersionId = this.upsertMapping(hash, ev.mapping.json);
     }
-    return this.insertEvent({
+    const inserted = this.insertEvent({
       eventId: ev.eventId,
       sessionId: ev.sessionId,
       type: ev.type,
@@ -449,6 +470,52 @@ export class Store {
       agentId: ev.agentId ?? null,
       agentTranscriptPath: ev.agentTranscriptPath ?? null,
     });
+    if (inserted && ev.entryId !== undefined) {
+      const seq = optNum(this.get("SELECT seq FROM events WHERE event_id = ?", ev.eventId)?.seq);
+      this.recordDelegated({ entryId: ev.entryId, sessionId: ev.sessionId, promptId: ev.promptId ?? null, createdAt: ev.localTime, eventSeq: seq });
+    }
+    return inserted;
+  }
+
+  // delegated entries
+
+  /** Records a delegated entry once: the first event naming it wins. */
+  recordDelegated(row: DelegatedRow): void {
+    this.run(
+      `INSERT INTO delegated (entry_id, session_id, prompt_id, created_at, event_seq) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (entry_id) DO NOTHING`,
+      row.entryId,
+      row.sessionId,
+      row.promptId,
+      row.createdAt,
+      row.eventSeq,
+    );
+  }
+
+  getDelegated(entryId: string): DelegatedRow | null {
+    const r = this.get("SELECT * FROM delegated WHERE entry_id = ?", entryId);
+    return r ? toDelegated(r) : null;
+  }
+
+  /**
+   * Delegated entries the revisions stage evaluates: of an active session, not terminal, and
+   * never committed, or last committed with usageQuality pending, or (their session active since
+   * `sinceIso`) not complete yet or with tokens not folded.
+   */
+  delegatedForRevision(sinceIso: string): DelegatedRow[] {
+    return this.all(
+      `SELECT d.* FROM delegated d
+       JOIN sessions s ON s.session_id = d.session_id
+       LEFT JOIN last_committed c ON c.target_kind = 'delegated' AND c.target_id = d.entry_id
+       WHERE s.state = 'active'
+         AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'delegated' AND t.target_id = d.entry_id)
+         AND (c.target_id IS NULL
+           OR json_extract(c.body_json, '$.usageQuality') IS NOT 'complete' AND json_extract(c.body_json, '$.usageQuality') IS NOT 'incomplete'
+           OR (s.last_event_time >= ? AND (json_extract(c.body_json, '$.usageQuality') IS NOT 'complete'
+             OR EXISTS (SELECT 1 FROM ledger l WHERE l.recipient_kind = 'delegated' AND l.recipient_id = d.entry_id AND l.folded = 0))))
+       ORDER BY d.created_at, d.entry_id`,
+      sinceIso,
+    ).map(toDelegated);
   }
 
   /** Events with seq > afterSeq, in journal order. */
@@ -716,10 +783,11 @@ export class Store {
 
   /**
    * Retention: deletes what is settled and older than cutoffIso — final segments without a
-   * pending revision (and their last committed body), other targets' last committed bodies,
-   * events already segmented, sessions left without events nor segments (then their ledger rows
-   * and totals, unless their recipient has a pending revision, their transcript offsets,
-   * subagents and Agent launches), unused mapping versions, terminal items and shown notices.
+   * pending revision (and their last committed body), other targets' last committed bodies once
+   * their delegated row is gone, events already segmented, sessions left without events nor
+   * segments (then their ledger rows and totals, unless their recipient has a pending revision,
+   * their delegated entries without a pending revision, transcript offsets, subagents and Agent
+   * launches), unused mapping versions, terminal items and shown notices.
    * Returns the rows deleted.
    */
   deleteRetired(cutoffIso: string): number {
@@ -733,7 +801,8 @@ export class Store {
       `DELETE FROM last_committed WHERE
          (target_kind = 'segment' AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = last_committed.target_id))
          OR (target_kind <> 'segment' AND committed_at < ?
-             AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = last_committed.target_kind AND o.target_id = last_committed.target_id))`,
+             AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = last_committed.target_kind AND o.target_id = last_committed.target_id)
+             AND NOT EXISTS (SELECT 1 FROM delegated d WHERE d.entry_id = last_committed.target_id))`,
       cutoffIso,
     );
     n += this.run(
@@ -756,6 +825,10 @@ export class Store {
     n += this.run(
       `DELETE FROM ledger_totals WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ledger_totals.session_id)
          AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = ledger_totals.recipient_kind AND o.target_id = ledger_totals.recipient_id)`,
+    );
+    n += this.run(
+      `DELETE FROM delegated WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = delegated.session_id)
+         AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = 'delegated' AND o.target_id = delegated.entry_id)`,
     );
     for (const table of ["transcript_offsets", "subagents", "agent_launches"]) {
       n += this.run(`DELETE FROM ${table} WHERE session_id IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ${table}.session_id)`);

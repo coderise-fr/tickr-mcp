@@ -1,0 +1,39 @@
+{
+  "session_id": "3f0b6c1e-8a42-4d7e-9c15-2b7f0d4e6a10",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-repo/3f0b6c1e-8a42-4d7e-9c15-2b7f0d4e6a10.jsonl",
+  "cwd": "/home/dev/repo",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "prompt_id": "9d2e4f60-1b3a-4c5d-8e7f-0a1b2c3d4e5f",
+  "tool_name": "mcp__plugin_tickr_tickr__start_timer",
+  "tool_input": {
+    "description": "<redacted>",
+    "project_id": "0e7a4c1d-5b2f-4c8e-9a1b-3d5f7e9a1c02"
+  },
+  "tool_response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"entry\":{\"id\":\"0190f0c0-1111-7000-8000-0000000000e1\",\"description\":\"<redacted>\",\"project_id\":\"0e7a4c1d-5b2f-4c8e-9a1b-3d5f7e9a1c02\",\"project_name\":\"<redacted>\",\"client_name\":null,\"task_id\":null,\"tag_ids\":[],\"started_at\":\"2026-11-05T10:02:00.000Z\",\"stopped_at\":null,\"duration_seconds\":0,\"duration\":\"0:00:00\",\"billable\":false,\"running\":true}}"
+      }
+    ],
+    "structuredContent": {
+      "entry": {
+        "id": "0190f0c0-1111-7000-8000-0000000000e1",
+        "description": "<redacted>",
+        "project_id": "0e7a4c1d-5b2f-4c8e-9a1b-3d5f7e9a1c02",
+        "project_name": "<redacted>",
+        "client_name": null,
+        "task_id": null,
+        "tag_ids": [],
+        "started_at": "2026-11-05T10:02:00.000Z",
+        "stopped_at": null,
+        "duration_seconds": 0,
+        "duration": "0:00:00",
+        "billable": false,
+        "running": true
+      }
+    }
+  },
+  "tool_use_id": "toolu_01AbCdEfGhIjKlMnOpQrStUv"
+}

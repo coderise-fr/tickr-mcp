@@ -756,6 +756,15 @@ function toTerminal(r) {
     diagnostic: str(r.diagnostic)
   };
 }
+function toDelegated(r) {
+  return {
+    entryId: str(r.entry_id),
+    sessionId: str(r.session_id),
+    promptId: optStr(r.prompt_id),
+    createdAt: str(r.created_at),
+    eventSeq: optNum(r.event_seq)
+  };
+}
 function toNotice(r) {
   return { id: num(r.id), kind: str(r.kind), createdAt: str(r.created_at), shownAt: optStr(r.shown_at) };
 }
@@ -899,7 +908,7 @@ var Store = class {
       const hash = (0, import_node_crypto.createHash)("sha256").update(ev.mapping.json, "utf8").digest("hex");
       mappingVersionId = this.upsertMapping(hash, ev.mapping.json);
     }
-    return this.insertEvent({
+    const inserted = this.insertEvent({
       eventId: ev.eventId,
       sessionId: ev.sessionId,
       type: ev.type,
@@ -915,6 +924,48 @@ var Store = class {
       agentId: ev.agentId ?? null,
       agentTranscriptPath: ev.agentTranscriptPath ?? null
     });
+    if (inserted && ev.entryId !== void 0) {
+      const seq = optNum(this.get("SELECT seq FROM events WHERE event_id = ?", ev.eventId)?.seq);
+      this.recordDelegated({ entryId: ev.entryId, sessionId: ev.sessionId, promptId: ev.promptId ?? null, createdAt: ev.localTime, eventSeq: seq });
+    }
+    return inserted;
+  }
+  // delegated entries
+  /** Records a delegated entry once: the first event naming it wins. */
+  recordDelegated(row) {
+    this.run(
+      `INSERT INTO delegated (entry_id, session_id, prompt_id, created_at, event_seq) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (entry_id) DO NOTHING`,
+      row.entryId,
+      row.sessionId,
+      row.promptId,
+      row.createdAt,
+      row.eventSeq
+    );
+  }
+  getDelegated(entryId) {
+    const r = this.get("SELECT * FROM delegated WHERE entry_id = ?", entryId);
+    return r ? toDelegated(r) : null;
+  }
+  /**
+   * Delegated entries the revisions stage evaluates: of an active session, not terminal, and
+   * never committed, or last committed with usageQuality pending, or (their session active since
+   * `sinceIso`) not complete yet or with tokens not folded.
+   */
+  delegatedForRevision(sinceIso) {
+    return this.all(
+      `SELECT d.* FROM delegated d
+       JOIN sessions s ON s.session_id = d.session_id
+       LEFT JOIN last_committed c ON c.target_kind = 'delegated' AND c.target_id = d.entry_id
+       WHERE s.state = 'active'
+         AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'delegated' AND t.target_id = d.entry_id)
+         AND (c.target_id IS NULL
+           OR json_extract(c.body_json, '$.usageQuality') IS NOT 'complete' AND json_extract(c.body_json, '$.usageQuality') IS NOT 'incomplete'
+           OR (s.last_event_time >= ? AND (json_extract(c.body_json, '$.usageQuality') IS NOT 'complete'
+             OR EXISTS (SELECT 1 FROM ledger l WHERE l.recipient_kind = 'delegated' AND l.recipient_id = d.entry_id AND l.folded = 0))))
+       ORDER BY d.created_at, d.entry_id`,
+      sinceIso
+    ).map(toDelegated);
   }
   /** Events with seq > afterSeq, in journal order. */
   eventsAfter(afterSeq, limit = 1e3) {
@@ -1144,10 +1195,11 @@ var Store = class {
   }
   /**
    * Retention: deletes what is settled and older than cutoffIso — final segments without a
-   * pending revision (and their last committed body), other targets' last committed bodies,
-   * events already segmented, sessions left without events nor segments (then their ledger rows
-   * and totals, unless their recipient has a pending revision, their transcript offsets,
-   * subagents and Agent launches), unused mapping versions, terminal items and shown notices.
+   * pending revision (and their last committed body), other targets' last committed bodies once
+   * their delegated row is gone, events already segmented, sessions left without events nor
+   * segments (then their ledger rows and totals, unless their recipient has a pending revision,
+   * their delegated entries without a pending revision, transcript offsets, subagents and Agent
+   * launches), unused mapping versions, terminal items and shown notices.
    * Returns the rows deleted.
    */
   deleteRetired(cutoffIso) {
@@ -1161,7 +1213,8 @@ var Store = class {
       `DELETE FROM last_committed WHERE
          (target_kind = 'segment' AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = last_committed.target_id))
          OR (target_kind <> 'segment' AND committed_at < ?
-             AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = last_committed.target_kind AND o.target_id = last_committed.target_id))`,
+             AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = last_committed.target_kind AND o.target_id = last_committed.target_id)
+             AND NOT EXISTS (SELECT 1 FROM delegated d WHERE d.entry_id = last_committed.target_id))`,
       cutoffIso
     );
     n += this.run(
@@ -1182,6 +1235,10 @@ var Store = class {
     n += this.run(
       `DELETE FROM ledger_totals WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ledger_totals.session_id)
          AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = ledger_totals.recipient_kind AND o.target_id = ledger_totals.recipient_id)`
+    );
+    n += this.run(
+      `DELETE FROM delegated WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = delegated.session_id)
+         AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = 'delegated' AND o.target_id = delegated.entry_id)`
     );
     for (const table of ["transcript_offsets", "subagents", "agent_launches"]) {
       n += this.run(`DELETE FROM ${table} WHERE session_id IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ${table}.session_id)`);
@@ -2009,6 +2066,29 @@ function provisionalRows(store, sessionId) {
 function subagentsFor(store, sessionId) {
   return store.db.prepare("SELECT * FROM subagents WHERE session_id = ? ORDER BY agent_id").all(sessionId).map(toSubagent);
 }
+function recipientWhere(recipient) {
+  const { kind, id } = encode(recipient);
+  if (recipient.kind === "turn") return { sql: "recipient_kind = ? AND recipient_id = ? AND session_id = ?", params: [kind, id, recipient.sessionId] };
+  return { sql: "recipient_kind = ? AND recipient_id = ?", params: [kind, id] };
+}
+function totalsFor(store, recipient) {
+  const { sql, params } = recipientWhere(recipient);
+  const rows = store.db.prepare(
+    `SELECT provider, model, SUM(input) AS input, SUM(output) AS output, SUM(cache_creation) AS cache_creation, SUM(cache_read) AS cache_read
+       FROM (SELECT provider, model, input, output, cache_creation, cache_read FROM ledger WHERE folded = 0 AND ${sql}
+             UNION ALL
+             SELECT provider, model, input, output, cache_creation, cache_read FROM ledger_totals WHERE ${sql})
+       GROUP BY provider, model ORDER BY provider, model`
+  ).all(...params, ...params);
+  return rows.map((r) => ({
+    provider: str2(r.provider),
+    model: str2(r.model),
+    inputTokens: Number(r.input),
+    outputTokens: Number(r.output),
+    cacheCreationInputTokens: Number(r.cache_creation),
+    cacheReadInputTokens: Number(r.cache_read)
+  }));
+}
 function foldSettled(store) {
   const settledTargets = store.db.prepare(
     `SELECT DISTINCT l.session_id, l.recipient_kind, l.recipient_id FROM ledger l
@@ -2200,6 +2280,39 @@ var import_node_path7 = require("node:path");
 // hook-src/intake.ts
 var import_node_os = require("node:os");
 var import_node_path6 = require("node:path");
+
+// hook-src/delegated.ts
+var DELEGATED_TOOL = /^mcp__plugin_tickr_tickr__(start_timer|create_entry)$/;
+var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+function entryIdOf(value) {
+  if (!isObj(value) || !isObj(value.entry)) return null;
+  const id = value.entry.id;
+  return typeof id === "string" && UUID.test(id) ? id : null;
+}
+function parseJson2(text) {
+  if (typeof text !== "string") return void 0;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+}
+function firstText(content) {
+  if (!Array.isArray(content)) return void 0;
+  const block = content.find((b) => isObj(b) && b.type === "text");
+  return block === void 0 ? void 0 : parseJson2(block.text);
+}
+function delegatedEntryId(toolResponse) {
+  const response = typeof toolResponse === "string" ? parseJson2(toolResponse) : toolResponse;
+  if (Array.isArray(response)) return entryIdOf(firstText(response));
+  if (!isObj(response) || response.isError === true) return null;
+  return entryIdOf(response.structuredContent) ?? entryIdOf(firstText(response.content));
+}
+function entryIdForEvent(event, toolName, toolResponse) {
+  if (event !== "PostToolUse" || toolName === void 0 || !DELEGATED_TOOL.test(toolName)) return null;
+  return delegatedEntryId(toolResponse);
+}
 
 // hook-src/identity.ts
 var import_node_crypto4 = require("node:crypto");
@@ -2396,6 +2509,8 @@ function buildEvent(input, mapping, now, uptimeS, env) {
   if (input.tool_use_id !== void 0) ev.toolUseId = input.tool_use_id;
   if (input.agent_id !== void 0) ev.agentId = input.agent_id;
   if (input.agent_transcript_path !== void 0) ev.agentTranscriptPath = input.agent_transcript_path;
+  const entryId = entryIdForEvent(input.hook_event_name, input.tool_name, input.tool_response);
+  if (entryId !== null) ev.entryId = entryId;
   return ev;
 }
 function journalInStore(dbPath, ev, now) {
@@ -2609,7 +2724,36 @@ var segmentRevisions = (ctx) => {
   }
   return { desired, dueInMs: due };
 };
-var REVISION_SOURCES = [segmentRevisions];
+function delegatedPlaces(store, sessionId) {
+  const events = store.attributionEvents(sessionId);
+  const turns = buildTurns(sessionId, events);
+  const out = /* @__PURE__ */ new Map();
+  for (const [promptId, entries] of delegatedByTurn(events, turns)) {
+    const turn = turns.find((t) => t.promptId === promptId) ?? null;
+    entries.forEach((entryId, i) => out.set(entryId, { turn, first: i === 0 }));
+  }
+  return out;
+}
+function desiredDelegatedBody(store, row, place) {
+  if (place === void 0 || place.turn === null || !place.first) {
+    return { agentSessionId: row.sessionId, usageQuality: "complete", usage: [] };
+  }
+  const usage = totalsFor(store, { kind: "delegated", entryId: row.entryId });
+  return { agentSessionId: row.sessionId, usageQuality: place.turn.endedAt === null ? "pending" : "complete", usage };
+}
+var delegatedRevisions = (ctx) => {
+  const now = ctx.now();
+  const rows = ctx.store.delegatedForRevision(new Date(now.getTime() - LEDGER_WINDOW_MS).toISOString());
+  const places = /* @__PURE__ */ new Map();
+  const desired = [];
+  for (const row of rows) {
+    if (!places.has(row.sessionId)) places.set(row.sessionId, delegatedPlaces(ctx.store, row.sessionId));
+    const body = desiredDelegatedBody(ctx.store, row, places.get(row.sessionId).get(row.entryId));
+    desired.push({ target: { kind: "delegated", id: row.entryId }, body });
+  }
+  return { desired, dueInMs: null };
+};
+var REVISION_SOURCES = [segmentRevisions, delegatedRevisions];
 function revisionsStage(sources = REVISION_SOURCES) {
   return (ctx) => {
     let due = null;
