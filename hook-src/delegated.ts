@@ -40,13 +40,14 @@ function firstText(content: unknown): unknown {
 /**
  * The id of the entry a delegated tool created, from its tool_response, or null. Accepts the MCP
  * result object ({ content, structuredContent, isError }), a bare content array, or either one
- * serialised as a JSON string.
+ * serialised as a JSON string, or the tool's own result (`{ entry: { id } }`) as an object or string.
  */
 export function delegatedEntryId(toolResponse: unknown): string | null {
   const response = typeof toolResponse === "string" ? parseJson(toolResponse) : toolResponse;
   if (Array.isArray(response)) return entryIdOf(firstText(response));
   if (!isObj(response) || response.isError === true) return null;
-  return entryIdOf(response.structuredContent) ?? entryIdOf(firstText(response.content));
+  // Claude Code 2.1 hands the plugin the tool's JSON text itself, i.e. { entry: { id } } directly.
+  return entryIdOf(response.structuredContent) ?? entryIdOf(firstText(response.content)) ?? entryIdOf(response);
 }
 
 /** The entry id to journal with a hook event: PostToolUse of a delegated tool only. */

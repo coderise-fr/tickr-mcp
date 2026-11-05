@@ -43,6 +43,14 @@ describe("delegatedEntryId", () => {
     expect(delegatedEntryId({ content: [{ type: "image", data: "x" }, ...content] })).toBe(FIXTURE_ENTRY);
   });
 
+  it("reads the shape Claude Code 2.1 really sends: the tool's JSON text itself, as a string or an object", () => {
+    const text = JSON.stringify({ entry: { id: FIXTURE_ENTRY, description: "", project_id: null, running: true } });
+    expect(delegatedEntryId(text)).toBe(FIXTURE_ENTRY);
+    expect(delegatedEntryId(JSON.parse(text))).toBe(FIXTURE_ENTRY);
+    expect(entryIdForEvent("PostToolUse", FIXTURE.tool_name, text)).toBe(FIXTURE_ENTRY);
+    expect(delegatedEntryId("Tickr rejected the input: project_id: required (required).")).toBeNull();
+  });
+
   it.each([
     ["isError", { ...FIXTURE.tool_response, isError: true }],
     ["text that is not JSON", { content: [{ type: "text", text: "Tickr refused the request." }] }],

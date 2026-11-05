@@ -2678,7 +2678,7 @@ function delegatedEntryId(toolResponse) {
   const response = typeof toolResponse === "string" ? parseJson2(toolResponse) : toolResponse;
   if (Array.isArray(response)) return entryIdOf(firstText(response));
   if (!isObj(response) || response.isError === true) return null;
-  return entryIdOf(response.structuredContent) ?? entryIdOf(firstText(response.content));
+  return entryIdOf(response.structuredContent) ?? entryIdOf(firstText(response.content)) ?? entryIdOf(response);
 }
 function entryIdForEvent(event, toolName, toolResponse) {
   if (event !== "PostToolUse" || toolName === void 0 || !DELEGATED_TOOL.test(toolName)) return null;
