@@ -3,7 +3,14 @@
 //   hold-insert <dbPath>                       opens a transaction, journals one event, prints
 //                                              "holding" and waits to be killed
 //   produce <fallbackDir> <count> <prefix>     writes <count> fallback files, prints their ids
+//   flush <instanceDir> <options JSON>         runs the flusher (see FlushOptions), prints
+//                                              "at <boundary>" lines and "outcome <outcome>"
+import { writeSync } from "node:fs";
+import { dirname } from "node:path";
 import { writeFallback } from "../../../hook-src/fallback.js";
+import { OFFLINE_API } from "../../../hook-src/flusher/api.js";
+import { runFlusher } from "../../../hook-src/flusher/run.js";
+import type { FlusherBoundary, StageName, StageResult } from "../../../hook-src/flusher/stages.js";
 import { ulid } from "../../../hook-src/ids.js";
 import { type JournalEvent, openStore, type Store } from "../../../hook-src/store/db.js";
 
@@ -11,6 +18,16 @@ export const CHILD_MAPPING = {
   hash: "",
   json: JSON.stringify({ description: "Claude Code session", projectId: "p-1", tagIds: [], taskId: null, workspaceId: "w-1" }),
 };
+
+export interface FlushOptions {
+  /** Killed (SIGKILL, by itself) when it reaches this boundary. */
+  crashAt?: FlusherBoundary;
+  /** This stage prints "holding" and waits holdMs. */
+  holdStage?: StageName;
+  holdMs?: number;
+  /** Added to the wall clock (to look past another flusher's heartbeat). */
+  clockOffsetMs?: number;
+}
 
 function event(sessionId: string, now: Date): JournalEvent {
   return {
@@ -25,7 +42,8 @@ function event(sessionId: string, now: Date): JournalEvent {
 }
 
 function say(line: string): void {
-  process.stdout.write(`${line}\n`);
+  // Synchronous, so that the line is out before a self-inflicted kill.
+  writeSync(1, `${line}\n`);
 }
 
 const [mode, ...args] = process.argv.slice(2);
@@ -44,6 +62,36 @@ if (mode === "hold-insert") {
     if (writeFallback(args[0]!, ev)) ids.push(ev.eventId);
   }
   say(JSON.stringify(ids));
+} else if (mode === "flush") {
+  const dir = args[0]!;
+  const opts = JSON.parse(args[1] ?? "{}") as FlushOptions;
+  const offset = opts.clockOffsetMs ?? 0;
+  const stages: Partial<Record<StageName, () => Promise<StageResult>>> = {};
+  if (opts.holdStage) {
+    stages[opts.holdStage] = async () => {
+      say("holding");
+      await new Promise((resolve) => setTimeout(resolve, opts.holdMs ?? 1000));
+      return {};
+    };
+  }
+  runFlusher(dir, {
+    now: () => new Date(Date.now() + offset),
+    uptime: () => 1000,
+    api: OFFLINE_API,
+    config: { apiKey: "tkr_test_child_flusher_key", baseUrl: "https://tickr.example.test", idleMinutes: 15, dataDir: dirname(dir) },
+    wakeBudgetMs: 30_000,
+    stages,
+    onBoundary: (point) => {
+      say(`at ${point}`);
+      if (point === opts.crashAt) process.kill(process.pid, "SIGKILL");
+    },
+  }).then(
+    (outcome) => say(`outcome ${outcome}`),
+    (error: unknown) => {
+      say(`error ${String(error)}`);
+      process.exitCode = 1;
+    },
+  );
 } else {
   say(`unknown mode ${String(mode)}`);
   process.exit(2);

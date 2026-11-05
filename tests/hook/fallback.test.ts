@@ -133,11 +133,13 @@ describe("importFallback", () => {
 });
 
 describe("fallback under concurrency", () => {
+  let harness: ReturnType<typeof buildChild>;
   let bundle: string;
   beforeAll(() => {
-    bundle = buildChild(tempDir("tickr-child-"));
+    harness = buildChild();
+    bundle = harness.path;
   });
-  afterAll(() => cleanTempDirs());
+  afterAll(() => harness.remove());
 
   it("fallback from two producers + concurrent import + crash after commit before unlink ⇒ each event once", async () => {
     const dir = tempDir();

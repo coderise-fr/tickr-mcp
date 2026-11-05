@@ -157,11 +157,13 @@ describe("openStore for hooks", () => {
 });
 
 describe("a hook killed mid-insert", () => {
+  let harness: ReturnType<typeof buildChild>;
   let bundle: string;
   beforeAll(() => {
-    bundle = buildChild(tempDir("tickr-child-"));
+    harness = buildChild();
+    bundle = harness.path;
   });
-  afterAll(() => cleanTempDirs());
+  afterAll(() => harness.remove());
 
   it("hook killed mid-insert (child process) ⇒ next hook not blocked beyond busy_timeout", async () => {
     const { cwd, dir, dbPath, cfg } = linked();

@@ -1,16 +1,19 @@
 // Builds tests/hook/helpers/child.ts into one CommonJS file and drives it as a child process.
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSync } from "esbuild";
 
 const entry = fileURLToPath(new URL("./child.ts", import.meta.url));
 
-/** Bundles the harness into dir/child.cjs and returns its path. */
-export function buildChild(dir: string): string {
-  const outfile = join(dir, "child.cjs");
-  buildSync({ entryPoints: [entry], outfile, bundle: true, platform: "node", format: "cjs", target: "node22", logLevel: "warning" });
-  return outfile;
+/** Bundles the harness into its own temporary directory (outliving per-test cleanups). */
+export function buildChild(): { path: string; remove(): void } {
+  const dir = mkdtempSync(join(tmpdir(), "tickr-child-"));
+  const path = join(dir, "child.cjs");
+  buildSync({ entryPoints: [entry], outfile: path, bundle: true, platform: "node", format: "cjs", target: "node22", logLevel: "warning" });
+  return { path, remove: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 export interface Child {
