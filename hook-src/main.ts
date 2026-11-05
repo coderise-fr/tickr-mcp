@@ -3,6 +3,8 @@
 //   tickr-hook.cjs <HookEvent>            a Claude Code hook: no network, always exit 0
 //   tickr-hook.cjs flush <instanceDir>    the detached flusher
 //   tickr-hook.cjs status <dataDir>       /tickr:status
+import { readPluginConfig } from "./config.js";
+import { recordEvent } from "./intake.js";
 import { type HookInput, readHookInput, type Write, writeHookOutput, writeStdout } from "./io.js";
 import { loadSqlite, unsupportedRuntimeMessage } from "./runtime.js";
 
@@ -36,7 +38,6 @@ function processIo(): HookIo {
 }
 
 async function runHook(event: HookEvent, env: NodeJS.ProcessEnv, io: HookIo): Promise<void> {
-  void env;
   if (loadSqlite() === null) {
     // Hooks become no-ops; say it once, when the session starts.
     if (event === "SessionStart") writeHookOutput({ systemMessage: unsupportedRuntimeMessage() }, io.write);
@@ -44,7 +45,14 @@ async function runHook(event: HookEvent, env: NodeJS.ProcessEnv, io: HookIo): Pr
   }
   const input: HookInput | null = await readHookInput(io.stdin, io.deadlineMs);
   if (input === null) return;
-  // The event is journalled by the store intake (added with the SQLite store).
+
+  const config = readPluginConfig(env);
+  if ("problem" in config) {
+    if (event === "SessionStart") writeHookOutput({ systemMessage: `Tickr: ${config.problem}` }, io.write);
+    return;
+  }
+  // The argv event is the wiring of hooks.json: it wins over the event name in the input.
+  writeHookOutput(recordEvent({ ...input, hook_event_name: event }, config, io.deadlineMs, { env }), io.write);
 }
 
 export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = processIo()): Promise<number> {

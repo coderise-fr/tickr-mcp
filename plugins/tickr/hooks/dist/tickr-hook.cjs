@@ -28,8 +28,998 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 
-// hook-src/io.ts
+// src/config.ts
+var DEFAULT_BASE_URL = "https://tickr.coderise.cloud";
+var ConfigError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ConfigError";
+  }
+};
+var LOCAL_HOSTS = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]"]);
+function loadConfig(env) {
+  const apiKey = env.TICKR_API_KEY?.trim();
+  if (!apiKey) {
+    throw new ConfigError(
+      "TICKR_API_KEY is not set. Create an API key in Tickr (Settings → API keys) and add it to this MCP server's env."
+    );
+  }
+  if (/[\s\p{Cc}]/u.test(apiKey)) {
+    throw new ConfigError(
+      "TICKR_API_KEY contains spaces, line breaks or control characters. Copy the key again from Tickr (Settings → API keys)."
+    );
+  }
+  const raw = env.TICKR_BASE_URL?.trim() || DEFAULT_BASE_URL;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigError("TICKR_BASE_URL is not a valid URL.");
+  }
+  if (url.username || url.password) throw new ConfigError("TICKR_BASE_URL must not contain credentials.");
+  if (url.protocol === "http:") {
+    if (!LOCAL_HOSTS.has(url.hostname)) {
+      throw new ConfigError("TICKR_BASE_URL must use https (http is only allowed for localhost).");
+    }
+  } else if (url.protocol !== "https:") {
+    throw new ConfigError("TICKR_BASE_URL must use https.");
+  }
+  if (url.search || url.hash) throw new ConfigError("TICKR_BASE_URL must not contain a query string or fragment.");
+  return { apiKey, baseUrl: url.origin + url.pathname.replace(/\/+$/, "") };
+}
+
+// hook-src/config.ts
+var DEFAULT_IDLE_MINUTES = 15;
+var MIN_IDLE_MINUTES = 5;
+var MAX_IDLE_MINUTES = 120;
+function optionWording(message) {
+  return message.replace(/TICKR_API_KEY/g, "The Tickr plugin option api_key").replace(/TICKR_BASE_URL/g, "The Tickr plugin option base_url").replace(" and add it to this MCP server's env", " and set it in the plugin options");
+}
+function idleMinutes(raw) {
+  if (raw === void 0 || raw.trim() === "") return DEFAULT_IDLE_MINUTES;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= MIN_IDLE_MINUTES && value <= MAX_IDLE_MINUTES ? value : DEFAULT_IDLE_MINUTES;
+}
+function readPluginConfig(env) {
+  const dataDir = env.CLAUDE_PLUGIN_DATA?.trim();
+  if (!dataDir) return { problem: "Claude Code did not provide a plugin data directory (CLAUDE_PLUGIN_DATA)." };
+  let config;
+  try {
+    config = loadConfig({
+      TICKR_API_KEY: env.CLAUDE_PLUGIN_OPTION_API_KEY,
+      TICKR_BASE_URL: env.CLAUDE_PLUGIN_OPTION_BASE_URL
+    });
+  } catch (error) {
+    if (error instanceof ConfigError) return { problem: optionWording(error.message) };
+    throw error;
+  }
+  return { apiKey: config.apiKey, baseUrl: config.baseUrl, idleMinutes: idleMinutes(env.CLAUDE_PLUGIN_OPTION_IDLE_MINUTES), dataDir };
+}
+
+// hook-src/intake.ts
+var import_node_os = require("node:os");
+var import_node_path5 = require("node:path");
+
+// hook-src/fallback.ts
 var import_node_fs = require("node:fs");
+var import_node_path = require("node:path");
+
+// hook-src/store/schema.ts
+var SCHEMA_VERSION = 1;
+var V1 = `
+CREATE TABLE meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE mapping_versions (
+  id INTEGER PRIMARY KEY,
+  hash TEXT NOT NULL UNIQUE,
+  normalized_json TEXT NOT NULL
+);
+CREATE TABLE events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  local_time TEXT NOT NULL,
+  uptime_s REAL NOT NULL,
+  mapping_version_id INTEGER NULL,
+  transcript_path TEXT NULL,
+  provider TEXT NULL,
+  prompt_id TEXT NULL,
+  tool_name TEXT NULL,
+  tool_use_id TEXT NULL,
+  entry_id TEXT NULL
+);
+CREATE INDEX events_by_session ON events (session_id, seq);
+CREATE TABLE sessions (
+  session_id TEXT PRIMARY KEY,
+  last_event_seq INTEGER NOT NULL DEFAULT 0,
+  last_event_time TEXT NULL,
+  last_uptime_s REAL NULL,
+  state TEXT NOT NULL DEFAULT 'active',
+  agent_version TEXT NULL,
+  provider TEXT NULL
+);
+CREATE TABLE segments (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  mapping_version_id INTEGER NOT NULL,
+  started_at TEXT NOT NULL,
+  last_activity_at TEXT NOT NULL,
+  stopped_at TEXT NOT NULL,
+  working INTEGER NOT NULL,
+  observed_at TEXT NOT NULL,
+  final INTEGER NOT NULL DEFAULT 0,
+  final_reason TEXT NULL,
+  quality TEXT NOT NULL DEFAULT 'pending',
+  created_on_server INTEGER NOT NULL DEFAULT 0,
+  server_state TEXT NULL,
+  last_revision INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX segments_by_session ON segments (session_id, started_at);
+CREATE TABLE outbox (
+  target_kind TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  body_json TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL,
+  PRIMARY KEY (target_kind, target_id, revision)
+);
+CREATE TABLE terminal (
+  id INTEGER PRIMARY KEY,
+  target_kind TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  revision INTEGER NULL,
+  code TEXT NOT NULL,
+  at TEXT NOT NULL,
+  diagnostic TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE notices (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  shown_at TEXT NULL
+);
+CREATE TABLE owner (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  generation INTEGER NOT NULL,
+  pid INTEGER NOT NULL,
+  heartbeat TEXT NOT NULL
+);
+`;
+var MIGRATIONS = [(db) => db.exec(V1)];
+function userVersion(db) {
+  const row = db.prepare("PRAGMA user_version").get();
+  return Number(row?.user_version ?? 0);
+}
+function migrate(db, steps = MIGRATIONS) {
+  for (; ; ) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = userVersion(db);
+      if (current >= steps.length) {
+        db.exec("COMMIT");
+        return;
+      }
+      steps[current](db);
+      db.exec(`PRAGMA user_version = ${current + 1}`);
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+      }
+      throw error;
+    }
+  }
+}
+
+// hook-src/flusher/owner.ts
+var OWNER_STALE_MS = 2 * 6e4;
+function isOwnerFresh(owner, now) {
+  if (owner === null) return false;
+  const beat = Date.parse(owner.heartbeat);
+  if (Number.isNaN(beat)) return false;
+  const nowMs = now.getTime();
+  return beat >= nowMs - OWNER_STALE_MS && beat <= nowMs + OWNER_STALE_MS;
+}
+
+// hook-src/fallback.ts
+var FALLBACK_DIR = "fallback";
+var GAPS_FILE = "gaps";
+var FORMAT = 1;
+var STALE_TEMP_MS = 10 * 6e4;
+function removeQuietly(path) {
+  try {
+    (0, import_node_fs.unlinkSync)(path);
+  } catch {
+  }
+}
+function writeFallback(dir, ev) {
+  const temp = (0, import_node_path.join)(dir, `.${ev.eventId}.${process.pid}.tmp`);
+  try {
+    (0, import_node_fs.mkdirSync)(dir, { recursive: true });
+    (0, import_node_fs.writeFileSync)(temp, JSON.stringify({ format: FORMAT, event: ev }), { flag: "wx" });
+    (0, import_node_fs.renameSync)(temp, (0, import_node_path.join)(dir, `${ev.eventId}.json`));
+    return true;
+  } catch {
+    removeQuietly(temp);
+    return false;
+  }
+}
+function readGaps(file) {
+  try {
+    const value = Number.parseInt((0, import_node_fs.readFileSync)(file, "utf8"), 10);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+function recordGap(instanceDir2) {
+  const file = (0, import_node_path.join)(instanceDir2, GAPS_FILE);
+  const temp = (0, import_node_path.join)(instanceDir2, `.${GAPS_FILE}.${process.pid}.tmp`);
+  try {
+    (0, import_node_fs.writeFileSync)(temp, String(readGaps(file) + 1));
+    (0, import_node_fs.renameSync)(temp, file);
+    return true;
+  } catch {
+    removeQuietly(temp);
+    return false;
+  }
+}
+function takeGaps(instanceDir2) {
+  const file = (0, import_node_path.join)(instanceDir2, GAPS_FILE);
+  const claimed = (0, import_node_path.join)(instanceDir2, `.${GAPS_FILE}.${process.pid}.taken`);
+  try {
+    (0, import_node_fs.renameSync)(file, claimed);
+  } catch {
+    return 0;
+  }
+  const gaps = readGaps(claimed);
+  removeQuietly(claimed);
+  return gaps;
+}
+
+// hook-src/identity.ts
+var import_node_crypto = require("node:crypto");
+var import_node_fs2 = require("node:fs");
+var import_node_path2 = require("node:path");
+var INSTANCE_FILE = "instance.json";
+function instanceId(baseUrl, workspaceId, apiKey) {
+  return (0, import_node_crypto.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
+}
+function instanceDir(dataDir, id) {
+  return (0, import_node_path2.join)(dataDir, id);
+}
+function writeInstanceInfo(dir, who, now) {
+  (0, import_node_fs2.mkdirSync)(dir, { recursive: true });
+  const info = { base_url: who.baseUrl, workspace_id: who.workspaceId, created_at: now.toISOString() };
+  try {
+    (0, import_node_fs2.writeFileSync)((0, import_node_path2.join)(dir, INSTANCE_FILE), `${JSON.stringify(info)}
+`, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+}
+
+// hook-src/ids.ts
+var import_node_crypto2 = require("node:crypto");
+var CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+var MAX_TIME = 2 ** 48 - 1;
+function encodeTime(ms) {
+  let rest = ms;
+  let text = "";
+  for (let i = 0; i < 10; i++) {
+    text = CROCKFORD[rest % 32] + text;
+    rest = Math.floor(rest / 32);
+  }
+  return text;
+}
+function randomDigits(rand) {
+  const bytes = rand(10);
+  const digits = [];
+  let buffer = 0;
+  let bits = 0;
+  for (let i = 0; i < 10; i++) {
+    buffer = buffer << 8 | bytes[i];
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      digits.push(buffer >> bits & 31);
+    }
+    buffer &= (1 << bits) - 1;
+  }
+  return digits;
+}
+function increment(digits) {
+  for (let i = digits.length - 1; i >= 0; i--) {
+    if (digits[i] < 31) {
+      digits[i] += 1;
+      return true;
+    }
+    digits[i] = 0;
+  }
+  return false;
+}
+var lastMs = -1;
+var lastDigits = [];
+function ulid(nowMs, rand = import_node_crypto2.randomBytes) {
+  let ms = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
+  if (ms <= lastMs) {
+    ms = lastMs;
+    if (!increment(lastDigits)) {
+      ms = Math.min(lastMs + 1, MAX_TIME);
+      lastDigits = randomDigits(rand);
+    }
+  } else {
+    lastDigits = randomDigits(rand);
+  }
+  lastMs = ms;
+  return encodeTime(ms) + lastDigits.map((d) => CROCKFORD[d]).join("");
+}
+
+// hook-src/mapping.ts
+var import_node_crypto3 = require("node:crypto");
+var import_node_fs3 = require("node:fs");
+var import_node_path3 = require("node:path");
+var MAPPING_FILE = ".tickr.json";
+var DEFAULT_DESCRIPTION = "Claude Code session";
+var MAX_DESCRIPTION = 2e3;
+function canonicalJson(value) {
+  return JSON.stringify(sortKeys(value));
+}
+function sortKeys(value) {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value !== null && typeof value === "object") {
+    const record = value;
+    return Object.fromEntries(
+      Object.keys(record).sort().map((key) => [key, sortKeys(record[key])])
+    );
+  }
+  return value;
+}
+function requiredId(record, key) {
+  const value = record[key];
+  if (typeof value !== "string" || value.trim() === "") return { invalid: `${MAPPING_FILE} needs a "${key}" text value.` };
+  return value.trim();
+}
+function normalizeMapping(raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { invalid: `${MAPPING_FILE} must hold one JSON object.` };
+  }
+  const record = raw;
+  const workspaceId = requiredId(record, "workspace_id");
+  if (typeof workspaceId !== "string") return workspaceId;
+  const projectId = requiredId(record, "project_id");
+  if (typeof projectId !== "string") return projectId;
+  let taskId = null;
+  if (record.task_id !== void 0 && record.task_id !== null) {
+    if (typeof record.task_id !== "string") return { invalid: `${MAPPING_FILE}: "task_id" must be a text value.` };
+    taskId = record.task_id.trim() === "" ? null : record.task_id.trim();
+  }
+  let tagIds = [];
+  if (record.tag_ids !== void 0 && record.tag_ids !== null) {
+    const tags = record.tag_ids;
+    if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== "string" || tag.trim() === "")) {
+      return { invalid: `${MAPPING_FILE}: "tag_ids" must be a list of tag ids.` };
+    }
+    tagIds = [...new Set(tags.map((tag) => tag.trim()))].sort();
+  }
+  let description = DEFAULT_DESCRIPTION;
+  if (record.description !== void 0 && record.description !== null) {
+    if (typeof record.description !== "string") return { invalid: `${MAPPING_FILE}: "description" must be text.` };
+    if (record.description.length > MAX_DESCRIPTION) {
+      return { invalid: `${MAPPING_FILE}: "description" is longer than ${MAX_DESCRIPTION} characters.` };
+    }
+    if (record.description !== "") description = record.description;
+  }
+  return { workspaceId, projectId, taskId, tagIds, description };
+}
+function parseMapping(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text.replace(/^\uFEFF/, ""));
+  } catch {
+    return { invalid: `${MAPPING_FILE} is not valid JSON.` };
+  }
+  const mapping = normalizeMapping(raw);
+  if ("invalid" in mapping) return mapping;
+  const json = canonicalJson(mapping);
+  return { mapping, json, hash: (0, import_node_crypto3.createHash)("sha256").update(json, "utf8").digest("hex") };
+}
+function findMapping(cwd) {
+  let dir = (0, import_node_path3.resolve)(cwd);
+  for (; ; ) {
+    let text;
+    try {
+      text = (0, import_node_fs3.readFileSync)((0, import_node_path3.join)(dir, MAPPING_FILE), "utf8");
+    } catch (error) {
+      const code = error.code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return { invalid: `${MAPPING_FILE} could not be read.` };
+    }
+    if (text !== void 0) return parseMapping(text);
+    const parent = (0, import_node_path3.dirname)(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// hook-src/notices.ts
+var MESSAGES = {
+  intake_paused: "Tickr: time tracking is paused because the local queue reached its size limit. Run /tickr:status for details.",
+  unauthorized: "Tickr: the API key was refused. Check the Tickr plugin option api_key; sending is paused until then.",
+  forbidden_role: "Tickr: this API key cannot record time (read-only role). Sending is paused.",
+  segments_disabled: "Tickr: this Tickr instance does not accept agent sessions yet. Sending is paused and retried later.",
+  clock_skew: "Tickr: this computer's clock is ahead of Tickr. Sending is paused until the clocks agree.",
+  workspace_mismatch: "Tickr: .tickr.json names another workspace than the API key's. This session is not tracked; run /tickr:link.",
+  not_project_member: "Tickr: you are not a member of the project named in .tickr.json. Run /tickr:link to pick another one."
+};
+function noticeMessage(kind) {
+  return MESSAGES[kind] ?? "Tickr: something needs your attention. Run /tickr:status for details.";
+}
+function collectionInterruptedMessage(gaps) {
+  const events = gaps === 1 ? "1 event" : `${gaps} events`;
+  return `Tickr: collection interrupted: ${events} could not be recorded (the plugin data directory was not writable).`;
+}
+function takeNoticeMessages(store, now) {
+  return store.takeUnshownNotices(now.toISOString()).map((notice) => noticeMessage(notice.kind));
+}
+
+// hook-src/store/db.ts
+var import_node_crypto4 = require("node:crypto");
+var import_node_fs4 = require("node:fs");
+var import_node_path4 = require("node:path");
+
+// hook-src/runtime.ts
+function loadSqlite() {
+  try {
+    const lookup = process.getBuiltinModule;
+    if (typeof lookup !== "function") return null;
+    const sqlite = lookup.call(process, "node:sqlite");
+    return sqlite && typeof sqlite.DatabaseSync === "function" ? sqlite : null;
+  } catch {
+    return null;
+  }
+}
+function unsupportedRuntimeMessage() {
+  return `Tickr: time tracking is off because this Node.js (${process.version}) cannot load node:sqlite without a flag. Put Node.js 22.13 or later on PATH to enable it.`;
+}
+
+// hook-src/store/db.ts
+var DB_FILE = "tickr.db";
+var MAX_DIAGNOSTIC = 200;
+function isBusy(error) {
+  const code = error?.errcode;
+  return typeof code === "number" && ((code & 255) === 5 || (code & 255) === 6);
+}
+var pause = new Int32Array(new SharedArrayBuffer(4));
+function sleepSync(ms) {
+  if (ms > 0) Atomics.wait(pause, 0, 0, ms);
+}
+var str = (value) => String(value);
+var optStr = (value) => value === null || value === void 0 ? null : String(value);
+var num = (value) => Number(value);
+var optNum = (value) => value === null || value === void 0 ? null : Number(value);
+var bool = (value) => Number(value) !== 0;
+function toEvent(r) {
+  return {
+    seq: num(r.seq),
+    eventId: str(r.event_id),
+    sessionId: str(r.session_id),
+    type: str(r.type),
+    localTime: str(r.local_time),
+    uptimeS: num(r.uptime_s),
+    mappingVersionId: optNum(r.mapping_version_id),
+    transcriptPath: optStr(r.transcript_path),
+    provider: optStr(r.provider),
+    promptId: optStr(r.prompt_id),
+    toolName: optStr(r.tool_name),
+    toolUseId: optStr(r.tool_use_id),
+    entryId: optStr(r.entry_id)
+  };
+}
+function toSession(r) {
+  return {
+    sessionId: str(r.session_id),
+    lastEventSeq: num(r.last_event_seq),
+    lastEventTime: optStr(r.last_event_time),
+    lastUptimeS: optNum(r.last_uptime_s),
+    state: str(r.state),
+    agentVersion: optStr(r.agent_version),
+    provider: optStr(r.provider)
+  };
+}
+function toSegment(r) {
+  return {
+    id: str(r.id),
+    sessionId: str(r.session_id),
+    mappingVersionId: num(r.mapping_version_id),
+    startedAt: str(r.started_at),
+    lastActivityAt: str(r.last_activity_at),
+    stoppedAt: str(r.stopped_at),
+    working: bool(r.working),
+    observedAt: str(r.observed_at),
+    final: bool(r.final),
+    finalReason: optStr(r.final_reason),
+    quality: str(r.quality),
+    createdOnServer: bool(r.created_on_server),
+    serverState: optStr(r.server_state),
+    lastRevision: num(r.last_revision)
+  };
+}
+function toOutbox(r) {
+  return {
+    targetKind: str(r.target_kind),
+    targetId: str(r.target_id),
+    revision: num(r.revision),
+    bodyJson: str(r.body_json),
+    attempts: num(r.attempts),
+    nextAttemptAt: str(r.next_attempt_at)
+  };
+}
+function toTerminal(r) {
+  return {
+    id: num(r.id),
+    targetKind: str(r.target_kind),
+    targetId: str(r.target_id),
+    revision: optNum(r.revision),
+    code: str(r.code),
+    at: str(r.at),
+    diagnostic: str(r.diagnostic)
+  };
+}
+function toNotice(r) {
+  return { id: num(r.id), kind: str(r.kind), createdAt: str(r.created_at), shownAt: optStr(r.shown_at) };
+}
+var Store = class {
+  constructor(db, path, role, busyTimeoutMs) {
+    this.db = db;
+    this.path = path;
+    this.role = role;
+    this.busyTimeoutMs = busyTimeoutMs;
+  }
+  db;
+  path;
+  role;
+  busyTimeoutMs;
+  statements = /* @__PURE__ */ new Map();
+  depth = 0;
+  close() {
+    try {
+      if (this.depth > 0) this.db.exec("ROLLBACK");
+    } catch {
+    }
+    this.statements.clear();
+    this.db.close();
+  }
+  stmt(sql) {
+    let statement = this.statements.get(sql);
+    if (!statement) {
+      statement = this.db.prepare(sql);
+      this.statements.set(sql, statement);
+    }
+    return statement;
+  }
+  get(sql, ...params) {
+    return this.stmt(sql).get(...params);
+  }
+  all(sql, ...params) {
+    return this.stmt(sql).all(...params);
+  }
+  run(sql, ...params) {
+    return Number(this.stmt(sql).run(...params).changes);
+  }
+  /**
+   * Runs fn, retrying while the database is locked, for at most busyTimeoutMs measured on the
+   * monotonic clock. Hooks set SQLite's own busy_timeout to 0 and wait here instead: SQLite's
+   * busy handler sleeps in coarse steps on some platforms and would overrun the hook budget.
+   */
+  retryBusy(fn) {
+    const deadline = performance.now() + this.busyTimeoutMs;
+    for (; ; ) {
+      try {
+        return fn();
+      } catch (error) {
+        const left = deadline - performance.now();
+        if (!isBusy(error) || left <= 0) throw error;
+        sleepSync(Math.min(10, left));
+      }
+    }
+  }
+  get inTransaction() {
+    return this.depth > 0;
+  }
+  /** BEGIN IMMEDIATE … COMMIT around fn (rolled back if fn throws). Nested calls join the outer one. */
+  transaction(fn) {
+    if (this.depth > 0) return fn();
+    this.retryBusy(() => this.db.exec("BEGIN IMMEDIATE"));
+    this.depth = 1;
+    try {
+      const result = fn();
+      this.retryBusy(() => this.db.exec("COMMIT"));
+      this.depth = 0;
+      return result;
+    } catch (error) {
+      this.depth = 0;
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+      }
+      throw error;
+    }
+  }
+  schemaVersion() {
+    return userVersion(this.db);
+  }
+  // meta
+  getMeta(key) {
+    return optStr(this.get("SELECT value FROM meta WHERE key = ?", key)?.value);
+  }
+  setMeta(key, value) {
+    this.run("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", key, value);
+  }
+  deleteMeta(key) {
+    this.run("DELETE FROM meta WHERE key = ?", key);
+  }
+  // mapping versions (immutable, one per distinct normalised content)
+  /** Returns the id of the version with this hash, creating it when it is new. */
+  upsertMapping(hash, normalizedJson) {
+    this.run("INSERT INTO mapping_versions (hash, normalized_json) VALUES (?, ?) ON CONFLICT (hash) DO NOTHING", hash, normalizedJson);
+    return num(this.get("SELECT id FROM mapping_versions WHERE hash = ?", hash)?.id);
+  }
+  getMapping(id) {
+    const r = this.get("SELECT id, hash, normalized_json FROM mapping_versions WHERE id = ?", id);
+    return r ? { id: num(r.id), hash: str(r.hash), normalizedJson: str(r.normalized_json) } : null;
+  }
+  listMappings() {
+    return this.all("SELECT id, hash, normalized_json FROM mapping_versions ORDER BY id").map((r) => ({
+      id: num(r.id),
+      hash: str(r.hash),
+      normalizedJson: str(r.normalized_json)
+    }));
+  }
+  // events (append-only journal)
+  /** Inserts the event unless its event_id is already journalled; true when inserted. */
+  insertEvent(ev) {
+    return this.run(
+      `INSERT INTO events (event_id, session_id, type, local_time, uptime_s, mapping_version_id, transcript_path, provider,
+           prompt_id, tool_name, tool_use_id, entry_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING`,
+      ev.eventId,
+      ev.sessionId,
+      ev.type,
+      ev.localTime,
+      ev.uptimeS,
+      ev.mappingVersionId,
+      ev.transcriptPath,
+      ev.provider,
+      ev.promptId,
+      ev.toolName,
+      ev.toolUseId,
+      ev.entryId
+    ) === 1;
+  }
+  /**
+   * Journals one event with the mapping version of its moment (created when new, by hash).
+   * Idempotent by event_id; true when the event was not journalled yet.
+   */
+  journal(ev) {
+    let mappingVersionId = null;
+    if (ev.mapping !== null) {
+      const hash = (0, import_node_crypto4.createHash)("sha256").update(ev.mapping.json, "utf8").digest("hex");
+      mappingVersionId = this.upsertMapping(hash, ev.mapping.json);
+    }
+    return this.insertEvent({
+      eventId: ev.eventId,
+      sessionId: ev.sessionId,
+      type: ev.type,
+      localTime: ev.localTime,
+      uptimeS: ev.uptimeS,
+      mappingVersionId,
+      transcriptPath: ev.transcriptPath ?? null,
+      provider: ev.provider ?? null,
+      promptId: ev.promptId ?? null,
+      toolName: ev.toolName ?? null,
+      toolUseId: ev.toolUseId ?? null,
+      entryId: ev.entryId ?? null
+    });
+  }
+  /** Events with seq > afterSeq, in journal order. */
+  eventsAfter(afterSeq, limit = 1e3) {
+    return this.all("SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?", afterSeq, limit).map(toEvent);
+  }
+  sessionEventsAfter(sessionId, afterSeq, limit = 1e3) {
+    return this.all("SELECT * FROM events WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?", sessionId, afterSeq, limit).map(
+      toEvent
+    );
+  }
+  maxEventSeq() {
+    return num(this.get("SELECT COALESCE(MAX(seq), 0) AS m FROM events")?.m);
+  }
+  // sessions
+  getSession(sessionId) {
+    const r = this.get("SELECT * FROM sessions WHERE session_id = ?", sessionId);
+    return r ? toSession(r) : null;
+  }
+  listSessions() {
+    return this.all("SELECT * FROM sessions ORDER BY session_id").map(toSession);
+  }
+  upsertSession(s) {
+    this.run(
+      `INSERT INTO sessions (session_id, last_event_seq, last_event_time, last_uptime_s, state, agent_version, provider)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (session_id) DO UPDATE SET last_event_seq = excluded.last_event_seq, last_event_time = excluded.last_event_time,
+         last_uptime_s = excluded.last_uptime_s, state = excluded.state, agent_version = excluded.agent_version,
+         provider = excluded.provider`,
+      s.sessionId,
+      s.lastEventSeq,
+      s.lastEventTime,
+      s.lastUptimeS,
+      s.state,
+      s.agentVersion,
+      s.provider
+    );
+  }
+  // segments
+  getSegment(id) {
+    const r = this.get("SELECT * FROM segments WHERE id = ?", id);
+    return r ? toSegment(r) : null;
+  }
+  segmentsForSession(sessionId) {
+    return this.all("SELECT * FROM segments WHERE session_id = ? ORDER BY started_at, id", sessionId).map(toSegment);
+  }
+  /** Segments not yet final, every session. */
+  openSegments() {
+    return this.all("SELECT * FROM segments WHERE final = 0 ORDER BY started_at, id").map(toSegment);
+  }
+  upsertSegment(s) {
+    this.run(
+      `INSERT INTO segments (id, session_id, mapping_version_id, started_at, last_activity_at, stopped_at, working, observed_at,
+         final, final_reason, quality, created_on_server, server_state, last_revision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET session_id = excluded.session_id, mapping_version_id = excluded.mapping_version_id,
+         started_at = excluded.started_at, last_activity_at = excluded.last_activity_at, stopped_at = excluded.stopped_at,
+         working = excluded.working, observed_at = excluded.observed_at, final = excluded.final,
+         final_reason = excluded.final_reason, quality = excluded.quality, created_on_server = excluded.created_on_server,
+         server_state = excluded.server_state, last_revision = excluded.last_revision`,
+      s.id,
+      s.sessionId,
+      s.mappingVersionId,
+      s.startedAt,
+      s.lastActivityAt,
+      s.stoppedAt,
+      s.working ? 1 : 0,
+      s.observedAt,
+      s.final ? 1 : 0,
+      s.finalReason,
+      s.quality,
+      s.createdOnServer ? 1 : 0,
+      s.serverState,
+      s.lastRevision
+    );
+  }
+  // outbox (immutable revision bodies waiting for an acknowledgement)
+  insertOutbox(row) {
+    this.run(
+      "INSERT INTO outbox (target_kind, target_id, revision, body_json, attempts, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?)",
+      row.targetKind,
+      row.targetId,
+      row.revision,
+      row.bodyJson,
+      row.attempts,
+      row.nextAttemptAt
+    );
+  }
+  /** Every pending revision of one target, oldest first. */
+  outboxFor(kind, id) {
+    return this.all("SELECT * FROM outbox WHERE target_kind = ? AND target_id = ? ORDER BY revision", kind, id).map(toOutbox);
+  }
+  /** The latest pending revision of each target whose next attempt is due at nowIso. */
+  dueOutbox(nowIso, limit = 100) {
+    return this.all(
+      `SELECT o.* FROM outbox o
+       WHERE o.revision = (SELECT MAX(i.revision) FROM outbox i WHERE i.target_kind = o.target_kind AND i.target_id = o.target_id)
+         AND o.next_attempt_at <= ?
+       ORDER BY o.next_attempt_at, o.target_kind, o.target_id LIMIT ?`,
+      nowIso,
+      limit
+    ).map(toOutbox);
+  }
+  /** Removes the target's revisions up to and including `revision`; returns how many. */
+  deleteOutboxThrough(kind, id, revision) {
+    return this.run("DELETE FROM outbox WHERE target_kind = ? AND target_id = ? AND revision <= ?", kind, id, revision);
+  }
+  setOutboxAttempt(kind, id, revision, attempts, nextAttemptAt) {
+    this.run(
+      "UPDATE outbox SET attempts = ?, next_attempt_at = ? WHERE target_kind = ? AND target_id = ? AND revision = ?",
+      attempts,
+      nextAttemptAt,
+      kind,
+      id,
+      revision
+    );
+  }
+  pendingOutboxCount() {
+    return num(this.get("SELECT COUNT(*) AS c FROM outbox")?.c);
+  }
+  // terminal items (never re-queued, listed by /tickr:status)
+  addTerminal(t) {
+    this.run(
+      "INSERT INTO terminal (target_kind, target_id, revision, code, at, diagnostic) VALUES (?, ?, ?, ?, ?, ?)",
+      t.targetKind,
+      t.targetId,
+      t.revision,
+      t.code,
+      t.at,
+      t.diagnostic.slice(0, MAX_DIAGNOSTIC)
+    );
+    return num(this.get("SELECT last_insert_rowid() AS id")?.id);
+  }
+  listTerminal() {
+    return this.all("SELECT * FROM terminal ORDER BY id").map(toTerminal);
+  }
+  // notices (shown once, by the next hook)
+  /** Queues a notice unless one of the same kind is still unshown; true when queued. */
+  addNotice(kind, nowIso) {
+    if (this.get("SELECT 1 AS x FROM notices WHERE kind = ? AND shown_at IS NULL", kind)) return false;
+    this.run("INSERT INTO notices (kind, created_at) VALUES (?, ?)", kind, nowIso);
+    return true;
+  }
+  /** Returns the unshown notices, oldest first, and marks them shown. */
+  takeUnshownNotices(nowIso) {
+    const rows = this.all("SELECT * FROM notices WHERE shown_at IS NULL ORDER BY id").map(toNotice);
+    if (rows.length > 0) this.run("UPDATE notices SET shown_at = ? WHERE shown_at IS NULL", nowIso);
+    return rows;
+  }
+  listNotices() {
+    return this.all("SELECT * FROM notices ORDER BY id").map(toNotice);
+  }
+  // owner (flusher ownership, see flusher/owner.ts)
+  readOwner() {
+    const r = this.get("SELECT generation, pid, heartbeat FROM owner WHERE id = 1");
+    return r ? { generation: num(r.generation), pid: num(r.pid), heartbeat: str(r.heartbeat) } : null;
+  }
+  /** First claim ever: generation 1. False when an owner row already exists. */
+  insertFirstOwner(pid, heartbeat) {
+    return this.run("INSERT INTO owner (id, generation, pid, heartbeat) VALUES (1, 1, ?, ?) ON CONFLICT (id) DO NOTHING", pid, heartbeat) === 1;
+  }
+  /** Compare-and-swap takeover of a stale owner (heartbeat outside [staleBefore, futureAfter]). */
+  takeOverOwner(pid, heartbeat, staleBefore, futureAfter) {
+    return this.run(
+      "UPDATE owner SET generation = generation + 1, pid = ?, heartbeat = ? WHERE id = 1 AND (heartbeat < ? OR heartbeat > ?)",
+      pid,
+      heartbeat,
+      staleBefore,
+      futureAfter
+    ) === 1;
+  }
+  /** Sets the heartbeat if `generation` still owns the instance; returns the rows changed (0 or 1). */
+  setOwnerHeartbeat(generation, heartbeat) {
+    return this.run("UPDATE owner SET heartbeat = ? WHERE id = 1 AND generation = ?", heartbeat, generation);
+  }
+};
+function openStore(path, opts) {
+  const sqlite = loadSqlite();
+  if (sqlite === null) throw new Error("node:sqlite is not available on this runtime.");
+  if (opts.role === "hook" && !(0, import_node_fs4.existsSync)(path)) return "not_migrated";
+  if (opts.role === "flusher") (0, import_node_fs4.mkdirSync)((0, import_node_path4.dirname)(path), { recursive: true });
+  const db = new sqlite.DatabaseSync(path);
+  const store = new Store(db, path, opts.role, Math.max(0, opts.busyTimeoutMs));
+  try {
+    db.exec(`PRAGMA busy_timeout = ${opts.role === "hook" ? 0 : Math.floor(store.busyTimeoutMs)}`);
+    if (opts.role === "hook") {
+      const version = store.retryBusy(() => userVersion(db));
+      if (version === SCHEMA_VERSION) return store;
+      store.close();
+      return version > SCHEMA_VERSION ? "newer_schema" : "not_migrated";
+    }
+    if (userVersion(db) > SCHEMA_VERSION) {
+      store.close();
+      return "newer_schema";
+    }
+    db.exec("PRAGMA journal_mode = DELETE");
+    migrate(db);
+    if (userVersion(db) > SCHEMA_VERSION) {
+      store.close();
+      return "newer_schema";
+    }
+    return store;
+  } catch (error) {
+    try {
+      store.close();
+    } catch {
+    }
+    throw error;
+  }
+}
+
+// hook-src/intake.ts
+var HOOK_BUSY_TIMEOUT_MS = 250;
+var INTAKE_PAUSED_KEY = "intake_paused";
+function enabled(value) {
+  if (value === void 0) return false;
+  const v = value.trim().toLowerCase();
+  return v !== "" && v !== "0" && v !== "false";
+}
+function providerFrom(env) {
+  if (enabled(env.CLAUDE_CODE_USE_BEDROCK)) return "bedrock";
+  if (enabled(env.CLAUDE_CODE_USE_VERTEX)) return "vertex";
+  if (enabled(env.CLAUDE_CODE_USE_FOUNDRY)) return "foundry";
+  return "anthropic";
+}
+function buildEvent(input, mapping, now, uptimeS, env) {
+  const ev = {
+    eventId: ulid(now.getTime()),
+    sessionId: input.session_id,
+    type: input.hook_event_name,
+    localTime: now.toISOString(),
+    uptimeS,
+    mapping,
+    provider: providerFrom(env)
+  };
+  if (input.transcript_path !== void 0) ev.transcriptPath = input.transcript_path;
+  if (input.prompt_id !== void 0) ev.promptId = input.prompt_id;
+  if (input.tool_name !== void 0) ev.toolName = input.tool_name;
+  if (input.tool_use_id !== void 0) ev.toolUseId = input.tool_use_id;
+  return ev;
+}
+function journalInStore(dbPath, ev, now) {
+  let opened;
+  try {
+    opened = openStore(dbPath, { role: "hook", busyTimeoutMs: HOOK_BUSY_TIMEOUT_MS });
+    if (typeof opened === "string") return null;
+    const store = opened;
+    return store.transaction(() => {
+      if (store.schemaVersion() !== SCHEMA_VERSION) return null;
+      const paused = store.getMeta(INTAKE_PAUSED_KEY) !== null;
+      if (!paused) store.journal(ev);
+      return { paused, messages: takeNoticeMessages(store, now), ownerFresh: isOwnerFresh(store.readOwner(), now) };
+    });
+  } catch {
+    return null;
+  } finally {
+    if (opened !== void 0 && typeof opened !== "string") opened.close();
+  }
+}
+function recordEvent(input, cfg, deadlineMs, opts = {}) {
+  const env = opts.env ?? process.env;
+  const found = findMapping(input.cwd);
+  if (found === null) return {};
+  if ("invalid" in found) {
+    return input.hook_event_name === "SessionStart" ? { systemMessage: `Tickr: ${found.invalid} This session is not tracked.` } : {};
+  }
+  const now = (opts.now ?? (() => /* @__PURE__ */ new Date()))();
+  const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
+  const ev = buildEvent(input, { hash: found.hash, json: found.json }, now, (opts.uptime ?? import_node_os.uptime)(), env);
+  let dirReady = true;
+  try {
+    writeInstanceInfo(dir, { baseUrl: cfg.baseUrl, workspaceId: found.mapping.workspaceId }, now);
+  } catch {
+    dirReady = false;
+  }
+  const room = deadlineMs - Date.now() > 2 * HOOK_BUSY_TIMEOUT_MS + 100;
+  const journalled = dirReady && room ? journalInStore((0, import_node_path5.join)(dir, DB_FILE), ev, now) : null;
+  if (journalled === null && !writeFallback((0, import_node_path5.join)(dir, FALLBACK_DIR), ev)) {
+    recordGap(dir);
+    return {};
+  }
+  const messages = [];
+  const gaps = takeGaps(dir);
+  if (gaps > 0) messages.push(collectionInterruptedMessage(gaps));
+  if (journalled) messages.push(...journalled.messages);
+  if (!journalled?.ownerFresh) {
+    try {
+      opts.startFlusher?.(dir);
+    } catch {
+    }
+  }
+  return messages.length > 0 ? { systemMessage: messages.join("\n") } : {};
+}
+
+// hook-src/io.ts
+var import_node_fs5 = require("node:fs");
 var OPTIONAL_STRINGS = [
   "transcript_path",
   "prompt_id",
@@ -55,7 +1045,7 @@ function toHookInput(raw) {
   return input;
 }
 function readHookInput(stdin, deadlineMs) {
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     const chunks = [];
     let settled = false;
     const finish = (value) => {
@@ -65,7 +1055,7 @@ function readHookInput(stdin, deadlineMs) {
       stdin.removeListener("data", onData);
       stdin.removeListener("end", onEnd);
       stdin.removeListener("error", onError);
-      resolve(value);
+      resolve2(value);
     };
     const onData = (chunk) => {
       chunks.push(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk);
@@ -86,26 +1076,11 @@ function readHookInput(stdin, deadlineMs) {
   });
 }
 var writeStdout = (text) => {
-  (0, import_node_fs.writeSync)(1, text);
+  (0, import_node_fs5.writeSync)(1, text);
 };
 function writeHookOutput(out, write = writeStdout) {
   if (!out.systemMessage) return;
   write(JSON.stringify({ systemMessage: out.systemMessage }));
-}
-
-// hook-src/runtime.ts
-function loadSqlite() {
-  try {
-    const lookup = process.getBuiltinModule;
-    if (typeof lookup !== "function") return null;
-    const sqlite = lookup.call(process, "node:sqlite");
-    return sqlite && typeof sqlite.DatabaseSync === "function" ? sqlite : null;
-  } catch {
-    return null;
-  }
-}
-function unsupportedRuntimeMessage() {
-  return `Tickr: time tracking is off because this Node.js (${process.version}) cannot load node:sqlite without a flag. Put Node.js 22.13 or later on PATH to enable it.`;
 }
 
 // hook-src/main.ts
@@ -126,13 +1101,18 @@ function processIo() {
   return { stdin: process.stdin, deadlineMs: performance.timeOrigin + HOOK_BUDGET_MS, write: writeStdout };
 }
 async function runHook(event, env, io) {
-  void env;
   if (loadSqlite() === null) {
     if (event === "SessionStart") writeHookOutput({ systemMessage: unsupportedRuntimeMessage() }, io.write);
     return;
   }
   const input = await readHookInput(io.stdin, io.deadlineMs);
   if (input === null) return;
+  const config = readPluginConfig(env);
+  if ("problem" in config) {
+    if (event === "SessionStart") writeHookOutput({ systemMessage: `Tickr: ${config.problem}` }, io.write);
+    return;
+  }
+  writeHookOutput(recordEvent({ ...input, hook_event_name: event }, config, io.deadlineMs, { env }), io.write);
 }
 async function main(argv, env, io = processIo()) {
   const [mode] = argv;
