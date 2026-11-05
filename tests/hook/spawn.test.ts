@@ -3,12 +3,14 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { FALLBACK_DIR } from "../../hook-src/fallback.js";
 import { RELEASED_HEARTBEAT } from "../../hook-src/flusher/owner.js";
 import { spawnFlusher } from "../../hook-src/spawn.js";
+import { instanceDir, instanceId } from "../../hook-src/identity.js";
 import { DB_FILE } from "../../hook-src/store/db.js";
-import { cleanTempDirs, hookInput, instanceFor, KEY, listJson, pluginEnv, rawDb, tempDir, writeMapping } from "./helpers/env.js";
+import { problem, startServer } from "../helpers/httpServer.js";
+import { cleanTempDirs, hookInput, KEY, listJson, pluginEnv, rawDb, tempDir, WS, writeMapping } from "./helpers/env.js";
 
 afterAll(() => cleanTempDirs());
 
@@ -51,6 +53,12 @@ describe("spawnFlusher", () => {
 describe("hook to flusher, through the built bundle", () => {
   const buildScript = fileURLToPath(new URL("../../scripts/build-hook.mjs", import.meta.url));
   let bundle: string;
+  // A local Tickr that is busy: the flusher's GET /me fails at once, and nothing is sent.
+  let tickr: Awaited<ReturnType<typeof startServer>>;
+  beforeEach(async () => {
+    tickr = await startServer(() => problem(503, "service_unavailable", "workspace_busy"));
+  });
+  afterEach(() => tickr.close());
 
   beforeAll(() => {
     bundle = join(tempDir("tickr bundle "), "plugin root", "tickr-hook.cjs");
@@ -61,7 +69,7 @@ describe("hook to flusher, through the built bundle", () => {
   function runHook(event: string, cwd: string, data: string) {
     return new Promise<{ code: number | null; stdout: string }>((resolve, reject) => {
       const child = spawn(process.execPath, ["--no-warnings", bundle, event], {
-        env: { ...process.env, ...pluginEnv(data) },
+        env: { ...process.env, ...pluginEnv(data, { CLAUDE_PLUGIN_OPTION_BASE_URL: tickr.baseUrl }) },
         stdio: ["pipe", "pipe", "ignore"],
       });
       let stdout = "";
@@ -76,7 +84,7 @@ describe("hook to flusher, through the built bundle", () => {
     const root = tempDir("tickr e2e ");
     const cwd = writeMapping(join(root, "repo"));
     const data = join(root, "plugin data");
-    const dir = instanceFor(data);
+    const dir = instanceDir(data, instanceId(tickr.baseUrl, WS, KEY));
 
     const result = await runHook("UserPromptSubmit", cwd, data);
     expect(result).toEqual({ code: 0, stdout: "" });
@@ -106,6 +114,8 @@ describe("hook to flusher, through the built bundle", () => {
       try {
         const rows = d.prepare("SELECT type FROM events ORDER BY seq").all() as { type: string }[];
         return rows.length === 2 ? rows.map((r) => r.type) : undefined;
+      } catch {
+        return undefined; // locked by the flusher for a moment
       } finally {
         d.close();
       }
@@ -117,6 +127,8 @@ describe("hook to flusher, through the built bundle", () => {
       try {
         const row = d.prepare("SELECT generation, heartbeat FROM owner").get() as { generation: number; heartbeat: string };
         return row.generation === 2 && row.heartbeat === RELEASED_HEARTBEAT ? true : undefined;
+      } catch {
+        return undefined; // locked by the flusher for a moment
       } finally {
         d.close();
       }

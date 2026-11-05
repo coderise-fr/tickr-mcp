@@ -1,0 +1,88 @@
+name: plugin
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      - run: npm run build:hook
+      - run: git diff --exit-code plugins/tickr/hooks/dist
+
+  hooks:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22.x, 24.x, 26.x]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:hook
+
+  no-sqlite:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22.12.0, 20.x]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+      # The committed bundle on every hook event: exit 0 each time, exactly one systemMessage
+      # (at SessionStart), no store created. No npm ci: the bundle has no dependency.
+      - name: hooks are no-ops without flag-free node:sqlite
+        shell: bash
+        run: |
+          node <<'EOF'
+          const { spawnSync } = require("node:child_process");
+          const { existsSync, mkdirSync, mkdtempSync, writeFileSync } = require("node:fs");
+          const { tmpdir } = require("node:os");
+          const { join } = require("node:path");
+          const root = mkdtempSync(join(tmpdir(), "tickr no sqlite "));
+          const repo = join(root, "repo");
+          const data = join(root, "plugin data");
+          mkdirSync(repo);
+          writeFileSync(join(repo, ".tickr.json"), JSON.stringify({ workspace_id: "w-1", project_id: "p-1" }));
+          const env = { ...process.env, CLAUDE_PLUGIN_DATA: data, CLAUDE_PLUGIN_OPTION_API_KEY: "tkr_test_no_sqlite_key" };
+          const messages = [];
+          for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"]) {
+            const input = JSON.stringify({ session_id: "s-1", cwd: repo, hook_event_name: event, source: "startup" });
+            const run = spawnSync("node", ["--no-warnings", "plugins/tickr/hooks/dist/tickr-hook.cjs", event], { input, env, encoding: "utf8" });
+            if (run.status !== 0) throw new Error(`${event} exited ${run.status}: ${run.stderr}`);
+            if (run.stdout.trim() !== "") messages.push([event, JSON.parse(run.stdout).systemMessage]);
+          }
+          if (messages.length !== 1 || messages[0][0] !== "SessionStart" || !/node:sqlite/.test(messages[0][1])) {
+            throw new Error(`expected one systemMessage at SessionStart, got ${JSON.stringify(messages)}`);
+          }
+          if (existsSync(data)) throw new Error("a store or data directory was created");
+          console.log(`ok on ${process.version}: ${messages[0][1]}`);
+          EOF
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
