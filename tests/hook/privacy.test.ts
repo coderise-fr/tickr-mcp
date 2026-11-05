@@ -12,7 +12,7 @@ import { DEBUG_FILE, debugLine, type DebugRecord } from "../../hook-src/flusher/
 import { instanceDir, instanceId } from "../../hook-src/identity.js";
 import { main } from "../../hook-src/main.js";
 import { json, type RecordedRequest, startServer } from "../helpers/httpServer.js";
-import { cleanTempDirs, tempDir, WS, writeMapping } from "./helpers/env.js";
+import { cleanTempDirs, linkCheckout, tempDir, WS, writeMapping } from "./helpers/env.js";
 
 interface Step {
   hook?: Record<string, unknown>;
@@ -60,6 +60,7 @@ beforeAll(async () => {
   root = tempDir("tickr privacy ");
   cwd = writeMapping(join(root, "SENTINEL_CWD repo"));
   data = join(root, "data");
+  linkCheckout(data, cwd);
   const transcript = join(root, "projects", "-SENTINEL_PROJECT", `${FIXTURE.sessionId}.jsonl`);
   const agentTranscript = join(dirname(transcript), FIXTURE.sessionId, "subagents", "agent-a1b2c3d4e5.jsonl");
   for (const f of [transcript, agentTranscript]) {

@@ -102,7 +102,7 @@ export function parseStoredMapping(json: string): NormalizedMapping | null {
   };
 }
 
-function parseMapping(text: string): FoundMapping | { invalid: string } {
+function parseMapping(text: string): Omit<FoundMapping, "dir"> | { invalid: string } {
   let raw: unknown;
   try {
     raw = JSON.parse(text.replace(/^\uFEFF/, ""));

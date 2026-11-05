@@ -52,7 +52,7 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
   "mcpServers": {
     "tickr": {
       "command": "npx",
-      "args": ["-y", "@coderise-fr/tickr-mcp@0.2.0"],
+      "args": ["-y", "@coderise-fr/tickr-mcp@0.2.1"],
       "env": { "TICKR_API_KEY": "YOUR_TICKR_API_KEY" }
     }
   }
@@ -60,12 +60,12 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
 ```
 
 On Windows, if the client cannot find `npx`, use `"command": "cmd"` and
-`"args": ["/c", "npx", "-y", "@coderise-fr/tickr-mcp@0.2.0"]`.
+`"args": ["/c", "npx", "-y", "@coderise-fr/tickr-mcp@0.2.1"]`.
 
 **Claude Code:**
 
 ```bash
-claude mcp add tickr --scope user --env TICKR_API_KEY=YOUR_TICKR_API_KEY -- npx -y @coderise-fr/tickr-mcp@0.2.0
+claude mcp add tickr --scope user --env TICKR_API_KEY=YOUR_TICKR_API_KEY -- npx -y @coderise-fr/tickr-mcp@0.2.1
 ```
 
 `--scope user` (all your projects) and the default `local` scope keep the key
@@ -140,6 +140,13 @@ project (and optionally the task, tags and description), writes a
 `.git/info/exclude`. That file is personal: it is never added to `.gitignore`
 and never committed. Each developer links their own checkout. A session in a
 directory without `.tickr.json` is not recorded.
+
+**Why linking is needed on each machine.** A `.tickr.json` can arrive with a clone or
+a pull, written by someone else. The plugin therefore tracks a checkout only after
+`/tickr:link` recorded, on your machine, that you linked that directory with that file
+content. After a `git pull` that changes `.tickr.json`, or if you move the checkout,
+run `/tickr:link` again; until then the session says it is not tracked. Claude Code asks
+your permission to write the file and to record the link.
 
 **What is sent.** Start and end times, the project, task, tags and description
 from `.tickr.json`, whether the session is still working, and token counts per

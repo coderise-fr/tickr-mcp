@@ -28,7 +28,7 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_node_os2 = require("node:os");
-var import_node_path10 = require("node:path");
+var import_node_path11 = require("node:path");
 
 // src/config.ts
 var DEFAULT_BASE_URL = "https://tickr.coderise.cloud";
@@ -98,6 +98,52 @@ function readPluginConfig(env) {
   return { apiKey: config.apiKey, baseUrl: config.baseUrl, idleMinutes: idleMinutes(env.CLAUDE_PLUGIN_OPTION_IDLE_MINUTES), dataDir };
 }
 
+// hook-src/consent.ts
+var import_node_crypto = require("node:crypto");
+var import_node_fs = require("node:fs");
+var import_node_path = require("node:path");
+var LINKED_FILE = "linked.json";
+var MAX_LINKS = 500;
+function realDir(dir) {
+  try {
+    return import_node_fs.realpathSync.native(dir);
+  } catch {
+    return dir;
+  }
+}
+function linkKey(mappingDir, mappingHash) {
+  return (0, import_node_crypto.createHash)("sha256").update(JSON.stringify([realDir(mappingDir), mappingHash]), "utf8").digest("hex");
+}
+function readLinks(dataDir) {
+  try {
+    const doc = JSON.parse((0, import_node_fs.readFileSync)((0, import_node_path.join)(dataDir, LINKED_FILE), "utf8"));
+    return Array.isArray(doc?.links) ? doc.links.filter((l) => typeof l === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function isLinked(dataDir, mappingDir, mappingHash) {
+  return readLinks(dataDir).includes(linkKey(mappingDir, mappingHash));
+}
+function recordLink(dataDir, mappingDir, mappingHash) {
+  const key = linkKey(mappingDir, mappingHash);
+  const temp = (0, import_node_path.join)(dataDir, `.${LINKED_FILE}.${process.pid}.tmp`);
+  try {
+    (0, import_node_fs.mkdirSync)(dataDir, { recursive: true });
+    const links = readLinks(dataDir).filter((l) => l !== key);
+    links.push(key);
+    (0, import_node_fs.writeFileSync)(temp, JSON.stringify({ version: 1, links: links.slice(-MAX_LINKS) }), { flag: "w" });
+    (0, import_node_fs.renameSync)(temp, (0, import_node_path.join)(dataDir, LINKED_FILE));
+    return true;
+  } catch {
+    try {
+      (0, import_node_fs.unlinkSync)(temp);
+    } catch {
+    }
+    return false;
+  }
+}
+
 // src/api/agent.ts
 var AGENT_HEADER = "Tickr-Agent";
 var AGENT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -124,7 +170,7 @@ function agentHeaderValue(info) {
 }
 
 // hook-src/version.ts
-var PLUGIN_VERSION = "0.1.0";
+var PLUGIN_VERSION = "0.1.1";
 
 // hook-src/flusher/api.ts
 var REQUEST_TIMEOUT_MS = 3e3;
@@ -257,12 +303,12 @@ function createAgentApi(o) {
 }
 
 // hook-src/flusher/run.ts
-var import_node_fs7 = require("node:fs");
-var import_node_path8 = require("node:path");
+var import_node_fs8 = require("node:fs");
+var import_node_path9 = require("node:path");
 
 // hook-src/fallback.ts
-var import_node_fs = require("node:fs");
-var import_node_path = require("node:path");
+var import_node_fs2 = require("node:fs");
+var import_node_path2 = require("node:path");
 
 // hook-src/store/schema.ts
 var SCHEMA_VERSION = 2;
@@ -512,16 +558,16 @@ var FORMAT = 1;
 var STALE_TEMP_MS = 10 * 6e4;
 function removeQuietly(path) {
   try {
-    (0, import_node_fs.unlinkSync)(path);
+    (0, import_node_fs2.unlinkSync)(path);
   } catch {
   }
 }
 function writeFallback(dir, ev) {
-  const temp = (0, import_node_path.join)(dir, `.${ev.eventId}.${process.pid}.tmp`);
+  const temp = (0, import_node_path2.join)(dir, `.${ev.eventId}.${process.pid}.tmp`);
   try {
-    (0, import_node_fs.mkdirSync)(dir, { recursive: true });
-    (0, import_node_fs.writeFileSync)(temp, JSON.stringify({ format: FORMAT, event: ev }), { flag: "wx" });
-    (0, import_node_fs.renameSync)(temp, (0, import_node_path.join)(dir, `${ev.eventId}.json`));
+    (0, import_node_fs2.mkdirSync)(dir, { recursive: true });
+    (0, import_node_fs2.writeFileSync)(temp, JSON.stringify({ format: FORMAT, event: ev }), { flag: "wx" });
+    (0, import_node_fs2.renameSync)(temp, (0, import_node_path2.join)(dir, `${ev.eventId}.json`));
     return true;
   } catch {
     removeQuietly(temp);
@@ -566,30 +612,30 @@ function importFallback(store, gen, dir, opts = {}) {
   const now = opts.now ?? (() => /* @__PURE__ */ new Date());
   let names;
   try {
-    names = (0, import_node_fs.readdirSync)(dir);
+    names = (0, import_node_fs2.readdirSync)(dir);
   } catch {
     return 0;
   }
   for (const name of names) {
     if (!name.startsWith(".") || !name.endsWith(".tmp")) continue;
     try {
-      if (now().getTime() - (0, import_node_fs.statSync)((0, import_node_path.join)(dir, name)).mtimeMs > STALE_TEMP_MS) removeQuietly((0, import_node_path.join)(dir, name));
+      if (now().getTime() - (0, import_node_fs2.statSync)((0, import_node_path2.join)(dir, name)).mtimeMs > STALE_TEMP_MS) removeQuietly((0, import_node_path2.join)(dir, name));
     } catch {
     }
   }
   let imported = 0;
   for (const name of names.filter((n) => n.endsWith(".json") && !n.startsWith(".")).sort()) {
-    const file = (0, import_node_path.join)(dir, name);
+    const file = (0, import_node_path2.join)(dir, name);
     let text;
     try {
-      text = (0, import_node_fs.readFileSync)(file, "utf8");
+      text = (0, import_node_fs2.readFileSync)(file, "utf8");
     } catch {
       continue;
     }
     const ev = parseFallback(text);
     if (ev === null) {
       try {
-        (0, import_node_fs.renameSync)(file, `${file}.invalid`);
+        (0, import_node_fs2.renameSync)(file, `${file}.invalid`);
       } catch {
       }
       continue;
@@ -602,25 +648,25 @@ function importFallback(store, gen, dir, opts = {}) {
 }
 function pendingFallbackCount(dir) {
   try {
-    return (0, import_node_fs.readdirSync)(dir).filter((n) => n.endsWith(".json") && !n.startsWith(".")).length;
+    return (0, import_node_fs2.readdirSync)(dir).filter((n) => n.endsWith(".json") && !n.startsWith(".")).length;
   } catch {
     return 0;
   }
 }
 function readGaps(file) {
   try {
-    const value = Number.parseInt((0, import_node_fs.readFileSync)(file, "utf8"), 10);
+    const value = Number.parseInt((0, import_node_fs2.readFileSync)(file, "utf8"), 10);
     return Number.isFinite(value) && value > 0 ? value : 0;
   } catch {
     return 0;
   }
 }
 function recordGap(instanceDir2) {
-  const file = (0, import_node_path.join)(instanceDir2, GAPS_FILE);
-  const temp = (0, import_node_path.join)(instanceDir2, `.${GAPS_FILE}.${process.pid}.tmp`);
+  const file = (0, import_node_path2.join)(instanceDir2, GAPS_FILE);
+  const temp = (0, import_node_path2.join)(instanceDir2, `.${GAPS_FILE}.${process.pid}.tmp`);
   try {
-    (0, import_node_fs.writeFileSync)(temp, String(readGaps(file) + 1));
-    (0, import_node_fs.renameSync)(temp, file);
+    (0, import_node_fs2.writeFileSync)(temp, String(readGaps(file) + 1));
+    (0, import_node_fs2.renameSync)(temp, file);
     return true;
   } catch {
     removeQuietly(temp);
@@ -628,10 +674,10 @@ function recordGap(instanceDir2) {
   }
 }
 function takeGaps(instanceDir2) {
-  const file = (0, import_node_path.join)(instanceDir2, GAPS_FILE);
-  const claimed = (0, import_node_path.join)(instanceDir2, `.${GAPS_FILE}.${process.pid}.taken`);
+  const file = (0, import_node_path2.join)(instanceDir2, GAPS_FILE);
+  const claimed = (0, import_node_path2.join)(instanceDir2, `.${GAPS_FILE}.${process.pid}.taken`);
   try {
-    (0, import_node_fs.renameSync)(file, claimed);
+    (0, import_node_fs2.renameSync)(file, claimed);
   } catch {
     return 0;
   }
@@ -641,9 +687,9 @@ function takeGaps(instanceDir2) {
 }
 
 // hook-src/store/db.ts
-var import_node_crypto = require("node:crypto");
-var import_node_fs2 = require("node:fs");
-var import_node_path2 = require("node:path");
+var import_node_crypto2 = require("node:crypto");
+var import_node_fs3 = require("node:fs");
+var import_node_path3 = require("node:path");
 
 // hook-src/runtime.ts
 function loadSqlite() {
@@ -906,7 +952,7 @@ var Store = class {
   journal(ev) {
     let mappingVersionId = null;
     if (ev.mapping !== null) {
-      const hash = (0, import_node_crypto.createHash)("sha256").update(ev.mapping.json, "utf8").digest("hex");
+      const hash = (0, import_node_crypto2.createHash)("sha256").update(ev.mapping.json, "utf8").digest("hex");
       mappingVersionId = this.upsertMapping(hash, ev.mapping.json);
     }
     const inserted = this.insertEvent({
@@ -1354,8 +1400,8 @@ var Store = class {
 function openStore(path, opts) {
   const sqlite = loadSqlite();
   if (sqlite === null) throw new Error("node:sqlite is not available on this runtime.");
-  if (opts.role === "hook" && !(0, import_node_fs2.existsSync)(path)) return "not_migrated";
-  if (opts.role === "flusher") (0, import_node_fs2.mkdirSync)((0, import_node_path2.dirname)(path), { recursive: true });
+  if (opts.role === "hook" && !(0, import_node_fs3.existsSync)(path)) return "not_migrated";
+  if (opts.role === "flusher") (0, import_node_fs3.mkdirSync)((0, import_node_path3.dirname)(path), { recursive: true });
   const db = new sqlite.DatabaseSync(path);
   const store = new Store(db, path, opts.role, Math.max(0, opts.busyTimeoutMs));
   try {
@@ -1387,12 +1433,13 @@ function openStore(path, opts) {
 }
 
 // hook-src/mapping.ts
-var import_node_crypto2 = require("node:crypto");
-var import_node_fs3 = require("node:fs");
-var import_node_path3 = require("node:path");
+var import_node_crypto3 = require("node:crypto");
+var import_node_fs4 = require("node:fs");
+var import_node_path4 = require("node:path");
 var MAPPING_FILE = ".tickr.json";
 var DEFAULT_DESCRIPTION = "Claude Code session";
 var MAX_DESCRIPTION = 2e3;
+var MAX_MAPPING_BYTES = 64 * 1024;
 function canonicalJson(value) {
   return JSON.stringify(sortKeys(value));
 }
@@ -1470,20 +1517,27 @@ function parseMapping(text) {
   const mapping = normalizeMapping(raw);
   if ("invalid" in mapping) return mapping;
   const json = canonicalJson(mapping);
-  return { mapping, json, hash: (0, import_node_crypto2.createHash)("sha256").update(json, "utf8").digest("hex") };
+  return { mapping, json, hash: (0, import_node_crypto3.createHash)("sha256").update(json, "utf8").digest("hex") };
 }
 function findMapping(cwd) {
-  let dir = (0, import_node_path3.resolve)(cwd);
+  let dir = (0, import_node_path4.resolve)(cwd);
   for (; ; ) {
     let text;
     try {
-      text = (0, import_node_fs3.readFileSync)((0, import_node_path3.join)(dir, MAPPING_FILE), "utf8");
+      const file = (0, import_node_path4.join)(dir, MAPPING_FILE);
+      const info = (0, import_node_fs4.statSync)(file);
+      if (!info.isFile()) return { invalid: `${MAPPING_FILE} is not a regular file.` };
+      if (info.size > MAX_MAPPING_BYTES) return { invalid: `${MAPPING_FILE} is larger than ${MAX_MAPPING_BYTES / 1024} KB.` };
+      text = (0, import_node_fs4.readFileSync)(file, "utf8");
     } catch (error) {
       const code2 = error.code;
       if (code2 !== "ENOENT" && code2 !== "ENOTDIR") return { invalid: `${MAPPING_FILE} could not be read.` };
     }
-    if (text !== void 0) return parseMapping(text);
-    const parent = (0, import_node_path3.dirname)(dir);
+    if (text !== void 0) {
+      const parsed = parseMapping(text);
+      return "invalid" in parsed ? parsed : { ...parsed, dir };
+    }
+    const parent = (0, import_node_path4.dirname)(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -1514,7 +1568,7 @@ function takeNoticeMessages(store, now) {
 }
 
 // hook-src/ids.ts
-var import_node_crypto3 = require("node:crypto");
+var import_node_crypto4 = require("node:crypto");
 var CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 var MAX_TIME = 2 ** 48 - 1;
 function timeBytes(nowMs) {
@@ -1529,7 +1583,7 @@ function timeBytes(nowMs) {
 function hex(bytes) {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
-function uuidv7(nowMs, rand = import_node_crypto3.randomBytes) {
+function uuidv7(nowMs, rand = import_node_crypto4.randomBytes) {
   const bytes = new Uint8Array(16);
   bytes.set(timeBytes(nowMs), 0);
   bytes.set(rand(10).subarray(0, 10), 6);
@@ -1575,7 +1629,7 @@ function increment(digits) {
 }
 var lastMs = -1;
 var lastDigits = [];
-function ulid(nowMs, rand = import_node_crypto3.randomBytes) {
+function ulid(nowMs, rand = import_node_crypto4.randomBytes) {
   let ms4 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
   if (ms4 <= lastMs) {
     ms4 = lastMs;
@@ -2104,9 +2158,9 @@ function settled(timestamp, segments) {
 }
 
 // hook-src/transcript/reader.ts
-var import_node_crypto4 = require("node:crypto");
-var import_node_fs4 = require("node:fs");
-var import_node_path4 = require("node:path");
+var import_node_crypto5 = require("node:crypto");
+var import_node_fs5 = require("node:fs");
+var import_node_path5 = require("node:path");
 
 // hook-src/transcript/parser.ts
 var SYNTHETIC_MODEL = "<synthetic>";
@@ -2183,9 +2237,9 @@ function merge(seen, next) {
   if (next.version !== void 0) seen.version = next.version;
   if (seen.agentId === void 0 && next.agentId !== void 0) seen.agentId = next.agentId;
 }
-function parseJson(line) {
+function parseJson(line2) {
   try {
-    return { ok: true, doc: JSON.parse(line) };
+    return { ok: true, doc: JSON.parse(line2) };
   } catch {
     return { ok: false };
   }
@@ -2197,10 +2251,10 @@ function parseLines(text) {
   const n = { lines: 0, malformed: 0, recognised: 0, assistant: 0, usable: 0 };
   let version;
   for (const raw of complete.split("\n")) {
-    const line = raw.trim();
-    if (line === "") continue;
+    const line2 = raw.trim();
+    if (line2 === "") continue;
     n.lines++;
-    const parsed = parseJson(line);
+    const parsed = parseJson(line2);
     if (!parsed.ok) {
       n.malformed++;
       continue;
@@ -2238,16 +2292,16 @@ function readRange(fd, start, length) {
   const buf = Buffer.alloc(length);
   let done = 0;
   while (done < length) {
-    const n = (0, import_node_fs4.readSync)(fd, buf, done, length - done, start + done);
+    const n = (0, import_node_fs5.readSync)(fd, buf, done, length - done, start + done);
     if (n === 0) break;
     done += n;
   }
   return done === length ? buf : buf.subarray(0, done);
 }
 function headHash(fd, length) {
-  return (0, import_node_crypto4.createHash)("sha256").update(readRange(fd, 0, length)).digest("hex");
+  return (0, import_node_crypto5.createHash)("sha256").update(readRange(fd, 0, length)).digest("hex");
 }
-var EMPTY_HASH = (0, import_node_crypto4.createHash)("sha256").digest("hex");
+var EMPTY_HASH = (0, import_node_crypto5.createHash)("sha256").digest("hex");
 function readTranscript(store, path, opts = {}) {
   const readAt = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
   const prev = store.getTranscriptOffset(path);
@@ -2263,12 +2317,12 @@ function readTranscript(store, path, opts = {}) {
   });
   let fd;
   try {
-    fd = (0, import_node_fs4.openSync)(path, "r");
+    fd = (0, import_node_fs5.openSync)(path, "r");
   } catch {
     return unavailable(false);
   }
   try {
-    const size = (0, import_node_fs4.fstatSync)(fd).size;
+    const size = (0, import_node_fs5.fstatSync)(fd).size;
     let start = prev?.offset ?? 0;
     let rescanned = false;
     if (prev !== null && (size < prev.offset || headHash(fd, Math.min(HEAD_BYTES, prev.offset)) !== prev.headHash)) {
@@ -2303,7 +2357,7 @@ function readTranscript(store, path, opts = {}) {
   } catch {
     return unavailable(false);
   } finally {
-    (0, import_node_fs4.closeSync)(fd);
+    (0, import_node_fs5.closeSync)(fd);
   }
 }
 function commitRead(store, read) {
@@ -2311,26 +2365,26 @@ function commitRead(store, read) {
 }
 var SUBAGENT_FILE = /^agent-([A-Za-z0-9._-]+)\.jsonl$/;
 function subagentTranscripts(mainPath) {
-  const dir = (0, import_node_path4.join)((0, import_node_path4.dirname)(mainPath), (0, import_node_path4.basename)(mainPath).replace(/\.jsonl$/, ""), "subagents");
+  const dir = (0, import_node_path5.join)((0, import_node_path5.dirname)(mainPath), (0, import_node_path5.basename)(mainPath).replace(/\.jsonl$/, ""), "subagents");
   let names;
   try {
-    names = (0, import_node_fs4.readdirSync)(dir);
+    names = (0, import_node_fs5.readdirSync)(dir);
   } catch {
     return [];
   }
   const out = [];
   for (const name of names.sort()) {
     const m = SUBAGENT_FILE.exec(name);
-    if (m) out.push({ agentId: m[1], path: (0, import_node_path4.join)(dir, name) });
+    if (m) out.push({ agentId: m[1], path: (0, import_node_path5.join)(dir, name) });
   }
   return out;
 }
 function agentIdOfPath(path) {
-  return SUBAGENT_FILE.exec((0, import_node_path4.basename)(path))?.[1] ?? null;
+  return SUBAGENT_FILE.exec((0, import_node_path5.basename)(path))?.[1] ?? null;
 }
 function readSubagentMeta(transcriptPath) {
   try {
-    const doc = JSON.parse((0, import_node_fs4.readFileSync)(transcriptPath.replace(/\.jsonl$/, ".meta.json"), "utf8"));
+    const doc = JSON.parse((0, import_node_fs5.readFileSync)(transcriptPath.replace(/\.jsonl$/, ".meta.json"), "utf8"));
     if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return null;
     const toolUseId = doc.toolUseId;
     return typeof toolUseId === "string" && toolUseId !== "" ? { toolUseId } : {};
@@ -2645,12 +2699,12 @@ var ledgerStage = (ctx) => {
 };
 
 // hook-src/flusher/bounds.ts
-var import_node_fs6 = require("node:fs");
-var import_node_path7 = require("node:path");
+var import_node_fs7 = require("node:fs");
+var import_node_path8 = require("node:path");
 
 // hook-src/intake.ts
 var import_node_os = require("node:os");
-var import_node_path6 = require("node:path");
+var import_node_path7 = require("node:path");
 
 // hook-src/delegated.ts
 var DELEGATED_TOOL = /^mcp__plugin_tickr_tickr__(start_timer|create_entry)$/;
@@ -2686,21 +2740,21 @@ function entryIdForEvent(event, toolName, toolResponse) {
 }
 
 // hook-src/identity.ts
-var import_node_crypto5 = require("node:crypto");
-var import_node_fs5 = require("node:fs");
-var import_node_path5 = require("node:path");
+var import_node_crypto6 = require("node:crypto");
+var import_node_fs6 = require("node:fs");
+var import_node_path6 = require("node:path");
 var INSTANCE_FILE = "instance.json";
 function instanceId(baseUrl, workspaceId, apiKey) {
-  return (0, import_node_crypto5.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
+  return (0, import_node_crypto6.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
 }
 function instanceDir(dataDir, id) {
-  return (0, import_node_path5.join)(dataDir, id);
+  return (0, import_node_path6.join)(dataDir, id);
 }
 function writeInstanceInfo(dir, who, now) {
-  (0, import_node_fs5.mkdirSync)(dir, { recursive: true });
+  (0, import_node_fs6.mkdirSync)(dir, { recursive: true });
   const info = { base_url: who.baseUrl, workspace_id: who.workspaceId, created_at: now.toISOString() };
   try {
-    (0, import_node_fs5.writeFileSync)((0, import_node_path5.join)(dir, INSTANCE_FILE), `${JSON.stringify(info)}
+    (0, import_node_fs6.writeFileSync)((0, import_node_path6.join)(dir, INSTANCE_FILE), `${JSON.stringify(info)}
 `, { flag: "wx" });
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
@@ -2708,7 +2762,7 @@ function writeInstanceInfo(dir, who, now) {
 }
 function readInstanceInfo(dir) {
   try {
-    const raw = JSON.parse((0, import_node_fs5.readFileSync)((0, import_node_path5.join)(dir, INSTANCE_FILE), "utf8"));
+    const raw = JSON.parse((0, import_node_fs6.readFileSync)((0, import_node_path6.join)(dir, INSTANCE_FILE), "utf8"));
     if (!raw || typeof raw.base_url !== "string" || typeof raw.workspace_id !== "string" || typeof raw.created_at !== "string") {
       return null;
     }
@@ -2721,6 +2775,7 @@ function readInstanceInfo(dir) {
 // hook-src/intake.ts
 var HOOK_BUSY_TIMEOUT_MS = 250;
 var INTAKE_PAUSED_KEY = "intake_paused";
+var NOT_LINKED_MESSAGE = "Tickr: this repository's .tickr.json has not been linked on this machine, so this session is not tracked. Run /tickr:link to confirm it.";
 var UNTRACKED_MESSAGE = "Tickr: this session is not tracked. Run /tickr:link to link this repository to a Tickr project.";
 function untracked(input) {
   if (input.hook_event_name !== "SessionStart" || input.source === "resume" || input.source === "compact") return {};
@@ -2782,6 +2837,9 @@ function recordEvent(input, cfg, deadlineMs, opts = {}) {
   if ("invalid" in found) {
     return input.hook_event_name === "SessionStart" ? { systemMessage: `Tickr: ${found.invalid} This session is not tracked.` } : {};
   }
+  if (opts.linked && !opts.linked(found.dir, found.hash)) {
+    return input.hook_event_name === "SessionStart" && input.source !== "resume" && input.source !== "compact" ? { systemMessage: NOT_LINKED_MESSAGE } : {};
+  }
   const now = (opts.now ?? (() => /* @__PURE__ */ new Date()))();
   const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
   const ev = buildEvent(input, { hash: found.hash, json: found.json }, now, (opts.uptime ?? import_node_os.uptime)(), env);
@@ -2792,8 +2850,8 @@ function recordEvent(input, cfg, deadlineMs, opts = {}) {
     dirReady = false;
   }
   const room = deadlineMs - Date.now() > 2 * HOOK_BUSY_TIMEOUT_MS + 100;
-  const journalled = dirReady && room ? journalInStore((0, import_node_path6.join)(dir, DB_FILE), ev, now) : null;
-  if (journalled === null && !writeFallback((0, import_node_path6.join)(dir, FALLBACK_DIR), ev)) {
+  const journalled = dirReady && room ? journalInStore((0, import_node_path7.join)(dir, DB_FILE), ev, now) : null;
+  if (journalled === null && !writeFallback((0, import_node_path7.join)(dir, FALLBACK_DIR), ev)) {
     recordGap(dir);
     return {};
   }
@@ -2818,7 +2876,7 @@ var RETENTION_INTERVAL_MS = 24 * 60 * 6e4;
 var RETENTION_KEY = "retention_at";
 function fileSize(path) {
   try {
-    const st = (0, import_node_fs6.statSync)(path);
+    const st = (0, import_node_fs7.statSync)(path);
     return st.isFile() ? st.size : 0;
   } catch {
     return 0;
@@ -2828,14 +2886,14 @@ function dirSize(dir) {
   let total = 0;
   let names;
   try {
-    names = (0, import_node_fs6.readdirSync)(dir);
+    names = (0, import_node_fs7.readdirSync)(dir);
   } catch {
     return 0;
   }
   for (const name of names) {
-    const path = (0, import_node_path7.join)(dir, name);
+    const path = (0, import_node_path8.join)(dir, name);
     try {
-      const st = (0, import_node_fs6.statSync)(path);
+      const st = (0, import_node_fs7.statSync)(path);
       total += st.isDirectory() ? dirSize(path) : st.size;
     } catch {
     }
@@ -2843,7 +2901,7 @@ function dirSize(dir) {
   return total;
 }
 function instanceBytes(dir) {
-  return fileSize((0, import_node_path7.join)(dir, DB_FILE)) + fileSize((0, import_node_path7.join)(dir, `${DB_FILE}-journal`)) + dirSize((0, import_node_path7.join)(dir, FALLBACK_DIR));
+  return fileSize((0, import_node_path8.join)(dir, DB_FILE)) + fileSize((0, import_node_path8.join)(dir, `${DB_FILE}-journal`)) + dirSize((0, import_node_path8.join)(dir, FALLBACK_DIR));
 }
 function vacuum(store) {
   try {
@@ -3284,13 +3342,13 @@ function debugLine(rec, at) {
 }
 function debugLogger(path, now = () => /* @__PURE__ */ new Date()) {
   try {
-    if ((0, import_node_fs7.statSync)(path).size > DEBUG_MAX_BYTES) (0, import_node_fs7.writeFileSync)(path, "");
+    if ((0, import_node_fs8.statSync)(path).size > DEBUG_MAX_BYTES) (0, import_node_fs8.writeFileSync)(path, "");
   } catch {
   }
   return (rec) => {
     try {
       const text = debugLine(rec, now());
-      if (text !== "") (0, import_node_fs7.appendFileSync)(path, text);
+      if (text !== "") (0, import_node_fs8.appendFileSync)(path, text);
     } catch {
     }
   };
@@ -3333,7 +3391,7 @@ async function runFlusher(instanceDir2, deps) {
   if (deps.startDelayMs !== void 0 && deps.startDelayMs > 0) await sleep(deps.startDelayMs);
   let endAt = clock() + deps.wakeBudgetMs;
   const started = clock();
-  const opened = openStore((0, import_node_path8.join)(instanceDir2, DB_FILE), { role: "flusher", busyTimeoutMs: deps.busyTimeoutMs ?? FLUSHER_BUSY_TIMEOUT_MS });
+  const opened = openStore((0, import_node_path9.join)(instanceDir2, DB_FILE), { role: "flusher", busyTimeoutMs: deps.busyTimeoutMs ?? FLUSHER_BUSY_TIMEOUT_MS });
   if (typeof opened === "string") {
     debug({ step: "end", outcome: "newer_schema" });
     return "newer_schema";
@@ -3366,7 +3424,7 @@ async function runFlusher(instanceDir2, deps) {
       guarded: (fn) => guarded(store, gen, nowIso(), fn),
       boundary
     };
-    const fallback = (0, import_node_path8.join)(instanceDir2, FALLBACK_DIR);
+    const fallback = (0, import_node_path9.join)(instanceDir2, FALLBACK_DIR);
     let reserved = false;
     const runStages = async () => {
       const out = { due: null, sendDue: null, outOfBudget: false };
@@ -3431,7 +3489,7 @@ async function runFlusher(instanceDir2, deps) {
 }
 
 // hook-src/io.ts
-var import_node_fs8 = require("node:fs");
+var import_node_fs9 = require("node:fs");
 var OPTIONAL_STRINGS = [
   "transcript_path",
   "prompt_id",
@@ -3488,7 +3546,7 @@ function readHookInput(stdin, deadlineMs) {
   });
 }
 var writeStdout = (text) => {
-  (0, import_node_fs8.writeSync)(1, text);
+  (0, import_node_fs9.writeSync)(1, text);
 };
 function writeHookOutput(out, write = writeStdout) {
   if (!out.systemMessage) return;
@@ -3529,8 +3587,8 @@ function spawnSuccessor(bundlePath, instanceDir2, env, delayMs) {
 }
 
 // hook-src/status.ts
-var import_node_fs9 = require("node:fs");
-var import_node_path9 = require("node:path");
+var import_node_fs10 = require("node:fs");
+var import_node_path10 = require("node:path");
 var MAX_TERMINAL_LISTED = 20;
 var PAUSE_TEXT = {
   unauthorized: "the API key was refused",
@@ -3553,14 +3611,14 @@ function safeText(text, max = MAX_DIAGNOSTIC) {
 }
 function mtimeMs(path) {
   try {
-    return (0, import_node_fs9.statSync)(path).mtimeMs;
+    return (0, import_node_fs10.statSync)(path).mtimeMs;
   } catch {
     return 0;
   }
 }
 function fallbackCount(dir) {
   try {
-    return (0, import_node_fs9.readdirSync)((0, import_node_path9.join)(dir, FALLBACK_DIR)).filter((n) => n.endsWith(".json") && !n.startsWith(".")).length;
+    return (0, import_node_fs10.readdirSync)((0, import_node_path10.join)(dir, FALLBACK_DIR)).filter((n) => n.endsWith(".json") && !n.startsWith(".")).length;
   } catch {
     return 0;
   }
@@ -3595,7 +3653,7 @@ function viewInstance(dir, name, current) {
   const view = {
     host: host(info.base_url),
     workspace: "workspace not checked yet",
-    lastActivityMs: Math.max(mtimeMs((0, import_node_path9.join)(dir, DB_FILE)), mtimeMs((0, import_node_path9.join)(dir, FALLBACK_DIR)), Date.parse(info.created_at) || 0),
+    lastActivityMs: Math.max(mtimeMs((0, import_node_path10.join)(dir, DB_FILE)), mtimeMs((0, import_node_path10.join)(dir, FALLBACK_DIR)), Date.parse(info.created_at) || 0),
     workspaceId: info.workspace_id,
     current: current ? instanceId(current.baseUrl, info.workspace_id, current.apiKey) === name : null,
     lines: [],
@@ -3603,7 +3661,7 @@ function viewInstance(dir, name, current) {
   };
   let opened;
   try {
-    opened = openStore((0, import_node_path9.join)(dir, DB_FILE), { role: "hook", busyTimeoutMs: 1e3 });
+    opened = openStore((0, import_node_path10.join)(dir, DB_FILE), { role: "hook", busyTimeoutMs: 1e3 });
     if (opened === "not_migrated") view.lines.push("  nothing sent yet");
     else if (opened === "newer_schema") view.lines.push("  written by a newer version of the plugin");
     else describeStore(opened, view);
@@ -3619,16 +3677,16 @@ function viewInstance(dir, name, current) {
 function renderStatus(dataDir, current) {
   let names = [];
   try {
-    names = (0, import_node_fs9.readdirSync)(dataDir).filter((n) => {
+    names = (0, import_node_fs10.readdirSync)(dataDir).filter((n) => {
       try {
-        return (0, import_node_fs9.statSync)((0, import_node_path9.join)(dataDir, n, INSTANCE_FILE)).isFile();
+        return (0, import_node_fs10.statSync)((0, import_node_path10.join)(dataDir, n, INSTANCE_FILE)).isFile();
       } catch {
         return false;
       }
     });
   } catch {
   }
-  const views = names.map((n) => viewInstance((0, import_node_path9.join)(dataDir, n), n, current)).filter((v) => v !== null);
+  const views = names.map((n) => viewInstance((0, import_node_path10.join)(dataDir, n), n, current)).filter((v) => v !== null);
   if (views.length === 0) return "Tickr: nothing tracked yet. Link a repository with /tickr:link, then work in it.\n";
   for (const v of views) {
     if (v.current !== null) continue;
@@ -3678,16 +3736,20 @@ async function runHook(event, env, io) {
   }
   const bundlePath = io.bundlePath;
   const startFlusher = bundlePath ? (dir) => spawnFlusher(bundlePath, dir, env) : void 0;
-  writeHookOutput(recordEvent({ ...input, hook_event_name: event }, config, io.deadlineMs, { env, startFlusher }), io.write);
+  writeHookOutput(recordEvent({ ...input, hook_event_name: event }, config, io.deadlineMs, {
+    env,
+    startFlusher,
+    linked: (mappingDir, hash) => isLinked(config.dataDir, mappingDir, hash)
+  }), io.write);
 }
 async function runFlush(dir, env, bundlePath) {
   if (!dir || loadSqlite() === null) return;
   const config = readPluginConfig(env);
   if ("problem" in config) return;
-  const instanceDir2 = (0, import_node_path10.resolve)(dir);
-  if (!instanceDir2.startsWith((0, import_node_path10.resolve)(config.dataDir) + import_node_path10.sep)) return;
+  const instanceDir2 = (0, import_node_path11.resolve)(dir);
+  if (!instanceDir2.startsWith((0, import_node_path11.resolve)(config.dataDir) + import_node_path11.sep)) return;
   const api = createAgentApi({ baseUrl: config.baseUrl, apiKey: config.apiKey, timeoutMs: REQUEST_TIMEOUT_MS });
-  const debug = env[DEBUG_ENV] === "1" ? debugLogger((0, import_node_path10.join)(instanceDir2, DEBUG_FILE)) : void 0;
+  const debug = env[DEBUG_ENV] === "1" ? debugLogger((0, import_node_path11.join)(instanceDir2, DEBUG_FILE)) : void 0;
   const handover = bundlePath ? (delayMs) => void spawnSuccessor(bundlePath, instanceDir2, env, delayMs) : void 0;
   await runFlusher(instanceDir2, {
     now: () => /* @__PURE__ */ new Date(),
@@ -3712,14 +3774,29 @@ function runStatus(dir, env, write) {
     return;
   }
   const config = readPluginConfig({ ...env, CLAUDE_PLUGIN_DATA: dataDir });
-  write(renderStatus((0, import_node_path10.resolve)(dataDir), "problem" in config ? void 0 : { baseUrl: config.baseUrl, apiKey: config.apiKey }));
+  write(renderStatus((0, import_node_path11.resolve)(dataDir), "problem" in config ? void 0 : { baseUrl: config.baseUrl, apiKey: config.apiKey }));
 }
+function runAccept(dataDir, checkoutDir, write) {
+  if (!dataDir?.trim() || !checkoutDir?.trim()) {
+    write(line("Tickr: usage: accept <plugin data directory> <repository directory>"));
+    return;
+  }
+  const found = findMapping((0, import_node_path11.resolve)(checkoutDir));
+  if (found === null) write(line("Tickr: no .tickr.json found; nothing was linked."));
+  else if ("invalid" in found) write(line(`Tickr: ${found.invalid} Nothing was linked.`));
+  else if (recordLink((0, import_node_path11.resolve)(dataDir), found.dir, found.hash)) {
+    write(line("Tickr: this checkout is linked on this machine. Tracking starts with the next session."));
+  } else write(line("Tickr: the link could not be saved (is the plugin data directory writable?)."));
+}
+var line = (text) => `${text}
+`;
 async function main(argv, env, io = processIo()) {
   const [mode] = argv;
   try {
     if (isHookEvent(mode)) await runHook(mode, env, io);
     else if (mode === "flush") await runFlush(argv[1], env, io.bundlePath);
     else if (mode === "status") runStatus(argv[1], env, io.write);
+    else if (mode === "accept") runAccept(argv[1], argv[2], io.write);
   } catch {
   }
   return 0;

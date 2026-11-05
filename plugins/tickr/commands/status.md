@@ -1,6 +1,6 @@
 ---
 description: Show what the Tickr plugin has recorded and sent, and anything that needs your attention.
-allowed-tools: Bash(node:*)
+allowed-tools: Bash(node --no-warnings "${CLAUDE_PLUGIN_ROOT}/hooks/dist/tickr-hook.cjs" status:*)
 ---
 
 # Tickr plugin status

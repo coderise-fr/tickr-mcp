@@ -13,7 +13,7 @@ import { DB_FILE } from "../../hook-src/store/db.js";
 import { PLUGIN_VERSION } from "../../hook-src/version.js";
 import { json, type RecordedRequest, startServer } from "../helpers/httpServer.js";
 import { instanceDir, instanceId } from "../../hook-src/identity.js";
-import { PROJECT, rawDb, WS } from "./helpers/env.js";
+import { linkCheckout, PROJECT, rawDb, WS } from "./helpers/env.js";
 
 const buildScript = fileURLToPath(new URL("../../scripts/build-hook.mjs", import.meta.url));
 const hooksJson = fileURLToPath(new URL("../../plugins/tickr/hooks/hooks.json", import.meta.url));
@@ -47,6 +47,7 @@ beforeAll(() => {
   mkdirSync(data, { recursive: true });
   mkdirSync(repo, { recursive: true });
   writeFileSync(join(repo, ".tickr.json"), JSON.stringify({ workspace_id: WS, project_id: PROJECT }));
+  linkCheckout(data, repo);
   writeFileSync(join(root, "parent.cjs"), PARENT);
   const built = spawnSync(process.execPath, [buildScript, "--outfile", join(pluginRoot, "hooks", "dist", "tickr-hook.cjs")], { encoding: "utf8" });
   expect(built.status, built.stderr).toBe(0);

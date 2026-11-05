@@ -185,3 +185,25 @@ describe("parseStoredMapping", () => {
     expect(parseStoredMapping("null")).toBeNull();
   });
 });
+
+describe("findMapping limits", () => {
+  it("reports the directory of the file it found", () => {
+    const root = repo();
+    writeFileSync(join(root, ".tickr.json"), JSON.stringify({ workspace_id: WS, project_id: PROJECT }));
+    const deep = join(root, "src");
+    mkdirSync(deep);
+    expect(findMapping(deep)).toMatchObject({ dir: root });
+  });
+
+  it("refuses a .tickr.json that is not a regular file, without reading it", () => {
+    const root = repo();
+    mkdirSync(join(root, ".tickr.json"));
+    expect(findMapping(root)).toEqual({ invalid: expect.stringContaining("not a regular file") });
+  });
+
+  it("refuses a .tickr.json larger than 64 KB, without reading it", () => {
+    const root = repo();
+    writeFileSync(join(root, ".tickr.json"), JSON.stringify({ workspace_id: WS, project_id: PROJECT, pad: "x".repeat(70_000) }));
+    expect(findMapping(root)).toEqual({ invalid: expect.stringContaining("larger than") });
+  });
+});

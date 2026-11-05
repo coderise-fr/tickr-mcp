@@ -12,6 +12,7 @@ import {
   hookInput,
   instanceFor,
   KEY,
+  linkCheckout,
   listJson,
   OTHER_PROJECT,
   pluginConfig,
@@ -33,6 +34,7 @@ function linked(migrated = true) {
   const root = tempDir();
   const cwd = writeMapping(join(root, "repo"));
   const data = join(root, "data");
+  linkCheckout(data, cwd);
   const dir = instanceFor(data);
   const dbPath = join(dir, DB_FILE);
   if (migrated) flusherStore(dbPath).close();

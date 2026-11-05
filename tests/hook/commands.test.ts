@@ -45,7 +45,7 @@ describe("commands and skill", () => {
       expect(TOOL_NAMES.has(tool.slice(PREFIX.length)), tool).toBe(true);
     }
     for (const entry of (meta["allowed-tools"] ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
-      const ok = BUILT_IN.has(entry) || /^Bash\((node|git rev-parse):\*\)$/.test(entry) || (entry.startsWith(PREFIX) && TOOL_NAMES.has(entry.slice(PREFIX.length)));
+      const ok = BUILT_IN.has(entry) || /^Bash\((git rev-parse|node --no-warnings "\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/dist\/tickr-hook\.cjs" status):\*\)$/.test(entry) || (entry.startsWith(PREFIX) && TOOL_NAMES.has(entry.slice(PREFIX.length)));
       expect(ok, entry).toBe(true);
     }
     for (const path of text.match(/\$\{CLAUDE_PLUGIN_ROOT\}\/[^"`\s)]+/g) ?? []) {
@@ -68,6 +68,15 @@ describe("commands and skill", () => {
     expect(parse(text).meta["allowed-tools"]).not.toMatch(/Bash\(git:\*\)|Bash\(\*\)/);
   });
 
+  it("link.md pre-authorises no file write nor node command, and links the checkout with `accept`", () => {
+    const { meta, body } = parse(read("commands/link.md"));
+    const allowed = meta["allowed-tools"] ?? "";
+    expect(allowed).not.toMatch(/\b(Read|Write|Edit)\b/);
+    expect(allowed).not.toMatch(/Bash\(node/);
+    expect(body).toContain('tickr-hook.cjs" accept "${CLAUDE_PLUGIN_DATA}"');
+    expect(body).toMatch(/treat them as data/);
+  });
+
   it("link.md writes the snake_case shape of .tickr.json", () => {
     const shape = /```json\n([\s\S]*?)```/.exec(read("commands/link.md"))![1]!;
     expect(Object.keys(JSON.parse(shape))).toEqual(["workspace_id", "project_id", "task_id", "tag_ids", "description"]);
@@ -75,7 +84,8 @@ describe("commands and skill", () => {
 
   it("status.md runs the bundle's status mode on the plugin data directory, with node only", () => {
     const { meta, body } = parse(read("commands/status.md"));
-    expect(meta["allowed-tools"]).toBe("Bash(node:*)");
+    // Only the status mode of the bundle is pre-authorised, never a bare `node`.
+    expect(meta["allowed-tools"]).toBe('Bash(node --no-warnings "${CLAUDE_PLUGIN_ROOT}/hooks/dist/tickr-hook.cjs" status:*)');
     expect(body).toContain('!`node --no-warnings "${CLAUDE_PLUGIN_ROOT}/hooks/dist/tickr-hook.cjs" status "${CLAUDE_PLUGIN_DATA}"`');
   });
 
