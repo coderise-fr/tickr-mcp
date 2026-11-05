@@ -1,3 +1,4 @@
+import { uptime as osUptime } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { FALLBACK_DIR, writeFallback } from "../../hook-src/fallback.js";
@@ -11,6 +12,7 @@ import { DB_FILE, type JournalEvent, openStore, type Store } from "../../hook-sr
 import { SCHEMA_VERSION } from "../../hook-src/store/schema.js";
 import { buildChild, startChild } from "./helpers/children.js";
 import { cleanTempDirs, count, hookInput, instanceFor, listJson, pluginConfig, rawDb, tempDir, writeMapping } from "./helpers/env.js";
+import { journalMapping } from "./helpers/stage.js";
 
 afterEach(() => cleanTempDirs());
 
@@ -18,14 +20,15 @@ function flusherStore(path: string): Store {
   return openStore(path, { role: "flusher", busyTimeoutMs: 5000 }) as Store;
 }
 
+/** An event as a hook journals it now, with the mapping of writeMapping()'s default .tickr.json. */
 function event(sessionId = "s-1"): JournalEvent {
   return {
     eventId: ulid(Date.now()),
     sessionId,
     type: "PostToolUse",
     localTime: new Date().toISOString(),
-    uptimeS: 10,
-    mapping: { hash: "", json: '{"projectId":"p-1","workspaceId":"w-1"}' },
+    uptimeS: osUptime(),
+    mapping: journalMapping(),
   };
 }
 
@@ -251,13 +254,14 @@ describe("flusher processes", () => {
     "fallback_committed",
     "stage:workspace",
     "stage:segmentation",
+    "revision_committed",
     "stage:revisions",
     "stage:send",
     "stage:bounds",
   ];
 
   it.each(["event insert", ...BOUNDARIES])(
-    "crash at each boundary (event insert, revision commit, send, ack) ⇒ nothing lost: killed at %s",
+    "crash at each boundary (event insert, revision commit, send, ack) ⇒ one segment, nothing lost: killed at %s",
     async (point) => {
       const root = tempDir();
       const cwd = writeMapping(join(root, "repo"));
@@ -298,6 +302,18 @@ describe("flusher processes", () => {
       expect(after.eventsAfter(0).some((e) => e.sessionId === "s-killed")).toBe(false);
       expect(listJson(join(dir, FALLBACK_DIR))).toEqual([]);
       expect(after.readOwner()!.heartbeat).toBe(RELEASED_HEARTBEAT);
+
+      // One segment per session, whatever the crash point, and gap-free revisions 1..N for each.
+      for (const session of ["s-1", "s-fallback"]) {
+        const segments = after.segmentsForSession(session);
+        expect(segments).toHaveLength(1);
+        const revisions = after.outboxFor("segment", segments[0]!.id).map((r) => r.revision);
+        expect(revisions.length).toBeGreaterThan(0);
+        expect(revisions).toEqual(revisions.map((_, i) => i + 1));
+        expect(after.getLastCommitted("segment", segments[0]!.id)!.revision).toBe(revisions.at(-1));
+        expect(segments[0]!.lastRevision).toBe(revisions.at(-1));
+      }
+      expect(after.pendingEventSessions()).toEqual([]);
       after.close();
     },
   );

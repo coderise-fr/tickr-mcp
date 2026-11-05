@@ -80,6 +80,25 @@ export function normalizeMapping(raw: unknown): NormalizedMapping | { invalid: s
   return { workspaceId, projectId, taskId, tagIds, description };
 }
 
+/** Reads a stored mapping version (the canonical JSON of a NormalizedMapping); null when unusable. */
+export function parseStoredMapping(json: string): NormalizedMapping | null {
+  let raw: Partial<Record<keyof NormalizedMapping, unknown>>;
+  try {
+    raw = JSON.parse(json) as typeof raw;
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  if (typeof raw.workspaceId !== "string" || raw.workspaceId === "" || typeof raw.projectId !== "string" || raw.projectId === "") return null;
+  return {
+    workspaceId: raw.workspaceId,
+    projectId: raw.projectId,
+    taskId: typeof raw.taskId === "string" && raw.taskId !== "" ? raw.taskId : null,
+    tagIds: Array.isArray(raw.tagIds) ? raw.tagIds.filter((t): t is string => typeof t === "string") : [],
+    description: typeof raw.description === "string" && raw.description !== "" ? raw.description : DEFAULT_DESCRIPTION,
+  };
+}
+
 function parseMapping(text: string): FoundMapping | { invalid: string } {
   let raw: unknown;
   try {

@@ -71,6 +71,15 @@ CREATE TABLE outbox (
   next_attempt_at TEXT NOT NULL,
   PRIMARY KEY (target_kind, target_id, revision)
 );
+CREATE TABLE last_committed (
+  target_kind TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  canonical_json TEXT NOT NULL,
+  body_json TEXT NOT NULL,
+  committed_at TEXT NOT NULL,
+  PRIMARY KEY (target_kind, target_id)
+);
 CREATE TABLE terminal (
   id INTEGER PRIMARY KEY,
   target_kind TEXT NOT NULL,

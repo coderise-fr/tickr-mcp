@@ -1,0 +1,212 @@
+// The "revisions" stage: desired state -> immutable outbox revisions (§7.4).
+//
+// For each target (a segment; Part C adds delegated entries) the desired wire body is derived
+// from local state. When its canonical JSON, without `revision`, differs from the last committed
+// one, revision N + 1 is committed with its full body: the outbox row (sent and replayed byte for
+// byte) and the target's last_committed row (kept after the acknowledgement, for the next
+// comparison) are written in one guarded transaction, before any send.
+import type { CommittedRow, SegmentRow, Store, TargetKind } from "../store/db.js";
+import { canonicalJson, type NormalizedMapping, parseStoredMapping } from "../mapping.js";
+import { guarded } from "./owner.js";
+import type { StageContext, StageRun } from "./stages.js";
+
+/** `working: true` is only built for an event at most this old (the server re-checks at 5 min). */
+export const WORKING_FRESH_MS = 2 * 60_000;
+/** A live segment whose only change is its moving end is re-sent at most this often. */
+export const LEASE_REFRESH_MS = 60_000;
+
+export type Provider = "anthropic" | "bedrock" | "vertex" | "foundry" | "other";
+export type UsageQuality = "pending" | "complete" | "incomplete";
+
+/** One usage row, with the wire names of the backend AgentUsageDto. */
+export interface UsageRow {
+  provider: Provider;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+}
+
+/** Body of PUT /api/v1/agent-segments/{id}. `usage` absent keeps the server's usage; never null. */
+export interface SegmentBody {
+  revision: number;
+  agentSessionId: string;
+  startedAt: string;
+  stoppedAt: string;
+  projectId: string;
+  taskId: string | null;
+  tagIds: string[];
+  description: string;
+  working: boolean;
+  observedAt: string;
+  final: boolean;
+  usageQuality: UsageQuality;
+  usage?: UsageRow[];
+}
+
+/** Every key a segment body may carry, in wire order (the REST contract of the segment route). */
+export const SEGMENT_BODY_KEYS = [
+  "revision",
+  "agentSessionId",
+  "startedAt",
+  "stoppedAt",
+  "projectId",
+  "taskId",
+  "tagIds",
+  "description",
+  "working",
+  "observedAt",
+  "final",
+  "usageQuality",
+  "usage",
+] as const satisfies readonly (keyof SegmentBody)[];
+
+export interface RevisionTarget {
+  kind: TargetKind;
+  id: string;
+}
+
+/** Usage quality of a finalised segment. Part B has no token data: always incomplete (Part C replaces it). */
+export const finalQuality: (seg: SegmentRow) => "complete" | "incomplete" = () => "incomplete";
+
+/** The body the segment should have on the server now (without its revision). */
+export function desiredSegmentBody(seg: SegmentRow, mapping: NormalizedMapping, now: Date, usage?: UsageRow[]): Omit<SegmentBody, "revision"> {
+  const fresh = now.getTime() - Date.parse(seg.observedAt) <= WORKING_FRESH_MS;
+  const body: Omit<SegmentBody, "revision"> = {
+    agentSessionId: seg.sessionId,
+    startedAt: seg.startedAt,
+    stoppedAt: seg.stoppedAt,
+    projectId: mapping.projectId,
+    taskId: mapping.taskId,
+    tagIds: [...mapping.tagIds],
+    description: mapping.description,
+    working: !seg.final && seg.working && fresh,
+    observedAt: seg.observedAt,
+    final: seg.final,
+    usageQuality: seg.final ? finalQuality(seg) : "pending",
+  };
+  if (usage !== undefined && usage !== null) body.usage = usage;
+  return body;
+}
+
+/** The body without `revision` (and without a null `usage`, which the server reads as absent). */
+function withoutRevision(body: object): Record<string, unknown> {
+  const rest: Record<string, unknown> = { ...(body as Record<string, unknown>) };
+  delete rest.revision;
+  if (rest.usage === null) delete rest.usage;
+  return rest;
+}
+
+/** Canonical JSON of a body without its revision: the comparison key of two revisions. */
+export function canonicalBody(body: object): string {
+  return canonicalJson(withoutRevision(body));
+}
+
+/**
+ * Commits revision last + 1 of the target with this body when it differs (canonical JSON without
+ * `revision`) from the last committed one. Guarded by the flusher's generation. Returns the new
+ * revision, or null when nothing changed.
+ */
+export function commitIfChanged(store: Store, gen: number, target: RevisionTarget, body: object, now: Date): number | null {
+  const nowIso = now.toISOString();
+  return guarded(store, gen, nowIso, () => {
+    const rest = withoutRevision(body);
+    const canonical = canonicalJson(rest);
+    const last = store.getLastCommitted(target.kind, target.id);
+    if (last !== null && last.canonicalJson === canonical) return null;
+    const revision = (last?.revision ?? 0) + 1;
+    const bodyJson = JSON.stringify({ revision, ...rest });
+    store.insertOutbox({ targetKind: target.kind, targetId: target.id, revision, bodyJson, attempts: 0, nextAttemptAt: nowIso });
+    store.putLastCommitted({ targetKind: target.kind, targetId: target.id, revision, canonicalJson: canonical, bodyJson, committedAt: nowIso });
+    if (target.kind === "segment") store.setSegmentRevision(target.id, revision);
+    return revision;
+  });
+}
+
+/** The server applied `revision`: removes the target's outbox rows up to it. Guarded. */
+export function acknowledge(store: Store, gen: number, target: RevisionTarget, revision: number, now: Date): void {
+  guarded(store, gen, now.toISOString(), () => {
+    store.deleteOutboxThrough(target.kind, target.id, revision);
+  });
+}
+
+/** A desired body for one target, and when the source wants to be asked again (ms, or null). */
+export interface DesiredRevision {
+  target: RevisionTarget;
+  body: object;
+}
+
+export interface RevisionPlan {
+  desired: DesiredRevision[];
+  dueInMs: number | null;
+}
+
+/** Computes the desired bodies of one kind of target (read-only). */
+export type RevisionSource = (ctx: StageContext) => RevisionPlan;
+
+function minDue(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
+
+/**
+ * Milliseconds to wait before re-sending a live segment whose only change since the last commit
+ * is its moving end (stoppedAt / observedAt), or null to commit now.
+ */
+function refreshWait(last: CommittedRow | null, desired: Omit<SegmentBody, "revision">, now: Date): number | null {
+  if (last === null || desired.final || !desired.working) return null;
+  if (canonicalBody(desired) === last.canonicalJson) return null; // unchanged: nothing to refresh
+  const previous = JSON.parse(last.bodyJson) as Partial<SegmentBody>;
+  if (previous.working !== true || previous.final !== false) return null;
+  const moved = { ...desired, stoppedAt: previous.stoppedAt, observedAt: previous.observedAt };
+  if (canonicalBody(moved) !== last.canonicalJson) return null;
+  const wait = Date.parse(last.committedAt) + LEASE_REFRESH_MS - now.getTime();
+  return wait > 0 ? wait : null;
+}
+
+/** Segments: one desired body each, from the segment row and its own mapping version. */
+export const segmentRevisions: RevisionSource = (ctx) => {
+  const now = ctx.now();
+  const desired: DesiredRevision[] = [];
+  let due: number | null = null;
+  const mappings = new Map<number, NormalizedMapping | null>();
+  for (const seg of ctx.store.segmentsForRevision()) {
+    if (!mappings.has(seg.mappingVersionId)) {
+      const version = ctx.store.getMapping(seg.mappingVersionId);
+      mappings.set(seg.mappingVersionId, version ? parseStoredMapping(version.normalizedJson) : null);
+    }
+    const mapping = mappings.get(seg.mappingVersionId);
+    if (!mapping) continue;
+    const body = desiredSegmentBody(seg, mapping, now);
+    const target: RevisionTarget = { kind: "segment", id: seg.id };
+    const wait = refreshWait(ctx.store.getLastCommitted("segment", seg.id), body, now);
+    if (wait !== null) {
+      due = minDue(due, wait);
+      continue;
+    }
+    desired.push({ target, body });
+    // A working segment turns working: false once its event is older than WORKING_FRESH_MS.
+    if (body.working) due = minDue(due, Date.parse(seg.observedAt) + WORKING_FRESH_MS + 1 - now.getTime());
+  }
+  return { desired, dueInMs: due };
+};
+
+/** The sources the stage asks, in order. Part C appends the delegated entries. */
+export const REVISION_SOURCES: readonly RevisionSource[] = [segmentRevisions];
+
+export function revisionsStage(sources: readonly RevisionSource[] = REVISION_SOURCES): StageRun {
+  return (ctx) => {
+    let due: number | null = null;
+    for (const source of sources) {
+      const plan = source(ctx);
+      due = minDue(due, plan.dueInMs);
+      for (const { target, body } of plan.desired) {
+        if (ctx.remainingMs() <= 0) return { dueInMs: 0 };
+        if (commitIfChanged(ctx.store, ctx.generation, target, body, ctx.now()) !== null) ctx.boundary("revision_committed");
+      }
+    }
+    return due === null ? {} : { dueInMs: Math.max(0, due) };
+  };
+}

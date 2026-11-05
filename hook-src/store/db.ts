@@ -104,6 +104,21 @@ export interface OutboxRow {
   nextAttemptAt: string;
 }
 
+/**
+ * The last revision committed for a target. Outbox rows are deleted once acknowledged; this row
+ * stays, so that the next desired body is compared with what was last committed.
+ */
+export interface CommittedRow {
+  targetKind: TargetKind;
+  targetId: string;
+  revision: number;
+  /** Canonical JSON (sorted keys) of the body without its revision: the comparison key. */
+  canonicalJson: string;
+  /** The exact body committed to the outbox, revision included. */
+  bodyJson: string;
+  committedAt: string;
+}
+
 export interface TerminalRow {
   id: number;
   targetKind: string;
@@ -205,6 +220,17 @@ function toOutbox(r: Row): OutboxRow {
     bodyJson: str(r.body_json),
     attempts: num(r.attempts),
     nextAttemptAt: str(r.next_attempt_at),
+  };
+}
+
+function toCommitted(r: Row): CommittedRow {
+  return {
+    targetKind: str(r.target_kind) as TargetKind,
+    targetId: str(r.target_id),
+    revision: num(r.revision),
+    canonicalJson: str(r.canonical_json),
+    bodyJson: str(r.body_json),
+    committedAt: str(r.committed_at),
   };
 }
 
@@ -501,6 +527,46 @@ export class Store {
     );
   }
 
+  /**
+   * Segments the revisions stage evaluates: not closed by the server, not terminal, and either
+   * still open or not yet committed as final.
+   */
+  segmentsForRevision(): SegmentRow[] {
+    return this.all(
+      `SELECT s.* FROM segments s
+       LEFT JOIN last_committed c ON c.target_kind = 'segment' AND c.target_id = s.id
+       WHERE s.server_state IS NULL
+         AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'segment' AND t.target_id = s.id)
+         AND (s.final = 0 OR c.target_id IS NULL OR json_extract(c.body_json, '$.final') IS NOT 1)
+       ORDER BY s.started_at, s.id`,
+    ).map(toSegment);
+  }
+
+  setSegmentRevision(id: string, revision: number): void {
+    this.run("UPDATE segments SET last_revision = ? WHERE id = ?", revision, id);
+  }
+
+  // last committed revision of each target
+
+  getLastCommitted(kind: TargetKind, id: string): CommittedRow | null {
+    const r = this.get("SELECT * FROM last_committed WHERE target_kind = ? AND target_id = ?", kind, id);
+    return r ? toCommitted(r) : null;
+  }
+
+  putLastCommitted(row: CommittedRow): void {
+    this.run(
+      `INSERT INTO last_committed (target_kind, target_id, revision, canonical_json, body_json, committed_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (target_kind, target_id) DO UPDATE SET revision = excluded.revision, canonical_json = excluded.canonical_json,
+         body_json = excluded.body_json, committed_at = excluded.committed_at`,
+      row.targetKind,
+      row.targetId,
+      row.revision,
+      row.canonicalJson,
+      row.bodyJson,
+      row.committedAt,
+    );
+  }
+
   // outbox (immutable revision bodies waiting for an acknowledgement)
 
   insertOutbox(row: OutboxRow): void {
@@ -565,6 +631,10 @@ export class Store {
       t.diagnostic.slice(0, MAX_DIAGNOSTIC),
     );
     return num(this.get("SELECT last_insert_rowid() AS id")?.id);
+  }
+
+  isTerminal(kind: TargetKind, id: string): boolean {
+    return this.get("SELECT 1 AS x FROM terminal WHERE target_kind = ? AND target_id = ? LIMIT 1", kind, id) !== undefined;
   }
 
   listTerminal(): TerminalRow[] {

@@ -107,7 +107,7 @@ var OFFLINE_API = {
 };
 
 // hook-src/flusher/run.ts
-var import_node_path3 = require("node:path");
+var import_node_path4 = require("node:path");
 
 // hook-src/fallback.ts
 var import_node_fs = require("node:fs");
@@ -177,6 +177,15 @@ CREATE TABLE outbox (
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TEXT NOT NULL,
   PRIMARY KEY (target_kind, target_id, revision)
+);
+CREATE TABLE last_committed (
+  target_kind TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  canonical_json TEXT NOT NULL,
+  body_json TEXT NOT NULL,
+  committed_at TEXT NOT NULL,
+  PRIMARY KEY (target_kind, target_id)
 );
 CREATE TABLE terminal (
   id INTEGER PRIMARY KEY,
@@ -500,6 +509,16 @@ function toOutbox(r) {
     nextAttemptAt: str(r.next_attempt_at)
   };
 }
+function toCommitted(r) {
+  return {
+    targetKind: str(r.target_kind),
+    targetId: str(r.target_id),
+    revision: num(r.revision),
+    canonicalJson: str(r.canonical_json),
+    bodyJson: str(r.body_json),
+    committedAt: str(r.committed_at)
+  };
+}
 function toTerminal(r) {
   return {
     id: num(r.id),
@@ -755,6 +774,41 @@ var Store = class {
       s.lastRevision
     );
   }
+  /**
+   * Segments the revisions stage evaluates: not closed by the server, not terminal, and either
+   * still open or not yet committed as final.
+   */
+  segmentsForRevision() {
+    return this.all(
+      `SELECT s.* FROM segments s
+       LEFT JOIN last_committed c ON c.target_kind = 'segment' AND c.target_id = s.id
+       WHERE s.server_state IS NULL
+         AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'segment' AND t.target_id = s.id)
+         AND (s.final = 0 OR c.target_id IS NULL OR json_extract(c.body_json, '$.final') IS NOT 1)
+       ORDER BY s.started_at, s.id`
+    ).map(toSegment);
+  }
+  setSegmentRevision(id, revision) {
+    this.run("UPDATE segments SET last_revision = ? WHERE id = ?", revision, id);
+  }
+  // last committed revision of each target
+  getLastCommitted(kind, id) {
+    const r = this.get("SELECT * FROM last_committed WHERE target_kind = ? AND target_id = ?", kind, id);
+    return r ? toCommitted(r) : null;
+  }
+  putLastCommitted(row) {
+    this.run(
+      `INSERT INTO last_committed (target_kind, target_id, revision, canonical_json, body_json, committed_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (target_kind, target_id) DO UPDATE SET revision = excluded.revision, canonical_json = excluded.canonical_json,
+         body_json = excluded.body_json, committed_at = excluded.committed_at`,
+      row.targetKind,
+      row.targetId,
+      row.revision,
+      row.canonicalJson,
+      row.bodyJson,
+      row.committedAt
+    );
+  }
   // outbox (immutable revision bodies waiting for an acknowledgement)
   insertOutbox(row) {
     this.run(
@@ -811,6 +865,9 @@ var Store = class {
       t.diagnostic.slice(0, MAX_DIAGNOSTIC)
     );
     return num(this.get("SELECT last_insert_rowid() AS id")?.id);
+  }
+  isTerminal(kind, id) {
+    return this.get("SELECT 1 AS x FROM terminal WHERE target_kind = ? AND target_id = ? LIMIT 1", kind, id) !== void 0;
   }
   listTerminal() {
     return this.all("SELECT * FROM terminal ORDER BY id").map(toTerminal);
@@ -890,8 +947,212 @@ function openStore(path, opts) {
   }
 }
 
-// hook-src/ids.ts
+// hook-src/mapping.ts
 var import_node_crypto2 = require("node:crypto");
+var import_node_fs3 = require("node:fs");
+var import_node_path3 = require("node:path");
+var MAPPING_FILE = ".tickr.json";
+var DEFAULT_DESCRIPTION = "Claude Code session";
+var MAX_DESCRIPTION = 2e3;
+function canonicalJson(value) {
+  return JSON.stringify(sortKeys(value));
+}
+function sortKeys(value) {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value !== null && typeof value === "object") {
+    const record = value;
+    return Object.fromEntries(
+      Object.keys(record).sort().map((key) => [key, sortKeys(record[key])])
+    );
+  }
+  return value;
+}
+function requiredId(record, key) {
+  const value = record[key];
+  if (typeof value !== "string" || value.trim() === "") return { invalid: `${MAPPING_FILE} needs a "${key}" text value.` };
+  return value.trim();
+}
+function normalizeMapping(raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { invalid: `${MAPPING_FILE} must hold one JSON object.` };
+  }
+  const record = raw;
+  const workspaceId = requiredId(record, "workspace_id");
+  if (typeof workspaceId !== "string") return workspaceId;
+  const projectId = requiredId(record, "project_id");
+  if (typeof projectId !== "string") return projectId;
+  let taskId = null;
+  if (record.task_id !== void 0 && record.task_id !== null) {
+    if (typeof record.task_id !== "string") return { invalid: `${MAPPING_FILE}: "task_id" must be a text value.` };
+    taskId = record.task_id.trim() === "" ? null : record.task_id.trim();
+  }
+  let tagIds = [];
+  if (record.tag_ids !== void 0 && record.tag_ids !== null) {
+    const tags = record.tag_ids;
+    if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== "string" || tag.trim() === "")) {
+      return { invalid: `${MAPPING_FILE}: "tag_ids" must be a list of tag ids.` };
+    }
+    tagIds = [...new Set(tags.map((tag) => tag.trim()))].sort();
+  }
+  let description = DEFAULT_DESCRIPTION;
+  if (record.description !== void 0 && record.description !== null) {
+    if (typeof record.description !== "string") return { invalid: `${MAPPING_FILE}: "description" must be text.` };
+    if (record.description.length > MAX_DESCRIPTION) {
+      return { invalid: `${MAPPING_FILE}: "description" is longer than ${MAX_DESCRIPTION} characters.` };
+    }
+    if (record.description !== "") description = record.description;
+  }
+  return { workspaceId, projectId, taskId, tagIds, description };
+}
+function parseStoredMapping(json) {
+  let raw;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  if (typeof raw.workspaceId !== "string" || raw.workspaceId === "" || typeof raw.projectId !== "string" || raw.projectId === "") return null;
+  return {
+    workspaceId: raw.workspaceId,
+    projectId: raw.projectId,
+    taskId: typeof raw.taskId === "string" && raw.taskId !== "" ? raw.taskId : null,
+    tagIds: Array.isArray(raw.tagIds) ? raw.tagIds.filter((t) => typeof t === "string") : [],
+    description: typeof raw.description === "string" && raw.description !== "" ? raw.description : DEFAULT_DESCRIPTION
+  };
+}
+function parseMapping(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text.replace(/^\uFEFF/, ""));
+  } catch {
+    return { invalid: `${MAPPING_FILE} is not valid JSON.` };
+  }
+  const mapping = normalizeMapping(raw);
+  if ("invalid" in mapping) return mapping;
+  const json = canonicalJson(mapping);
+  return { mapping, json, hash: (0, import_node_crypto2.createHash)("sha256").update(json, "utf8").digest("hex") };
+}
+function findMapping(cwd) {
+  let dir = (0, import_node_path3.resolve)(cwd);
+  for (; ; ) {
+    let text;
+    try {
+      text = (0, import_node_fs3.readFileSync)((0, import_node_path3.join)(dir, MAPPING_FILE), "utf8");
+    } catch (error) {
+      const code = error.code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return { invalid: `${MAPPING_FILE} could not be read.` };
+    }
+    if (text !== void 0) return parseMapping(text);
+    const parent = (0, import_node_path3.dirname)(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// hook-src/flusher/revisions.ts
+var WORKING_FRESH_MS = 2 * 6e4;
+var LEASE_REFRESH_MS = 6e4;
+var finalQuality = () => "incomplete";
+function desiredSegmentBody(seg, mapping, now, usage) {
+  const fresh = now.getTime() - Date.parse(seg.observedAt) <= WORKING_FRESH_MS;
+  const body = {
+    agentSessionId: seg.sessionId,
+    startedAt: seg.startedAt,
+    stoppedAt: seg.stoppedAt,
+    projectId: mapping.projectId,
+    taskId: mapping.taskId,
+    tagIds: [...mapping.tagIds],
+    description: mapping.description,
+    working: !seg.final && seg.working && fresh,
+    observedAt: seg.observedAt,
+    final: seg.final,
+    usageQuality: seg.final ? finalQuality(seg) : "pending"
+  };
+  if (usage !== void 0 && usage !== null) body.usage = usage;
+  return body;
+}
+function withoutRevision(body) {
+  const rest = { ...body };
+  delete rest.revision;
+  if (rest.usage === null) delete rest.usage;
+  return rest;
+}
+function canonicalBody(body) {
+  return canonicalJson(withoutRevision(body));
+}
+function commitIfChanged(store, gen, target, body, now) {
+  const nowIso = now.toISOString();
+  return guarded(store, gen, nowIso, () => {
+    const rest = withoutRevision(body);
+    const canonical = canonicalJson(rest);
+    const last = store.getLastCommitted(target.kind, target.id);
+    if (last !== null && last.canonicalJson === canonical) return null;
+    const revision = (last?.revision ?? 0) + 1;
+    const bodyJson = JSON.stringify({ revision, ...rest });
+    store.insertOutbox({ targetKind: target.kind, targetId: target.id, revision, bodyJson, attempts: 0, nextAttemptAt: nowIso });
+    store.putLastCommitted({ targetKind: target.kind, targetId: target.id, revision, canonicalJson: canonical, bodyJson, committedAt: nowIso });
+    if (target.kind === "segment") store.setSegmentRevision(target.id, revision);
+    return revision;
+  });
+}
+function minDue(a, b) {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
+function refreshWait(last, desired, now) {
+  if (last === null || desired.final || !desired.working) return null;
+  if (canonicalBody(desired) === last.canonicalJson) return null;
+  const previous = JSON.parse(last.bodyJson);
+  if (previous.working !== true || previous.final !== false) return null;
+  const moved = { ...desired, stoppedAt: previous.stoppedAt, observedAt: previous.observedAt };
+  if (canonicalBody(moved) !== last.canonicalJson) return null;
+  const wait = Date.parse(last.committedAt) + LEASE_REFRESH_MS - now.getTime();
+  return wait > 0 ? wait : null;
+}
+var segmentRevisions = (ctx) => {
+  const now = ctx.now();
+  const desired = [];
+  let due = null;
+  const mappings = /* @__PURE__ */ new Map();
+  for (const seg of ctx.store.segmentsForRevision()) {
+    if (!mappings.has(seg.mappingVersionId)) {
+      const version = ctx.store.getMapping(seg.mappingVersionId);
+      mappings.set(seg.mappingVersionId, version ? parseStoredMapping(version.normalizedJson) : null);
+    }
+    const mapping = mappings.get(seg.mappingVersionId);
+    if (!mapping) continue;
+    const body = desiredSegmentBody(seg, mapping, now);
+    const target = { kind: "segment", id: seg.id };
+    const wait = refreshWait(ctx.store.getLastCommitted("segment", seg.id), body, now);
+    if (wait !== null) {
+      due = minDue(due, wait);
+      continue;
+    }
+    desired.push({ target, body });
+    if (body.working) due = minDue(due, Date.parse(seg.observedAt) + WORKING_FRESH_MS + 1 - now.getTime());
+  }
+  return { desired, dueInMs: due };
+};
+var REVISION_SOURCES = [segmentRevisions];
+function revisionsStage(sources = REVISION_SOURCES) {
+  return (ctx) => {
+    let due = null;
+    for (const source of sources) {
+      const plan = source(ctx);
+      due = minDue(due, plan.dueInMs);
+      for (const { target, body } of plan.desired) {
+        if (ctx.remainingMs() <= 0) return { dueInMs: 0 };
+        if (commitIfChanged(ctx.store, ctx.generation, target, body, ctx.now()) !== null) ctx.boundary("revision_committed");
+      }
+    }
+    return due === null ? {} : { dueInMs: Math.max(0, due) };
+  };
+}
+
+// hook-src/ids.ts
+var import_node_crypto3 = require("node:crypto");
 var CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 var MAX_TIME = 2 ** 48 - 1;
 function timeBytes(nowMs) {
@@ -906,7 +1167,7 @@ function timeBytes(nowMs) {
 function hex(bytes) {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
-function uuidv7(nowMs, rand = import_node_crypto2.randomBytes) {
+function uuidv7(nowMs, rand = import_node_crypto3.randomBytes) {
   const bytes = new Uint8Array(16);
   bytes.set(timeBytes(nowMs), 0);
   bytes.set(rand(10).subarray(0, 10), 6);
@@ -952,7 +1213,7 @@ function increment(digits) {
 }
 var lastMs = -1;
 var lastDigits = [];
-function ulid(nowMs, rand = import_node_crypto2.randomBytes) {
+function ulid(nowMs, rand = import_node_crypto3.randomBytes) {
   let ms2 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
   if (ms2 <= lastMs) {
     ms2 = lastMs;
@@ -1183,7 +1444,7 @@ var idleStage = () => ({});
 var PIPELINE = {
   workspace: idleStage,
   segmentation: segmentationStage,
-  revisions: idleStage,
+  revisions: revisionsStage(),
   send: idleStage,
   bounds: idleStage
 };
@@ -1198,7 +1459,7 @@ async function runFlusher(instanceDir2, deps) {
   const boundary = (point) => deps.onBoundary?.(point);
   const nowIso = () => deps.now().toISOString();
   const endAt = clock() + deps.wakeBudgetMs;
-  const opened = openStore((0, import_node_path3.join)(instanceDir2, DB_FILE), { role: "flusher", busyTimeoutMs: deps.busyTimeoutMs ?? FLUSHER_BUSY_TIMEOUT_MS });
+  const opened = openStore((0, import_node_path4.join)(instanceDir2, DB_FILE), { role: "flusher", busyTimeoutMs: deps.busyTimeoutMs ?? FLUSHER_BUSY_TIMEOUT_MS });
   if (typeof opened === "string") return "newer_schema";
   const store = opened;
   try {
@@ -1218,7 +1479,7 @@ async function runFlusher(instanceDir2, deps) {
       guarded: (fn) => guarded(store, gen, nowIso(), fn),
       boundary
     };
-    const fallback = (0, import_node_path3.join)(instanceDir2, FALLBACK_DIR);
+    const fallback = (0, import_node_path4.join)(instanceDir2, FALLBACK_DIR);
     for (; ; ) {
       ctx.guarded(() => void 0);
       importFallback(store, gen, fallback, { now: deps.now, onCommitted: () => boundary("fallback_committed") });
@@ -1254,110 +1515,24 @@ var import_node_os = require("node:os");
 var import_node_path6 = require("node:path");
 
 // hook-src/identity.ts
-var import_node_crypto3 = require("node:crypto");
-var import_node_fs3 = require("node:fs");
-var import_node_path4 = require("node:path");
-var INSTANCE_FILE = "instance.json";
-function instanceId(baseUrl, workspaceId, apiKey) {
-  return (0, import_node_crypto3.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
-}
-function instanceDir(dataDir, id) {
-  return (0, import_node_path4.join)(dataDir, id);
-}
-function writeInstanceInfo(dir, who, now) {
-  (0, import_node_fs3.mkdirSync)(dir, { recursive: true });
-  const info = { base_url: who.baseUrl, workspace_id: who.workspaceId, created_at: now.toISOString() };
-  try {
-    (0, import_node_fs3.writeFileSync)((0, import_node_path4.join)(dir, INSTANCE_FILE), `${JSON.stringify(info)}
-`, { flag: "wx" });
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-  }
-}
-
-// hook-src/mapping.ts
 var import_node_crypto4 = require("node:crypto");
 var import_node_fs4 = require("node:fs");
 var import_node_path5 = require("node:path");
-var MAPPING_FILE = ".tickr.json";
-var DEFAULT_DESCRIPTION = "Claude Code session";
-var MAX_DESCRIPTION = 2e3;
-function canonicalJson(value) {
-  return JSON.stringify(sortKeys(value));
+var INSTANCE_FILE = "instance.json";
+function instanceId(baseUrl, workspaceId, apiKey) {
+  return (0, import_node_crypto4.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
 }
-function sortKeys(value) {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value !== null && typeof value === "object") {
-    const record = value;
-    return Object.fromEntries(
-      Object.keys(record).sort().map((key) => [key, sortKeys(record[key])])
-    );
-  }
-  return value;
+function instanceDir(dataDir, id) {
+  return (0, import_node_path5.join)(dataDir, id);
 }
-function requiredId(record, key) {
-  const value = record[key];
-  if (typeof value !== "string" || value.trim() === "") return { invalid: `${MAPPING_FILE} needs a "${key}" text value.` };
-  return value.trim();
-}
-function normalizeMapping(raw) {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return { invalid: `${MAPPING_FILE} must hold one JSON object.` };
-  }
-  const record = raw;
-  const workspaceId = requiredId(record, "workspace_id");
-  if (typeof workspaceId !== "string") return workspaceId;
-  const projectId = requiredId(record, "project_id");
-  if (typeof projectId !== "string") return projectId;
-  let taskId = null;
-  if (record.task_id !== void 0 && record.task_id !== null) {
-    if (typeof record.task_id !== "string") return { invalid: `${MAPPING_FILE}: "task_id" must be a text value.` };
-    taskId = record.task_id.trim() === "" ? null : record.task_id.trim();
-  }
-  let tagIds = [];
-  if (record.tag_ids !== void 0 && record.tag_ids !== null) {
-    const tags = record.tag_ids;
-    if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== "string" || tag.trim() === "")) {
-      return { invalid: `${MAPPING_FILE}: "tag_ids" must be a list of tag ids.` };
-    }
-    tagIds = [...new Set(tags.map((tag) => tag.trim()))].sort();
-  }
-  let description = DEFAULT_DESCRIPTION;
-  if (record.description !== void 0 && record.description !== null) {
-    if (typeof record.description !== "string") return { invalid: `${MAPPING_FILE}: "description" must be text.` };
-    if (record.description.length > MAX_DESCRIPTION) {
-      return { invalid: `${MAPPING_FILE}: "description" is longer than ${MAX_DESCRIPTION} characters.` };
-    }
-    if (record.description !== "") description = record.description;
-  }
-  return { workspaceId, projectId, taskId, tagIds, description };
-}
-function parseMapping(text) {
-  let raw;
+function writeInstanceInfo(dir, who, now) {
+  (0, import_node_fs4.mkdirSync)(dir, { recursive: true });
+  const info = { base_url: who.baseUrl, workspace_id: who.workspaceId, created_at: now.toISOString() };
   try {
-    raw = JSON.parse(text.replace(/^\uFEFF/, ""));
-  } catch {
-    return { invalid: `${MAPPING_FILE} is not valid JSON.` };
-  }
-  const mapping = normalizeMapping(raw);
-  if ("invalid" in mapping) return mapping;
-  const json = canonicalJson(mapping);
-  return { mapping, json, hash: (0, import_node_crypto4.createHash)("sha256").update(json, "utf8").digest("hex") };
-}
-function findMapping(cwd) {
-  let dir = (0, import_node_path5.resolve)(cwd);
-  for (; ; ) {
-    let text;
-    try {
-      text = (0, import_node_fs4.readFileSync)((0, import_node_path5.join)(dir, MAPPING_FILE), "utf8");
-    } catch (error) {
-      const code = error.code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") return { invalid: `${MAPPING_FILE} could not be read.` };
-    }
-    if (text !== void 0) return parseMapping(text);
-    const parent = (0, import_node_path5.dirname)(dir);
-    if (parent === dir) return null;
-    dir = parent;
+    (0, import_node_fs4.writeFileSync)((0, import_node_path5.join)(dir, INSTANCE_FILE), `${JSON.stringify(info)}
+`, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
   }
 }
 

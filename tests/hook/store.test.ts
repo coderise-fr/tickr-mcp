@@ -56,7 +56,7 @@ describe("schema and journal mode", () => {
     const tables = (store.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[])
       .map((t) => t.name)
       .filter((n) => !n.startsWith("sqlite_"));
-    expect(tables).toEqual(["events", "mapping_versions", "meta", "notices", "outbox", "owner", "segments", "sessions", "terminal"]);
+    expect(tables).toEqual(["events", "last_committed", "mapping_versions", "meta", "notices", "outbox", "owner", "segments", "sessions", "terminal"]);
     store.close();
     const again = flusherStore(path);
     expect(again.schemaVersion()).toBe(SCHEMA_VERSION);

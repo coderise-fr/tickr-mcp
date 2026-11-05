@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalJson, DEFAULT_DESCRIPTION, findMapping, normalizeMapping } from "../../hook-src/mapping.js";
+import { canonicalJson, DEFAULT_DESCRIPTION, findMapping, normalizeMapping, parseStoredMapping } from "../../hook-src/mapping.js";
 
 const WS = "6a0c1c9e-2f0e-4a51-9c3b-0d6b8f1e2a01";
 const PROJECT = "1f6a2b3c-4d5e-4f60-8a71-92b3c4d5e6f7";
@@ -163,5 +163,25 @@ describe("normalizeMapping", () => {
 describe("canonicalJson", () => {
   it("sorts keys at every depth and keeps array order", () => {
     expect(canonicalJson({ b: 1, a: { d: [3, { y: 1, x: 2 }], c: null } })).toBe('{"a":{"c":null,"d":[3,{"x":2,"y":1}]},"b":1}');
+  });
+});
+
+describe("parseStoredMapping", () => {
+  it("reads back the canonical JSON of a normalised mapping", () => {
+    const mapping = normalizeMapping({ workspace_id: WS, project_id: PROJECT, task_id: TASK, tag_ids: [TAG_B, TAG_A], description: "Docs" });
+    expect(parseStoredMapping(canonicalJson(mapping))).toEqual(mapping);
+  });
+
+  it("fills the optional fields and refuses a version without workspace or project", () => {
+    expect(parseStoredMapping(JSON.stringify({ workspaceId: WS, projectId: PROJECT }))).toEqual({
+      workspaceId: WS,
+      projectId: PROJECT,
+      taskId: null,
+      tagIds: [],
+      description: DEFAULT_DESCRIPTION,
+    });
+    expect(parseStoredMapping(JSON.stringify({ workspaceId: WS }))).toBeNull();
+    expect(parseStoredMapping("not json")).toBeNull();
+    expect(parseStoredMapping("null")).toBeNull();
   });
 });
