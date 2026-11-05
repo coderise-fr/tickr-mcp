@@ -1,5 +1,12 @@
 # Changelog
 
+## Plugin `tickr` — unreleased
+
+- New Claude Code plugin (marketplace `tickr-mcp`): records Claude Code sessions
+  as Tickr time with token usage, and bundles this MCP server. Commands
+  `/tickr:link` and `/tickr:status`. See the README, section "Claude Code
+  plugin". Not published until the Tickr it targets accepts agent sessions.
+
 ## 0.2.0 — 2026-11-05
 
 - **Breaking (runtime):** Node 22 or later is required (Node 20 reached end of

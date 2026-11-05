@@ -115,14 +115,56 @@ example `claude-code/2.1.296`). Only the client's name and version are sent,
 never your prompts. This needs a Tickr release with agent provenance; an older
 Tickr ignores the marking and works as before.
 
-## Claude Code plugin: linking a repository
+## Claude Code plugin
 
-The `tickr` Claude Code plugin of this repository (in development) records
-Claude Code sessions as Tickr time. `/tickr:link` links a checkout to a Tickr
-project by writing a `.tickr.json` file (workspace, project and optional task,
-tags and description ids) at the repository root. That file is personal: the
-command adds it to the checkout's `.git/info/exclude`, never to `.gitignore`,
-and never commits it. Each developer links their own checkout.
+The `tickr` plugin does two things: it gives Claude Code the tools of this MCP
+server, and it records your Claude Code sessions as time in Tickr. Each session
+becomes one or more entries, shown in Tickr as made by an AI agent, with the
+tokens it used. The plugin needs a Tickr version that accepts agent sessions.
+
+**Install** (Node 22.13 or later must be on your PATH, for the recording part):
+
+```
+/plugin marketplace add coderise-fr/tickr-mcp
+/plugin install tickr@tickr-mcp
+```
+
+Claude Code then asks for the plugin options: `api_key` (a key with the
+**Workspace user** role, see section 1), `base_url` (default
+`https://tickr.coderise.cloud`) and `idle_minutes` (default 15: a segment ends
+after that long without activity).
+
+**Link a repository.** Run `/tickr:link` in the repository: it asks for the
+project (and optionally the task, tags and description), writes a
+`.tickr.json` file at the repository root and adds it to the checkout's
+`.git/info/exclude`. That file is personal: it is never added to `.gitignore`
+and never committed. Each developer links their own checkout. A session in a
+directory without `.tickr.json` is not recorded.
+
+**What is sent.** Start and end times, the project, task, tags and description
+from `.tickr.json`, whether the session is still working, and token counts per
+model. **Never sent:** your prompts, Claude's answers, file names, branch names,
+directory paths, the API key. Everything is first written to a local queue and
+sent in the background; if Tickr is unreachable the queue is sent later.
+
+**`/tickr:status`** shows, for the Tickr you are connected to, whether sending
+is active or paused, the number of pending items and anything Tickr refused.
+
+The messages the plugin can show:
+
+| Message | Fix |
+|---|---|
+| `the API key was refused` | Set a valid key in the plugin option `api_key` |
+| `this API key cannot record time` | The key has a read-only role; use a Workspace-user key |
+| `does not accept agent sessions yet` | Nothing to do: the plugin asks again every hour |
+| `clock is ahead of Tickr` | Correct the system clock; sending resumes by itself |
+| `.tickr.json names another workspace` | Run `/tickr:link` with a key of that workspace, or link again |
+| `not a member of the project named in .tickr.json` | Run `/tickr:link` and pick a project you belong to |
+| `local queue reached its size limit` | Tickr was unreachable for a long time; it resumes once the queue is sent |
+| `collection interrupted` | Some events could not be written locally (disk full or unwritable); check `/tickr:status` |
+
+If `node` on your PATH is older than 22.13, the plugin's MCP tools still work
+and the recording is switched off, with one message at the start of the session.
 
 ## Security notes
 
