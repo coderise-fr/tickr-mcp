@@ -1,8 +1,7 @@
 # Release checks — plugin `tickr` 0.1.0
 
-Not released yet. This record is filled in as the checks are done; the plugin
-is published only once every row is `pass` and the Tickr it targets accepts
-agent sessions in production.
+Released as tag `plugin-v0.1.0` on 2026-11-05. The rows marked `not run` below
+were not done before the release.
 
 | Check | Result | Notes |
 | --- | --- | --- |

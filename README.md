@@ -215,6 +215,14 @@ Run against a real Tickr instance with a Workspace-user key, in an MCP client:
 Record the result in `docs/release-checks/<version>.md` and reference it from
 the release pull request.
 
+**Plugin releases** are separate from the npm package. The plugin is released by
+raising `version` in `plugins/tickr/.claude-plugin/plugin.json` (and
+`PLUGIN_VERSION`), rebuilding the hook bundle with `npm run build:hook`,
+merging to `main` and pushing a `plugin-vX.Y.Z` tag. The plugin's `.mcp.json`
+pins the MCP server version, which must already be on npm. The plugin is
+available from the marketplace as soon as `main` contains it. Record the
+checks in `docs/release-checks/plugin-<version>.md`.
+
 ## License
 
 AGPL-3.0-only. See [LICENSE](LICENSE).
