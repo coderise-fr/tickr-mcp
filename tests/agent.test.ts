@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { AGENT_NAME, AGENT_VERSION, agentHeaderValue } from "../src/api/agent.js";
 
@@ -22,6 +23,13 @@ describe("agentHeaderValue", () => {
       expect(parts[0]).toMatch(AGENT_NAME);
       expect(parts[1]).toMatch(AGENT_VERSION);
     });
+  it("maps the captured Claude Code initialize to claude-code/<its version>", () => {
+    const { params } = JSON.parse(readFileSync(new URL("./fixtures/mcp/initialize-claude-code.json", import.meta.url), "utf8")) as {
+      params: { clientInfo: { name: string; version: string } };
+    };
+    expect(params.clientInfo.name).toBe("claude-code");
+    expect(agentHeaderValue(params.clientInfo)).toBe(`claude-code/${params.clientInfo.version}`);
+  });
   it("pins the backend grammars", () => {
     expect(AGENT_NAME.source).toBe("^[a-z0-9][a-z0-9._-]{0,63}$");
     expect(AGENT_VERSION.source).toBe("^[A-Za-z0-9][A-Za-z0-9.+_-]{0,31}$");

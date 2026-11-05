@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 — 2026-11-05
+
+- **Breaking (runtime):** Node 22 or later is required (Node 20 reached end of
+  life). CI also runs on Node 24 and 26.
+- Every write (start/stop timer, create/update entry) now tells Tickr that it
+  comes from an agent, with the MCP client's name and version
+  (`Tickr-Origin` and `Tickr-Agent` headers). Reads carry no such header. A Tickr
+  without agent provenance ignores them.
+- When Tickr answers that the workspace is busy with another change, the call
+  is retried once after the wait it asks for (up to 5 seconds). If it is still
+  busy, the agent is told that nothing was changed instead of being asked to
+  check whether the write was applied.
+
 ## 0.1.2 — 2026-10-10
 
 - A completed entry (with `stoppedAt`) whose `durationSeconds` is null is reported

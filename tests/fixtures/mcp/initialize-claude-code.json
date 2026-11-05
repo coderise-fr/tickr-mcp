@@ -1,0 +1,12 @@
+{
+  "params": {
+    "protocolVersion": "2025-11-25",
+    "clientInfo": {
+      "name": "claude-code",
+      "title": "Claude Code",
+      "version": "2.1.296",
+      "description": "Anthropic's agentic coding tool",
+      "websiteUrl": "https://claude.com/claude-code"
+    }
+  }
+}

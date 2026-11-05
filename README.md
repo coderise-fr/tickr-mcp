@@ -3,7 +3,7 @@
 Lets an AI agent (Claude Desktop, Claude Code, any MCP client) start, stop,
 list, create and edit **your own** time entries in [Tickr](https://tickr.coderise.cloud).
 
-Requires Node 20+ and a Tickr version that provides `GET /api/v1/me`.
+Requires Node 22+ and a Tickr version that provides `GET /api/v1/me`.
 
 ## 1. Create a dedicated API key
 
@@ -52,7 +52,7 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
   "mcpServers": {
     "tickr": {
       "command": "npx",
-      "args": ["-y", "@coderise-fr/tickr-mcp@0.1.2"],
+      "args": ["-y", "@coderise-fr/tickr-mcp@0.2.0"],
       "env": { "TICKR_API_KEY": "YOUR_TICKR_API_KEY" }
     }
   }
@@ -60,12 +60,12 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
 ```
 
 On Windows, if the client cannot find `npx`, use `"command": "cmd"` and
-`"args": ["/c", "npx", "-y", "@coderise-fr/tickr-mcp@0.1.2"]`.
+`"args": ["/c", "npx", "-y", "@coderise-fr/tickr-mcp@0.2.0"]`.
 
 **Claude Code:**
 
 ```bash
-claude mcp add tickr --scope user --env TICKR_API_KEY=YOUR_TICKR_API_KEY -- npx -y @coderise-fr/tickr-mcp@0.1.2
+claude mcp add tickr --scope user --env TICKR_API_KEY=YOUR_TICKR_API_KEY -- npx -y @coderise-fr/tickr-mcp@0.2.0
 ```
 
 `--scope user` (all your projects) and the default `local` scope keep the key
@@ -107,6 +107,14 @@ There is no delete tool. Datetimes are always given with an explicit offset
 (the agent calls `get_context` for your timezone). Tickr allows three running
 timers per user, counted across all workspaces.
 
+## Entries created by your agent
+
+Entries and timers created or changed through this server are marked as made
+by an AI agent: Tickr shows the name and version of your MCP client (for
+example `claude-code/2.1.296`). Only the client's name and version are sent,
+never your prompts. This needs a Tickr release with agent provenance; an older
+Tickr ignores the marking and works as before.
+
 ## Security notes
 
 - Keep the key out of version control and restrict the config file to your
@@ -129,6 +137,7 @@ timers per user, counted across all workspaces.
 | `has the analyst role, which is read-only` | Expected with an analyst key; use a Workspace-user key to make changes |
 | `not a member of this project` | Pick a project you belong to (`list_projects`) |
 | `Three timers are already running` | The limit counts every workspace. If the message lists timers of this workspace, stop one (`stop_timer`). If it says others run in another workspace, this server cannot see or stop them: stop one in the Tickr UI or through the MCP server configured for that workspace |
+| `busy with another change` | Retry in a few seconds; nothing was changed |
 | `rate limit is reached` | Wait the time given, then retry |
 | `may or may not have been applied` | Check your entries in Tickr before asking the agent to retry |
 | `unexpected answer to GET /api/v1/me` | Tickr and this server disagree on the API contract: upgrade the server |
