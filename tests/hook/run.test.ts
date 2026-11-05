@@ -75,13 +75,14 @@ describe("runFlusher", () => {
     const { deps: d } = deps(dir, { stages, onBoundary: (b) => boundaries.push(b) });
 
     expect(await runFlusher(dir, d)).toBe("done");
-    expect(order).toEqual(["workspace", "segmentation", "revisions", "send", "bounds"]);
+    expect(order).toEqual(["workspace", "segmentation", "ledger", "revisions", "send", "bounds"]);
     expect(seenByStages.every((seq) => seq > 0)).toBe(true);
     expect(boundaries).toEqual([
       "claimed",
       "fallback_committed",
       "stage:workspace",
       "stage:segmentation",
+      "stage:ledger",
       "stage:revisions",
       "stage:send",
       "stage:bounds",
@@ -255,6 +256,7 @@ describe("flusher processes", () => {
     "fallback_committed",
     "stage:workspace",
     "stage:segmentation",
+    "stage:ledger",
     "revision_committed",
     "stage:revisions",
     "sent",

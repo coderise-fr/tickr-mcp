@@ -2,12 +2,14 @@
 //
 //   workspace     GET /me once per instance: workspace check and clock skew
 //   segmentation  events -> segments (pure reducer, flusher/segmenter.ts)
+//   ledger        transcripts -> per-message ledger and attribution (ledger.ts, attribution.ts)
 //   revisions     desired state -> immutable outbox revisions (flusher/revisions.ts)
 //   send          latest due revision of each target -> Tickr (flusher/sender.ts)
 //   bounds        local quotas and retention (flusher/bounds.ts)
 //
 // Each stage is plugged in by name in PIPELINE; run.ts never changes when a stage does.
 import type { PluginConfig } from "../config.js";
+import { ledgerStage } from "../ledger.js";
 import type { Store } from "../store/db.js";
 import type { AgentApi } from "./api.js";
 import { boundsStage } from "./bounds.js";
@@ -16,7 +18,7 @@ import { segmentationStage } from "./segmentation.js";
 import { sendStage } from "./sender.js";
 import { workspaceStage } from "./workspace.js";
 
-export const STAGE_NAMES = ["workspace", "segmentation", "revisions", "send", "bounds"] as const;
+export const STAGE_NAMES = ["workspace", "segmentation", "ledger", "revisions", "send", "bounds"] as const;
 export type StageName = (typeof STAGE_NAMES)[number];
 
 /**
@@ -67,6 +69,7 @@ export const idleStage: StageRun = () => ({});
 export const PIPELINE: Record<StageName, StageRun> = {
   workspace: workspaceStage(),
   segmentation: segmentationStage,
+  ledger: ledgerStage,
   revisions: revisionsStage(),
   send: sendStage(),
   bounds: boundsStage(),

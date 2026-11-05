@@ -56,7 +56,7 @@ describe("plugin manifests", () => {
   it('every hook is exec form: command "node", args ["--no-warnings", "${CLAUDE_PLUGIN_ROOT}/hooks/dist/tickr-hook.cjs", <its event name>]', () => {
     const file = readJson<HooksFile>("plugins/tickr/hooks/hooks.json");
     expect(Object.keys(file.hooks).sort()).toEqual(
-      ["PostToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"].sort(),
+      ["PostToolUse", "SessionEnd", "SessionStart", "Stop", "SubagentStart", "SubagentStop", "UserPromptSubmit"].sort(),
     );
     for (const [event, groups] of Object.entries(file.hooks)) {
       expect(groups).toHaveLength(1);

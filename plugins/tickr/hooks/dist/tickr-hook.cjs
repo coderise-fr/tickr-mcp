@@ -28,7 +28,7 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_node_os2 = require("node:os");
-var import_node_path9 = require("node:path");
+var import_node_path10 = require("node:path");
 
 // src/config.ts
 var DEFAULT_BASE_URL = "https://tickr.coderise.cloud";
@@ -257,7 +257,7 @@ function createAgentApi(o) {
 }
 
 // hook-src/flusher/run.ts
-var import_node_path7 = require("node:path");
+var import_node_path8 = require("node:path");
 
 // hook-src/fallback.ts
 var import_node_fs = require("node:fs");
@@ -471,8 +471,8 @@ var LostOwnership = class extends Error {
   }
   reason;
 };
-function shift(nowIso, ms2) {
-  return new Date(Date.parse(nowIso) + ms2).toISOString();
+function shift(nowIso, ms3) {
+  return new Date(Date.parse(nowIso) + ms3).toISOString();
 }
 function isOwnerFresh(owner, now) {
   if (owner === null) return false;
@@ -667,8 +667,8 @@ function isBusy(error) {
   return typeof code2 === "number" && ((code2 & 255) === 5 || (code2 & 255) === 6);
 }
 var pause = new Int32Array(new SharedArrayBuffer(4));
-function sleepSync(ms2) {
-  if (ms2 > 0) Atomics.wait(pause, 0, 0, ms2);
+function sleepSync(ms3) {
+  if (ms3 > 0) Atomics.wait(pause, 0, 0, ms3);
 }
 var str = (value) => String(value);
 var optStr = (value) => value === null || value === void 0 ? null : String(value);
@@ -925,6 +925,24 @@ var Store = class {
       toEvent
     );
   }
+  /**
+   * The session's events attribution needs (ledger.ts): turn bounds, subagent start / stop,
+   * delegated entries and subagent transcripts, in journal order.
+   */
+  attributionEvents(sessionId) {
+    return this.all(
+      `SELECT * FROM events WHERE session_id = ? AND (type IN ('UserPromptSubmit', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop')
+         OR entry_id IS NOT NULL OR agent_transcript_path IS NOT NULL) ORDER BY seq`,
+      sessionId
+    ).map(toEvent);
+  }
+  /** The main transcripts named by the session's events. */
+  transcriptPaths(sessionId) {
+    return this.all(
+      "SELECT DISTINCT transcript_path FROM events WHERE session_id = ? AND transcript_path IS NOT NULL ORDER BY transcript_path",
+      sessionId
+    ).map((r) => str(r.transcript_path));
+  }
   /** Sessions with journalled events after their segmentation cursor (sessions.last_event_seq). */
   pendingEventSessions() {
     return this.all(
@@ -1127,8 +1145,10 @@ var Store = class {
   /**
    * Retention: deletes what is settled and older than cutoffIso — final segments without a
    * pending revision (and their last committed body), other targets' last committed bodies,
-   * events already segmented, sessions left without events nor segments, unused mapping
-   * versions, terminal items and shown notices. Returns the rows deleted.
+   * events already segmented, sessions left without events nor segments (then their ledger rows
+   * and totals, unless their recipient has a pending revision, their transcript offsets,
+   * subagents and Agent launches), unused mapping versions, terminal items and shown notices.
+   * Returns the rows deleted.
    */
   deleteRetired(cutoffIso) {
     let n = 0;
@@ -1155,6 +1175,17 @@ var Store = class {
          AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.session_id = sessions.session_id)`,
       cutoffIso
     );
+    n += this.run(
+      `DELETE FROM ledger WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ledger.session_id)
+         AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = ledger.recipient_kind AND o.target_id = ledger.recipient_id)`
+    );
+    n += this.run(
+      `DELETE FROM ledger_totals WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ledger_totals.session_id)
+         AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = ledger_totals.recipient_kind AND o.target_id = ledger_totals.recipient_id)`
+    );
+    for (const table of ["transcript_offsets", "subagents", "agent_launches"]) {
+      n += this.run(`DELETE FROM ${table} WHERE session_id IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ${table}.session_id)`);
+    }
     n += this.run(
       `DELETE FROM mapping_versions WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.mapping_version_id = mapping_versions.id)
          AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.mapping_version_id = mapping_versions.id)`
@@ -1293,64 +1324,100 @@ function openStore(path, opts) {
   }
 }
 
-// hook-src/flusher/bounds.ts
-var import_node_fs5 = require("node:fs");
-var import_node_path6 = require("node:path");
-
-// hook-src/intake.ts
-var import_node_os = require("node:os");
-var import_node_path5 = require("node:path");
-
-// hook-src/identity.ts
-var import_node_crypto2 = require("node:crypto");
-var import_node_fs3 = require("node:fs");
-var import_node_path3 = require("node:path");
-var INSTANCE_FILE = "instance.json";
-function instanceId(baseUrl, workspaceId, apiKey) {
-  return (0, import_node_crypto2.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
+// hook-src/attribution.ts
+var DAY_MS = 864e5;
+var ms = (iso2) => Date.parse(iso2);
+function nextUtcMidnight(t) {
+  return (Math.floor(t / DAY_MS) + 1) * DAY_MS;
 }
-function instanceDir(dataDir, id) {
-  return (0, import_node_path3.join)(dataDir, id);
-}
-function writeInstanceInfo(dir, who, now) {
-  (0, import_node_fs3.mkdirSync)(dir, { recursive: true });
-  const info = { base_url: who.baseUrl, workspace_id: who.workspaceId, created_at: now.toISOString() };
-  try {
-    (0, import_node_fs3.writeFileSync)((0, import_node_path3.join)(dir, INSTANCE_FILE), `${JSON.stringify(info)}
-`, { flag: "wx" });
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-  }
-}
-function readInstanceInfo(dir) {
-  try {
-    const raw = JSON.parse((0, import_node_fs3.readFileSync)((0, import_node_path3.join)(dir, INSTANCE_FILE), "utf8"));
-    if (!raw || typeof raw.base_url !== "string" || typeof raw.workspace_id !== "string" || typeof raw.created_at !== "string") {
-      return null;
+function buildTurns(sessionId, events) {
+  const sorted = events.filter((e) => e.sessionId === sessionId).sort((a, b) => ms(a.localTime) - ms(b.localTime) || a.seq - b.seq);
+  const turns = [];
+  let open = null;
+  for (const ev of sorted) {
+    if (ev.type === "UserPromptSubmit") {
+      if (open !== null) open.endedAt = ev.localTime;
+      open = { sessionId, promptId: ev.promptId ?? ev.eventId, startedAt: ev.localTime, endedAt: null };
+      turns.push(open);
+    } else if ((ev.type === "Stop" || ev.type === "SessionEnd") && open !== null) {
+      open.endedAt = ev.localTime;
+      open = null;
     }
-    return { base_url: raw.base_url, workspace_id: raw.workspace_id, created_at: raw.created_at };
-  } catch {
-    return null;
   }
+  return turns;
+}
+function turnAt(t, turns) {
+  let found = null;
+  for (const turn of turns) {
+    if (ms(turn.startedAt) <= t && (turn.endedAt === null || t < ms(turn.endedAt))) found = turn;
+  }
+  return found;
+}
+function delegatedByTurn(events, turns) {
+  const out = /* @__PURE__ */ new Map();
+  const known = new Set(turns.map((t) => t.promptId));
+  const withEntry = events.filter((e) => e.entryId !== null).sort((a, b) => a.seq - b.seq);
+  for (const ev of withEntry) {
+    const promptId = ev.promptId !== null && known.has(ev.promptId) ? ev.promptId : turnAt(ms(ev.localTime), turns)?.promptId;
+    if (promptId === void 0) continue;
+    const list = out.get(promptId) ?? [];
+    if (!list.includes(ev.entryId)) list.push(ev.entryId);
+    out.set(promptId, list);
+  }
+  return out;
+}
+function resolveTurn(turn, ctx) {
+  const first = ctx.delegatedByTurn.get(turn.promptId)?.[0];
+  if (first !== void 0) return { kind: "delegated", entryId: first };
+  if (turn.endedAt !== null) return null;
+  return { kind: "turn", sessionId: turn.sessionId, promptId: turn.promptId };
+}
+function resolveRecipient(r, ctx) {
+  if (r === null || r.kind !== "turn") return r;
+  const turn = ctx.turns.find((t) => t.promptId === r.promptId);
+  return turn === void 0 ? r : resolveTurn(turn, ctx);
+}
+function recipientAt(timestamp, ctx) {
+  const t = ms(timestamp);
+  let inside = null;
+  let before = null;
+  for (const seg2 of ctx.segments) {
+    const start = ms(seg2.startedAt);
+    if (start > t) continue;
+    if (t < ms(seg2.stoppedAt) && (inside === null || start >= ms(inside.startedAt))) inside = seg2;
+    if (t < nextUtcMidnight(start) && (before === null || start >= ms(before.startedAt))) before = seg2;
+  }
+  const seg = inside ?? before;
+  if (seg !== null) return { kind: "segment", id: seg.id };
+  const turn = turnAt(t, ctx.turns);
+  return turn === null ? null : resolveTurn(turn, ctx);
+}
+function recipientFor(msg, ctx) {
+  if (msg.agentId !== void 0 && ctx.subagents.has(msg.agentId)) return resolveRecipient(ctx.subagents.get(msg.agentId), ctx);
+  return recipientAt(msg.timestamp, ctx);
+}
+function settled(timestamp, segments) {
+  const t = ms(timestamp);
+  return segments.every((seg) => seg.final || t <= ms(seg.lastActivityAt));
 }
 
 // hook-src/ids.ts
-var import_node_crypto3 = require("node:crypto");
+var import_node_crypto2 = require("node:crypto");
 var CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 var MAX_TIME = 2 ** 48 - 1;
 function timeBytes(nowMs) {
-  let ms2 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
+  let ms3 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
   const bytes = new Array(6);
   for (let i = 5; i >= 0; i--) {
-    bytes[i] = ms2 % 256;
-    ms2 = Math.floor(ms2 / 256);
+    bytes[i] = ms3 % 256;
+    ms3 = Math.floor(ms3 / 256);
   }
   return bytes;
 }
 function hex(bytes) {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
-function uuidv7(nowMs, rand = import_node_crypto3.randomBytes) {
+function uuidv7(nowMs, rand = import_node_crypto2.randomBytes) {
   const bytes = new Uint8Array(16);
   bytes.set(timeBytes(nowMs), 0);
   bytes.set(rand(10).subarray(0, 10), 6);
@@ -1359,8 +1426,8 @@ function uuidv7(nowMs, rand = import_node_crypto3.randomBytes) {
   const h = hex(bytes);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
-function encodeTime(ms2) {
-  let rest = ms2;
+function encodeTime(ms3) {
+  let rest = ms3;
   let text = "";
   for (let i = 0; i < 10; i++) {
     text = CROCKFORD[rest % 32] + text;
@@ -1396,25 +1463,781 @@ function increment(digits) {
 }
 var lastMs = -1;
 var lastDigits = [];
-function ulid(nowMs, rand = import_node_crypto3.randomBytes) {
-  let ms2 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
-  if (ms2 <= lastMs) {
-    ms2 = lastMs;
+function ulid(nowMs, rand = import_node_crypto2.randomBytes) {
+  let ms3 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
+  if (ms3 <= lastMs) {
+    ms3 = lastMs;
     if (!increment(lastDigits)) {
-      ms2 = Math.min(lastMs + 1, MAX_TIME);
+      ms3 = Math.min(lastMs + 1, MAX_TIME);
       lastDigits = randomDigits(rand);
     }
   } else {
     lastDigits = randomDigits(rand);
   }
-  lastMs = ms2;
-  return encodeTime(ms2) + lastDigits.map((d) => CROCKFORD[d]).join("");
+  lastMs = ms3;
+  return encodeTime(ms3) + lastDigits.map((d) => CROCKFORD[d]).join("");
 }
 
-// hook-src/mapping.ts
+// hook-src/flusher/segmenter.ts
+var CLOCK_TOLERANCE_MS = 2 * 6e4;
+var MAX_SEGMENT_MS = 23 * 36e5;
+var DRIFT_DIAGNOSTIC = "clock drift or possible reboot";
+var BACKWARDS_DIAGNOSTIC = "wall clock moved backwards";
+var OPENING = /* @__PURE__ */ new Set(["UserPromptSubmit", "PostToolUse"]);
+function newSessionState(sessionId) {
+  return { sessionId, open: null, lastEventTime: null, lastUptimeS: null, lateEvents: 0 };
+}
+var ms2 = (iso2) => Date.parse(iso2);
+var iso = (t) => new Date(t).toISOString();
+function segmentBoundary(seg) {
+  const start = new Date(seg.startedAt);
+  const midnight = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate() + 1);
+  const max = start.getTime() + MAX_SEGMENT_MS;
+  return max < midnight ? { at: max, reason: "max_duration" } : { at: midnight, reason: "midnight" };
+}
+function judgeClock(s, wall, uptimeS) {
+  if (s.lastEventTime === null || s.lastUptimeS === null) return "normal";
+  const dWall = wall - ms2(s.lastEventTime);
+  const dUptime = (uptimeS - s.lastUptimeS) * 1e3;
+  if (dWall < 0 && dUptime <= 0) return "late";
+  if (dUptime < 0) return "reboot";
+  const drift = dWall - dUptime;
+  if (drift > CLOCK_TOLERANCE_MS) return "forward";
+  if (drift < -CLOCK_TOLERANCE_MS) return "backward";
+  return "normal";
+}
+function later(a, b) {
+  return ms2(b) > ms2(a) ? b : a;
+}
+function applyLate(s, ev, wall, cfg) {
+  const open = s.open;
+  const activity = OPENING.has(ev.type) || ev.type === "Stop";
+  const inside = open !== null && wall >= ms2(open.startedAt) && wall <= segmentBoundary(open).at && wall - ms2(open.lastActivityAt) < cfg.idleMs && (!OPENING.has(ev.type) || ev.mappingVersionId === open.mappingVersionId);
+  if (!inside) return { state: { ...s, lateEvents: s.lateEvents + 1 }, changes: [] };
+  if (!activity || wall <= ms2(open.lastActivityAt)) return { state: s, changes: [] };
+  const seg = { ...open, lastActivityAt: ev.localTime };
+  return {
+    state: { ...s, open: seg },
+    changes: [{ kind: "extend", id: seg.id, lastActivityAt: seg.lastActivityAt, working: seg.working, observedAt: seg.observedAt }]
+  };
+}
+function applyEvent(s, ev, cfg) {
+  const wall = ms2(ev.localTime);
+  const verdict = judgeClock(s, wall, ev.uptimeS);
+  if (verdict === "late") return applyLate(s, ev, wall, cfg);
+  const changes = [];
+  let open = s.open;
+  const finalize = (seg, stoppedAt, reason, diagnostic) => {
+    changes.push(diagnostic === void 0 ? { kind: "finalize", id: seg.id, stoppedAt, reason } : { kind: "finalize", id: seg.id, stoppedAt, reason, diagnostic });
+    open = null;
+  };
+  const start = (startedAt, mappingVersionId, working) => {
+    open = { id: cfg.newId(), mappingVersionId, startedAt, lastActivityAt: ev.localTime, working, observedAt: ev.localTime };
+    changes.push({ kind: "open", seg: open });
+  };
+  if (open !== null && (verdict === "forward" || verdict === "backward")) {
+    finalize(open, open.lastActivityAt, "clock_jump", verdict === "forward" ? DRIFT_DIAGNOSTIC : BACKWARDS_DIAGNOSTIC);
+  }
+  if (open !== null && wall - ms2(open.lastActivityAt) >= cfg.idleMs) finalize(open, open.lastActivityAt, "idle");
+  const current = open;
+  if (ev.type === "SessionEnd") {
+    if (current !== null) finalize(current, current.lastActivityAt, "session_end");
+  } else if (OPENING.has(ev.type) || ev.type === "Stop") {
+    const working = ev.type !== "Stop";
+    if (current === null) {
+      if (working && ev.mappingVersionId !== null) start(ev.localTime, ev.mappingVersionId, true);
+    } else {
+      const boundary = segmentBoundary(current);
+      const otherMapping = working && ev.mappingVersionId !== current.mappingVersionId;
+      if (otherMapping || wall > boundary.at) {
+        const at = wall > boundary.at ? iso(boundary.at) : ev.localTime;
+        finalize(current, at, wall > boundary.at ? boundary.reason : "mapping");
+        const mapping = otherMapping ? ev.mappingVersionId : current.mappingVersionId;
+        if (mapping !== null) start(at, mapping, working);
+      } else {
+        const seg = {
+          ...current,
+          lastActivityAt: later(current.lastActivityAt, ev.localTime),
+          working,
+          observedAt: later(current.observedAt, ev.localTime)
+        };
+        open = seg;
+        changes.push({ kind: "extend", id: seg.id, lastActivityAt: seg.lastActivityAt, working: seg.working, observedAt: seg.observedAt });
+      }
+    }
+  }
+  return { state: { ...s, open, lastEventTime: ev.localTime, lastUptimeS: ev.uptimeS }, changes };
+}
+function onWake(s, now, cfg) {
+  const open = s.open;
+  if (open === null || now.getTime() - ms2(open.lastActivityAt) < cfg.idleMs) return { state: s, changes: [] };
+  return { state: { ...s, open: null }, changes: [{ kind: "finalize", id: open.id, stoppedAt: open.lastActivityAt, reason: "idle" }] };
+}
+function idleDueInMs(s, now, cfg) {
+  if (s.open === null) return null;
+  return Math.max(0, ms2(s.open.lastActivityAt) + cfg.idleMs - now.getTime());
+}
+
+// hook-src/flusher/segmentation.ts
+var SEGMENTATION_BATCH = 500;
+var ACTIVE_SESSION = "active";
+function newSessionRow(sessionId) {
+  return { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, state: ACTIVE_SESSION, agentVersion: null, provider: null, lateEvents: 0 };
+}
+function toOpen(seg) {
+  return {
+    id: seg.id,
+    mappingVersionId: seg.mappingVersionId,
+    startedAt: seg.startedAt,
+    lastActivityAt: seg.lastActivityAt,
+    working: seg.working,
+    observedAt: seg.observedAt
+  };
+}
+function loadSessionState(store, sessionId) {
+  const row = store.getSession(sessionId) ?? newSessionRow(sessionId);
+  const open = store.openSegmentFor(sessionId);
+  return {
+    row,
+    state: {
+      ...newSessionState(sessionId),
+      open: open ? toOpen(open) : null,
+      lastEventTime: row.lastEventTime,
+      lastUptimeS: row.lastUptimeS,
+      lateEvents: row.lateEvents
+    }
+  };
+}
+function applyChanges(store, sessionId, changes) {
+  for (const c of changes) {
+    if (c.kind === "open") {
+      store.upsertSegment({
+        id: c.seg.id,
+        sessionId,
+        mappingVersionId: c.seg.mappingVersionId,
+        startedAt: c.seg.startedAt,
+        lastActivityAt: c.seg.lastActivityAt,
+        stoppedAt: c.seg.lastActivityAt,
+        working: c.seg.working,
+        observedAt: c.seg.observedAt,
+        final: false,
+        finalReason: null,
+        finalDiagnostic: null,
+        quality: "pending",
+        createdOnServer: false,
+        serverState: null,
+        lastRevision: 0
+      });
+      continue;
+    }
+    const row = store.getSegment(c.id);
+    if (row === null || row.final) continue;
+    if (c.kind === "extend") {
+      store.upsertSegment({ ...row, lastActivityAt: c.lastActivityAt, stoppedAt: c.lastActivityAt, working: c.working, observedAt: c.observedAt });
+    } else {
+      store.upsertSegment({ ...row, stoppedAt: c.stoppedAt, working: false, final: true, finalReason: c.reason, finalDiagnostic: c.diagnostic ?? null });
+    }
+  }
+}
+function segmentSession(store, sessionId, cfg, limit = SEGMENTATION_BATCH) {
+  const { row, state } = loadSessionState(store, sessionId);
+  const events = store.sessionEventsAfter(sessionId, row.lastEventSeq, limit);
+  if (events.length === 0) return 0;
+  let s = state;
+  let provider = row.provider;
+  for (const ev of events) {
+    if (row.state === ACTIVE_SESSION) {
+      const out = applyEvent(s, ev, cfg);
+      s = out.state;
+      applyChanges(store, sessionId, out.changes);
+    }
+    if (ev.provider !== null) provider = ev.provider;
+  }
+  store.upsertSession({
+    ...row,
+    lastEventSeq: events[events.length - 1].seq,
+    lastEventTime: s.lastEventTime,
+    lastUptimeS: s.lastUptimeS,
+    lateEvents: s.lateEvents,
+    provider
+  });
+  return events.length;
+}
+function finalizeIdle(store, now, idleMs) {
+  let due = null;
+  for (const seg of store.openSegments()) {
+    const { state } = loadSessionState(store, seg.sessionId);
+    const out = onWake(state, now, { idleMs });
+    applyChanges(store, seg.sessionId, out.changes);
+    const left = idleDueInMs(out.state, now, { idleMs });
+    if (left !== null) due = due === null ? left : Math.min(due, left);
+  }
+  return due;
+}
+function markClosedByServer(store, segmentId, serverState) {
+  const row = store.getSegment(segmentId);
+  if (row === null) return;
+  store.upsertSegment({ ...row, working: false, final: true, finalReason: row.final ? row.finalReason : "server_closed", serverState });
+}
+var segmentationStage = (ctx) => {
+  const idleMs = ctx.config.idleMinutes * 6e4;
+  const cfg = { idleMs, newId: () => uuidv7(ctx.now().getTime()) };
+  for (const sessionId of ctx.store.pendingEventSessions()) {
+    for (; ; ) {
+      if (ctx.remainingMs() <= 0) return { dueInMs: 0 };
+      const read = ctx.guarded(() => segmentSession(ctx.store, sessionId, cfg));
+      if (read < SEGMENTATION_BATCH) break;
+    }
+  }
+  const due = ctx.guarded(() => finalizeIdle(ctx.store, ctx.now(), idleMs));
+  return due === null ? {} : { dueInMs: due };
+};
+
+// hook-src/transcript/reader.ts
+var import_node_crypto3 = require("node:crypto");
+var import_node_fs3 = require("node:fs");
+var import_node_path3 = require("node:path");
+
+// hook-src/transcript/parser.ts
+var SYNTHETIC_MODEL = "<synthetic>";
+var MODEL_GRAMMAR = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$/;
+var UNKNOWN_MODEL = "unknown";
+var MAX_COUNT = Number.MAX_SAFE_INTEGER;
+var AGENT_TOOLS = /* @__PURE__ */ new Set(["Agent", "Task"]);
+function sanitizeModel(raw) {
+  if (typeof raw !== "string") return UNKNOWN_MODEL;
+  if (MODEL_GRAMMAR.test(raw)) return raw;
+  const cleaned = raw.trim().replace(/[^A-Za-z0-9._:/@-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 128).replace(/-+$/, "");
+  return MODEL_GRAMMAR.test(cleaned) ? cleaned : UNKNOWN_MODEL;
+}
+function count(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return Math.min(Math.floor(value), MAX_COUNT);
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function validTime(value) {
+  if (typeof value !== "string") return null;
+  const ms3 = Date.parse(value);
+  return Number.isNaN(ms3) ? null : new Date(ms3).toISOString();
+}
+function earlier(a, b) {
+  return Date.parse(b) < Date.parse(a) ? b : a;
+}
+function nonEmpty(value) {
+  return typeof value === "string" && value !== "" ? value : void 0;
+}
+function agentLaunches(content, timestamp) {
+  if (!Array.isArray(content)) return [];
+  const out = [];
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== "tool_use" || typeof block.name !== "string" || !AGENT_TOOLS.has(block.name)) continue;
+    const id = nonEmpty(block.id);
+    if (id !== void 0) out.push({ toolUseId: id, timestamp });
+  }
+  return out;
+}
+function assistantLine(doc) {
+  const message = doc.message;
+  if (!isRecord(message) || nonEmpty(message.id) === void 0 || typeof message.model !== "string") return null;
+  const usage = message.usage;
+  if (!isRecord(usage)) return null;
+  const input = count(usage.input_tokens);
+  const output = count(usage.output_tokens);
+  const timestamp = validTime(doc.timestamp);
+  if (input === null || output === null || timestamp === null) return null;
+  const row = {
+    messageId: message.id,
+    model: sanitizeModel(message.model),
+    timestamp,
+    input,
+    output,
+    cacheCreation: count(usage.cache_creation_input_tokens) ?? 0,
+    cacheRead: count(usage.cache_read_input_tokens) ?? 0,
+    sidechain: doc.isSidechain === true
+  };
+  const version = nonEmpty(doc.version);
+  if (version !== void 0) row.version = version;
+  const agentId = nonEmpty(doc.agentId);
+  if (agentId !== void 0) row.agentId = agentId;
+  return { usage: row, synthetic: message.model === SYNTHETIC_MODEL, launches: agentLaunches(message.content, timestamp) };
+}
+function merge(seen, next) {
+  seen.timestamp = earlier(seen.timestamp, next.timestamp);
+  seen.input = Math.max(seen.input, next.input);
+  seen.output = Math.max(seen.output, next.output);
+  seen.cacheCreation = Math.max(seen.cacheCreation, next.cacheCreation);
+  seen.cacheRead = Math.max(seen.cacheRead, next.cacheRead);
+  seen.sidechain ||= next.sidechain;
+  if (next.version !== void 0) seen.version = next.version;
+  if (seen.agentId === void 0 && next.agentId !== void 0) seen.agentId = next.agentId;
+}
+function parseJson(line) {
+  try {
+    return { ok: true, doc: JSON.parse(line) };
+  } catch {
+    return { ok: false };
+  }
+}
+function parseLines(text) {
+  const complete = text.slice(0, text.lastIndexOf("\n") + 1);
+  const byId = /* @__PURE__ */ new Map();
+  const launches = [];
+  const n = { lines: 0, malformed: 0, recognised: 0, assistant: 0, usable: 0 };
+  let version;
+  for (const raw of complete.split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    n.lines++;
+    const parsed = parseJson(line);
+    if (!parsed.ok) {
+      n.malformed++;
+      continue;
+    }
+    const doc = parsed.doc;
+    if (!isRecord(doc) || typeof doc.type !== "string") continue;
+    n.recognised++;
+    version = nonEmpty(doc.version) ?? version;
+    if (doc.type !== "assistant") continue;
+    n.assistant++;
+    const found = assistantLine(doc);
+    if (found === null) continue;
+    n.usable++;
+    launches.push(...found.launches);
+    if (found.synthetic) continue;
+    const seen = byId.get(found.usage.messageId);
+    if (seen === void 0) byId.set(found.usage.messageId, found.usage);
+    else merge(seen, found.usage);
+  }
+  const result = {
+    messages: [...byId.values()],
+    consumedBytes: Buffer.byteLength(complete, "utf8"),
+    malformed: n.malformed,
+    launches,
+    // Malformed lines alone (a corrupted write) are counted, not taken for another format.
+    unknownShape: n.lines > n.malformed && n.recognised === 0 || n.assistant > 0 && n.usable === 0
+  };
+  if (version !== void 0) result.version = version;
+  return result;
+}
+
+// hook-src/transcript/reader.ts
+var HEAD_BYTES = 4096;
+function readRange(fd, start, length) {
+  const buf = Buffer.alloc(length);
+  let done = 0;
+  while (done < length) {
+    const n = (0, import_node_fs3.readSync)(fd, buf, done, length - done, start + done);
+    if (n === 0) break;
+    done += n;
+  }
+  return done === length ? buf : buf.subarray(0, done);
+}
+function headHash(fd, length) {
+  return (0, import_node_crypto3.createHash)("sha256").update(readRange(fd, 0, length)).digest("hex");
+}
+var EMPTY_HASH = (0, import_node_crypto3.createHash)("sha256").digest("hex");
+function readTranscript(store, path, opts = {}) {
+  const readAt = (opts.now ?? /* @__PURE__ */ new Date()).toISOString();
+  const prev = store.getTranscriptOffset(path);
+  const keep = prev ?? { path, offset: 0, size: 0, headHash: EMPTY_HASH, sessionId: null, status: null, readAt: null };
+  const unavailable = (rescanned) => ({
+    path,
+    status: "unavailable",
+    messages: [],
+    launches: [],
+    rescanned,
+    malformed: 0,
+    next: { ...keep, sessionId: opts.sessionId ?? keep.sessionId, status: "unavailable", readAt }
+  });
+  let fd;
+  try {
+    fd = (0, import_node_fs3.openSync)(path, "r");
+  } catch {
+    return unavailable(false);
+  }
+  try {
+    const size = (0, import_node_fs3.fstatSync)(fd).size;
+    let start = prev?.offset ?? 0;
+    let rescanned = false;
+    if (prev !== null && (size < prev.offset || headHash(fd, Math.min(HEAD_BYTES, prev.offset)) !== prev.headHash)) {
+      start = 0;
+      rescanned = true;
+    }
+    const buf = readRange(fd, start, Math.max(0, size - start));
+    const end = buf.lastIndexOf(10) + 1;
+    const parsed = parseLines(buf.subarray(0, end).toString("utf8"));
+    if (parsed.unknownShape) return unavailable(rescanned);
+    const offset = start + end;
+    const status = end < buf.length || parsed.malformed > 0 ? "partial" : "complete";
+    const read = {
+      path,
+      status,
+      messages: parsed.messages,
+      launches: parsed.launches,
+      rescanned,
+      malformed: parsed.malformed,
+      next: {
+        path,
+        offset,
+        size: start + buf.length,
+        headHash: headHash(fd, Math.min(HEAD_BYTES, offset)),
+        sessionId: opts.sessionId ?? keep.sessionId,
+        status,
+        readAt
+      }
+    };
+    if (parsed.version !== void 0) read.version = parsed.version;
+    return read;
+  } catch {
+    return unavailable(false);
+  } finally {
+    (0, import_node_fs3.closeSync)(fd);
+  }
+}
+function commitRead(store, read) {
+  store.putTranscriptOffset(read.next);
+}
+var SUBAGENT_FILE = /^agent-([A-Za-z0-9._-]+)\.jsonl$/;
+function subagentTranscripts(mainPath) {
+  const dir = (0, import_node_path3.join)((0, import_node_path3.dirname)(mainPath), (0, import_node_path3.basename)(mainPath).replace(/\.jsonl$/, ""), "subagents");
+  let names;
+  try {
+    names = (0, import_node_fs3.readdirSync)(dir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const name of names.sort()) {
+    const m = SUBAGENT_FILE.exec(name);
+    if (m) out.push({ agentId: m[1], path: (0, import_node_path3.join)(dir, name) });
+  }
+  return out;
+}
+function agentIdOfPath(path) {
+  return SUBAGENT_FILE.exec((0, import_node_path3.basename)(path))?.[1] ?? null;
+}
+function readSubagentMeta(transcriptPath) {
+  try {
+    const doc = JSON.parse((0, import_node_fs3.readFileSync)(transcriptPath.replace(/\.jsonl$/, ".meta.json"), "utf8"));
+    if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return null;
+    const toolUseId = doc.toolUseId;
+    return typeof toolUseId === "string" && toolUseId !== "" ? { toolUseId } : {};
+  } catch {
+    return null;
+  }
+}
+
+// hook-src/ledger.ts
+var LEDGER_WINDOW_MS = 24 * 36e5;
+var str2 = (v) => String(v);
+var optStr2 = (v) => v === null || v === void 0 ? null : String(v);
+function encode(r) {
+  if (r === "pending") return { kind: "pending", id: null };
+  if (r === null) return { kind: "none", id: null };
+  if (r.kind === "segment") return { kind: "segment", id: r.id };
+  if (r.kind === "delegated") return { kind: "delegated", id: r.entryId };
+  return { kind: "turn", id: r.promptId };
+}
+function decode(kind, id, sessionId) {
+  if (kind === "segment" && id !== null) return { kind: "segment", id };
+  if (kind === "delegated" && id !== null) return { kind: "delegated", entryId: id };
+  if (kind === "turn" && id !== null) return { kind: "turn", sessionId, promptId: id };
+  if (kind === "pending") return "pending";
+  return null;
+}
+function toLedger(r) {
+  return {
+    messageId: str2(r.message_id),
+    sessionId: str2(r.session_id),
+    agentId: optStr2(r.agent_id),
+    recipientKind: str2(r.recipient_kind),
+    recipientId: optStr2(r.recipient_id),
+    provider: str2(r.provider),
+    model: str2(r.model),
+    input: Number(r.input),
+    output: Number(r.output),
+    cacheCreation: Number(r.cache_creation),
+    cacheRead: Number(r.cache_read),
+    at: str2(r.at),
+    folded: Number(r.folded) !== 0
+  };
+}
+function toSubagent(r) {
+  return {
+    agentId: str2(r.agent_id),
+    sessionId: str2(r.session_id),
+    launchedAt: optStr2(r.launched_at),
+    source: optStr2(r.source),
+    toolUseId: optStr2(r.tool_use_id),
+    transcriptPath: optStr2(r.transcript_path),
+    stoppedAt: optStr2(r.stopped_at),
+    recipientKind: optStr2(r.recipient_kind),
+    recipientId: optStr2(r.recipient_id)
+  };
+}
+var UPSERT = `INSERT INTO ledger (message_id, session_id, agent_id, recipient_kind, recipient_id, provider, model, input, output,
+    cache_creation, cache_read, at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT (message_id) DO UPDATE SET
+    input = CASE WHEN ledger.folded = 1 THEN ledger.input ELSE MAX(ledger.input, excluded.input) END,
+    output = CASE WHEN ledger.folded = 1 THEN ledger.output ELSE MAX(ledger.output, excluded.output) END,
+    cache_creation = CASE WHEN ledger.folded = 1 THEN ledger.cache_creation ELSE MAX(ledger.cache_creation, excluded.cache_creation) END,
+    cache_read = CASE WHEN ledger.folded = 1 THEN ledger.cache_read ELSE MAX(ledger.cache_read, excluded.cache_read) END,
+    at = MIN(ledger.at, excluded.at),
+    recipient_id = CASE WHEN ledger.recipient_kind IN ('pending', 'turn') AND excluded.recipient_kind <> 'pending'
+      THEN excluded.recipient_id ELSE ledger.recipient_id END,
+    recipient_kind = CASE WHEN ledger.recipient_kind IN ('pending', 'turn') AND excluded.recipient_kind <> 'pending'
+      THEN excluded.recipient_kind ELSE ledger.recipient_kind END`;
+function upsertMessage(store, sessionId, msg, recipient, provider) {
+  const { kind, id } = encode(recipient);
+  store.db.prepare(UPSERT).run(msg.messageId, sessionId, msg.agentId ?? null, kind, id, provider, msg.model, msg.input, msg.output, msg.cacheCreation, msg.cacheRead, msg.timestamp);
+}
+function setRecipient(store, messageId, recipient) {
+  if (recipient === "pending") return false;
+  const { kind, id } = encode(recipient);
+  const changes = store.db.prepare(
+    `UPDATE ledger SET recipient_kind = ?, recipient_id = ? WHERE message_id = ? AND recipient_kind IN ('pending', 'turn')
+         AND (recipient_kind <> ? OR recipient_id IS NOT ?)`
+  ).run(kind, id, messageId, kind, id).changes;
+  return Number(changes) > 0;
+}
+function provisionalRows(store, sessionId) {
+  return store.db.prepare("SELECT * FROM ledger WHERE session_id = ? AND recipient_kind IN ('pending', 'turn') ORDER BY at, message_id").all(sessionId).map(toLedger);
+}
+function subagentsFor(store, sessionId) {
+  return store.db.prepare("SELECT * FROM subagents WHERE session_id = ? ORDER BY agent_id").all(sessionId).map(toSubagent);
+}
+function foldSettled(store) {
+  const settledTargets = store.db.prepare(
+    `SELECT DISTINCT l.session_id, l.recipient_kind, l.recipient_id FROM ledger l
+       JOIN last_committed c ON c.target_kind = l.recipient_kind AND c.target_id = l.recipient_id
+       WHERE l.folded = 0 AND json_extract(c.body_json, '$.usageQuality') = 'complete'
+         AND (l.recipient_kind <> 'segment' OR json_extract(c.body_json, '$.final') = 1)
+         AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = l.recipient_kind AND o.target_id = l.recipient_id)`
+  ).all();
+  let folded = 0;
+  for (const t of settledTargets) {
+    const params = [str2(t.session_id), str2(t.recipient_kind), str2(t.recipient_id)];
+    store.db.prepare(
+      `INSERT INTO ledger_totals (session_id, recipient_kind, recipient_id, provider, model, input, output, cache_creation, cache_read)
+         SELECT session_id, recipient_kind, recipient_id, provider, model, SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read)
+         FROM ledger WHERE folded = 0 AND session_id = ? AND recipient_kind = ? AND recipient_id = ?
+         GROUP BY provider, model
+         ON CONFLICT (session_id, recipient_kind, recipient_id, provider, model) DO UPDATE SET
+           input = ledger_totals.input + excluded.input, output = ledger_totals.output + excluded.output,
+           cache_creation = ledger_totals.cache_creation + excluded.cache_creation, cache_read = ledger_totals.cache_read + excluded.cache_read`
+    ).run(...params);
+    folded += Number(
+      store.db.prepare(
+        `UPDATE ledger SET folded = 1, input = 0, output = 0, cache_creation = 0, cache_read = 0
+           WHERE folded = 0 AND session_id = ? AND recipient_kind = ? AND recipient_id = ?`
+      ).run(...params).changes
+    );
+  }
+  return folded;
+}
+function sessionsToRead(store, sinceIso) {
+  return store.db.prepare(
+    `SELECT s.session_id FROM sessions s WHERE s.state = ? AND (s.last_event_time >= ?
+           OR EXISTS (SELECT 1 FROM segments g WHERE g.session_id = s.session_id AND g.final = 0))
+         ORDER BY s.session_id`
+  ).all(ACTIVE_SESSION, sinceIso).map((r) => str2(r.session_id));
+}
+function mainTranscripts(store, sessionId) {
+  return store.transcriptPaths(sessionId).filter((p) => agentIdOfPath(p) === null);
+}
+function subagentFiles(mains, events) {
+  const byAgent = /* @__PURE__ */ new Map();
+  for (const main2 of mains) for (const f of subagentTranscripts(main2)) byAgent.set(f.agentId, f.path);
+  for (const ev of events) {
+    if (ev.agentTranscriptPath === null) continue;
+    const agentId = ev.agentId ?? agentIdOfPath(ev.agentTranscriptPath);
+    if (agentId !== null && !byAgent.has(agentId)) byAgent.set(agentId, ev.agentTranscriptPath);
+  }
+  return [...byAgent].map(([agentId, path]) => ({ agentId, path }));
+}
+function upsertSubagent(store, row) {
+  store.db.prepare(
+    `INSERT INTO subagents (agent_id, session_id, launched_at, source, tool_use_id, transcript_path, stopped_at, recipient_kind, recipient_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (agent_id) DO UPDATE SET launched_at = excluded.launched_at, source = excluded.source, tool_use_id = excluded.tool_use_id,
+         transcript_path = excluded.transcript_path, stopped_at = excluded.stopped_at, recipient_kind = excluded.recipient_kind,
+         recipient_id = excluded.recipient_id`
+  ).run(row.agentId, row.sessionId, row.launchedAt, row.source, row.toolUseId, row.transcriptPath, row.stoppedAt, row.recipientKind, row.recipientId);
+}
+function launchTime(store, toolUseId) {
+  const r = store.db.prepare("SELECT at FROM agent_launches WHERE tool_use_id = ?").get(toolUseId);
+  return r ? str2(r.at) : null;
+}
+function recordLaunches(store, sessionId, launches) {
+  const insert = store.db.prepare("INSERT INTO agent_launches (tool_use_id, session_id, at) VALUES (?, ?, ?) ON CONFLICT (tool_use_id) DO NOTHING");
+  for (const l of launches) insert.run(l.toolUseId, sessionId, l.timestamp);
+}
+function refreshSubagents(store, sessionId, events, subs, ctx) {
+  const rows = new Map(subagentsFor(store, sessionId).map((r) => [r.agentId, r]));
+  const blank = (agentId) => ({
+    agentId,
+    sessionId,
+    launchedAt: null,
+    source: null,
+    toolUseId: null,
+    transcriptPath: null,
+    stoppedAt: null,
+    recipientKind: null,
+    recipientId: null
+  });
+  for (const ev of events) {
+    if (ev.agentId === null || ev.type !== "SubagentStart" && ev.type !== "SubagentStop") continue;
+    const row = { ...rows.get(ev.agentId) ?? blank(ev.agentId) };
+    if (ev.type === "SubagentStart" && row.source !== "hook") {
+      row.launchedAt = ev.localTime;
+      row.source = "hook";
+    }
+    if (ev.type === "SubagentStop") row.stoppedAt = ev.localTime;
+    if (ev.agentTranscriptPath !== null) row.transcriptPath = ev.agentTranscriptPath;
+    rows.set(ev.agentId, row);
+  }
+  for (const { file, read, toolUseId } of subs) {
+    const row = { ...rows.get(file.agentId) ?? blank(file.agentId) };
+    row.transcriptPath ??= file.path;
+    if (row.source !== "hook" && toolUseId !== null) {
+      const at = launchTime(store, toolUseId);
+      row.toolUseId = toolUseId;
+      if (at !== null) {
+        row.launchedAt = at;
+        row.source = "tool_call";
+      }
+    }
+    if (row.launchedAt === null) {
+      const first = read.messages.map((m) => m.timestamp).sort()[0];
+      if (first !== void 0) {
+        row.launchedAt = first;
+        row.source = "timestamp";
+      }
+    }
+    rows.set(file.agentId, row);
+  }
+  for (const row of rows.values()) {
+    if (row.recipientKind === null && row.launchedAt !== null && settled(row.launchedAt, ctx.segments)) {
+      const { kind, id } = encode(recipientAt(row.launchedAt, ctx));
+      row.recipientKind = kind;
+      row.recipientId = id;
+    } else if (row.recipientKind === "turn") {
+      const { kind, id } = encode(resolveRecipient(decode("turn", row.recipientId, sessionId), ctx));
+      row.recipientKind = kind;
+      row.recipientId = id;
+    }
+    upsertSubagent(store, row);
+  }
+  return rows;
+}
+function decide(msg, ctx, undecidedAgents) {
+  if (msg.agentId !== void 0) {
+    if (undecidedAgents.has(msg.agentId)) return "pending";
+    if (ctx.subagents.has(msg.agentId)) return recipientFor(msg, ctx);
+  }
+  return settled(msg.timestamp, ctx.segments) ? recipientFor(msg, ctx) : "pending";
+}
+function readSession(store, sessionId, now) {
+  const events = store.attributionEvents(sessionId);
+  const mainPaths = mainTranscripts(store, sessionId);
+  const mains = mainPaths.map((p) => readTranscript(store, p, { sessionId, now }));
+  const subs = subagentFiles(mainPaths, events).map((file) => {
+    const read = readTranscript(store, file.path, { sessionId, now });
+    for (const m of read.messages) if (m.agentId === void 0) m.agentId = file.agentId;
+    return { file, read, toolUseId: readSubagentMeta(file.path)?.toolUseId ?? null };
+  });
+  return { events, mains, subs };
+}
+function recordSession(store, sessionId, reads) {
+  const session = store.getSession(sessionId);
+  const provider = session?.provider ?? "anthropic";
+  const turns = buildTurns(sessionId, reads.events);
+  const ctx = {
+    segments: store.segmentsForSession(sessionId),
+    turns,
+    subagents: /* @__PURE__ */ new Map(),
+    delegatedByTurn: delegatedByTurn(reads.events, turns)
+  };
+  for (const read of reads.mains) recordLaunches(store, sessionId, read.launches);
+  const undecided = /* @__PURE__ */ new Set();
+  for (const row of refreshSubagents(store, sessionId, reads.events, reads.subs, ctx).values()) {
+    if (row.recipientKind === null) undecided.add(row.agentId);
+    else ctx.subagents.set(row.agentId, decode(row.recipientKind, row.recipientId, sessionId));
+  }
+  for (const read of [...reads.mains, ...reads.subs.map((s) => s.read)]) {
+    for (const msg of read.messages) upsertMessage(store, sessionId, msg, decide(msg, ctx, undecided), provider);
+    commitRead(store, read);
+  }
+  for (const row of provisionalRows(store, sessionId)) {
+    if (row.recipientKind === "pending") {
+      const msg = row.agentId === null ? { timestamp: row.at } : { timestamp: row.at, agentId: row.agentId };
+      setRecipient(store, row.messageId, decide(msg, ctx, undecided));
+    } else if (row.recipientKind === "turn") {
+      setRecipient(store, row.messageId, resolveRecipient(decode("turn", row.recipientId, sessionId), ctx));
+    }
+  }
+  const version = [...reads.mains].reverse().find((r) => r.version !== void 0)?.version;
+  if (version !== void 0 && session !== null) store.setSessionAgentVersion(sessionId, version.slice(0, 64));
+}
+var ledgerStage = (ctx) => {
+  const now = ctx.now();
+  for (const sessionId of sessionsToRead(ctx.store, new Date(now.getTime() - LEDGER_WINDOW_MS).toISOString())) {
+    if (ctx.remainingMs() <= 0) return { dueInMs: 0 };
+    const reads = readSession(ctx.store, sessionId, now);
+    ctx.guarded(() => recordSession(ctx.store, sessionId, reads));
+  }
+  ctx.guarded(() => foldSettled(ctx.store));
+  return {};
+};
+
+// hook-src/flusher/bounds.ts
+var import_node_fs6 = require("node:fs");
+var import_node_path7 = require("node:path");
+
+// hook-src/intake.ts
+var import_node_os = require("node:os");
+var import_node_path6 = require("node:path");
+
+// hook-src/identity.ts
 var import_node_crypto4 = require("node:crypto");
 var import_node_fs4 = require("node:fs");
 var import_node_path4 = require("node:path");
+var INSTANCE_FILE = "instance.json";
+function instanceId(baseUrl, workspaceId, apiKey) {
+  return (0, import_node_crypto4.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
+}
+function instanceDir(dataDir, id) {
+  return (0, import_node_path4.join)(dataDir, id);
+}
+function writeInstanceInfo(dir, who, now) {
+  (0, import_node_fs4.mkdirSync)(dir, { recursive: true });
+  const info = { base_url: who.baseUrl, workspace_id: who.workspaceId, created_at: now.toISOString() };
+  try {
+    (0, import_node_fs4.writeFileSync)((0, import_node_path4.join)(dir, INSTANCE_FILE), `${JSON.stringify(info)}
+`, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+}
+function readInstanceInfo(dir) {
+  try {
+    const raw = JSON.parse((0, import_node_fs4.readFileSync)((0, import_node_path4.join)(dir, INSTANCE_FILE), "utf8"));
+    if (!raw || typeof raw.base_url !== "string" || typeof raw.workspace_id !== "string" || typeof raw.created_at !== "string") {
+      return null;
+    }
+    return { base_url: raw.base_url, workspace_id: raw.workspace_id, created_at: raw.created_at };
+  } catch {
+    return null;
+  }
+}
+
+// hook-src/mapping.ts
+var import_node_crypto5 = require("node:crypto");
+var import_node_fs5 = require("node:fs");
+var import_node_path5 = require("node:path");
 var MAPPING_FILE = ".tickr.json";
 var DEFAULT_DESCRIPTION = "Claude Code session";
 var MAX_DESCRIPTION = 2e3;
@@ -1495,20 +2318,20 @@ function parseMapping(text) {
   const mapping = normalizeMapping(raw);
   if ("invalid" in mapping) return mapping;
   const json = canonicalJson(mapping);
-  return { mapping, json, hash: (0, import_node_crypto4.createHash)("sha256").update(json, "utf8").digest("hex") };
+  return { mapping, json, hash: (0, import_node_crypto5.createHash)("sha256").update(json, "utf8").digest("hex") };
 }
 function findMapping(cwd) {
-  let dir = (0, import_node_path4.resolve)(cwd);
+  let dir = (0, import_node_path5.resolve)(cwd);
   for (; ; ) {
     let text;
     try {
-      text = (0, import_node_fs4.readFileSync)((0, import_node_path4.join)(dir, MAPPING_FILE), "utf8");
+      text = (0, import_node_fs5.readFileSync)((0, import_node_path5.join)(dir, MAPPING_FILE), "utf8");
     } catch (error) {
       const code2 = error.code;
       if (code2 !== "ENOENT" && code2 !== "ENOTDIR") return { invalid: `${MAPPING_FILE} could not be read.` };
     }
     if (text !== void 0) return parseMapping(text);
-    const parent = (0, import_node_path4.dirname)(dir);
+    const parent = (0, import_node_path5.dirname)(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -1610,8 +2433,8 @@ function recordEvent(input, cfg, deadlineMs, opts = {}) {
     dirReady = false;
   }
   const room = deadlineMs - Date.now() > 2 * HOOK_BUSY_TIMEOUT_MS + 100;
-  const journalled = dirReady && room ? journalInStore((0, import_node_path5.join)(dir, DB_FILE), ev, now) : null;
-  if (journalled === null && !writeFallback((0, import_node_path5.join)(dir, FALLBACK_DIR), ev)) {
+  const journalled = dirReady && room ? journalInStore((0, import_node_path6.join)(dir, DB_FILE), ev, now) : null;
+  if (journalled === null && !writeFallback((0, import_node_path6.join)(dir, FALLBACK_DIR), ev)) {
     recordGap(dir);
     return {};
   }
@@ -1636,7 +2459,7 @@ var RETENTION_INTERVAL_MS = 24 * 60 * 6e4;
 var RETENTION_KEY = "retention_at";
 function fileSize(path) {
   try {
-    const st = (0, import_node_fs5.statSync)(path);
+    const st = (0, import_node_fs6.statSync)(path);
     return st.isFile() ? st.size : 0;
   } catch {
     return 0;
@@ -1646,14 +2469,14 @@ function dirSize(dir) {
   let total = 0;
   let names;
   try {
-    names = (0, import_node_fs5.readdirSync)(dir);
+    names = (0, import_node_fs6.readdirSync)(dir);
   } catch {
     return 0;
   }
   for (const name of names) {
-    const path = (0, import_node_path6.join)(dir, name);
+    const path = (0, import_node_path7.join)(dir, name);
     try {
-      const st = (0, import_node_fs5.statSync)(path);
+      const st = (0, import_node_fs6.statSync)(path);
       total += st.isDirectory() ? dirSize(path) : st.size;
     } catch {
     }
@@ -1661,7 +2484,7 @@ function dirSize(dir) {
   return total;
 }
 function instanceBytes(dir) {
-  return fileSize((0, import_node_path6.join)(dir, DB_FILE)) + fileSize((0, import_node_path6.join)(dir, `${DB_FILE}-journal`)) + dirSize((0, import_node_path6.join)(dir, FALLBACK_DIR));
+  return fileSize((0, import_node_path7.join)(dir, DB_FILE)) + fileSize((0, import_node_path7.join)(dir, `${DB_FILE}-journal`)) + dirSize((0, import_node_path7.join)(dir, FALLBACK_DIR));
 }
 function vacuum(store) {
   try {
@@ -1801,221 +2624,6 @@ function revisionsStage(sources = REVISION_SOURCES) {
     return due === null ? {} : { dueInMs: Math.max(0, due) };
   };
 }
-
-// hook-src/flusher/segmenter.ts
-var CLOCK_TOLERANCE_MS = 2 * 6e4;
-var MAX_SEGMENT_MS = 23 * 36e5;
-var DRIFT_DIAGNOSTIC = "clock drift or possible reboot";
-var BACKWARDS_DIAGNOSTIC = "wall clock moved backwards";
-var OPENING = /* @__PURE__ */ new Set(["UserPromptSubmit", "PostToolUse"]);
-function newSessionState(sessionId) {
-  return { sessionId, open: null, lastEventTime: null, lastUptimeS: null, lateEvents: 0 };
-}
-var ms = (iso2) => Date.parse(iso2);
-var iso = (t) => new Date(t).toISOString();
-function segmentBoundary(seg) {
-  const start = new Date(seg.startedAt);
-  const midnight = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate() + 1);
-  const max = start.getTime() + MAX_SEGMENT_MS;
-  return max < midnight ? { at: max, reason: "max_duration" } : { at: midnight, reason: "midnight" };
-}
-function judgeClock(s, wall, uptimeS) {
-  if (s.lastEventTime === null || s.lastUptimeS === null) return "normal";
-  const dWall = wall - ms(s.lastEventTime);
-  const dUptime = (uptimeS - s.lastUptimeS) * 1e3;
-  if (dWall < 0 && dUptime <= 0) return "late";
-  if (dUptime < 0) return "reboot";
-  const drift = dWall - dUptime;
-  if (drift > CLOCK_TOLERANCE_MS) return "forward";
-  if (drift < -CLOCK_TOLERANCE_MS) return "backward";
-  return "normal";
-}
-function later(a, b) {
-  return ms(b) > ms(a) ? b : a;
-}
-function applyLate(s, ev, wall, cfg) {
-  const open = s.open;
-  const activity = OPENING.has(ev.type) || ev.type === "Stop";
-  const inside = open !== null && wall >= ms(open.startedAt) && wall <= segmentBoundary(open).at && wall - ms(open.lastActivityAt) < cfg.idleMs && (!OPENING.has(ev.type) || ev.mappingVersionId === open.mappingVersionId);
-  if (!inside) return { state: { ...s, lateEvents: s.lateEvents + 1 }, changes: [] };
-  if (!activity || wall <= ms(open.lastActivityAt)) return { state: s, changes: [] };
-  const seg = { ...open, lastActivityAt: ev.localTime };
-  return {
-    state: { ...s, open: seg },
-    changes: [{ kind: "extend", id: seg.id, lastActivityAt: seg.lastActivityAt, working: seg.working, observedAt: seg.observedAt }]
-  };
-}
-function applyEvent(s, ev, cfg) {
-  const wall = ms(ev.localTime);
-  const verdict = judgeClock(s, wall, ev.uptimeS);
-  if (verdict === "late") return applyLate(s, ev, wall, cfg);
-  const changes = [];
-  let open = s.open;
-  const finalize = (seg, stoppedAt, reason, diagnostic) => {
-    changes.push(diagnostic === void 0 ? { kind: "finalize", id: seg.id, stoppedAt, reason } : { kind: "finalize", id: seg.id, stoppedAt, reason, diagnostic });
-    open = null;
-  };
-  const start = (startedAt, mappingVersionId, working) => {
-    open = { id: cfg.newId(), mappingVersionId, startedAt, lastActivityAt: ev.localTime, working, observedAt: ev.localTime };
-    changes.push({ kind: "open", seg: open });
-  };
-  if (open !== null && (verdict === "forward" || verdict === "backward")) {
-    finalize(open, open.lastActivityAt, "clock_jump", verdict === "forward" ? DRIFT_DIAGNOSTIC : BACKWARDS_DIAGNOSTIC);
-  }
-  if (open !== null && wall - ms(open.lastActivityAt) >= cfg.idleMs) finalize(open, open.lastActivityAt, "idle");
-  const current = open;
-  if (ev.type === "SessionEnd") {
-    if (current !== null) finalize(current, current.lastActivityAt, "session_end");
-  } else if (OPENING.has(ev.type) || ev.type === "Stop") {
-    const working = ev.type !== "Stop";
-    if (current === null) {
-      if (working && ev.mappingVersionId !== null) start(ev.localTime, ev.mappingVersionId, true);
-    } else {
-      const boundary = segmentBoundary(current);
-      const otherMapping = working && ev.mappingVersionId !== current.mappingVersionId;
-      if (otherMapping || wall > boundary.at) {
-        const at = wall > boundary.at ? iso(boundary.at) : ev.localTime;
-        finalize(current, at, wall > boundary.at ? boundary.reason : "mapping");
-        const mapping = otherMapping ? ev.mappingVersionId : current.mappingVersionId;
-        if (mapping !== null) start(at, mapping, working);
-      } else {
-        const seg = {
-          ...current,
-          lastActivityAt: later(current.lastActivityAt, ev.localTime),
-          working,
-          observedAt: later(current.observedAt, ev.localTime)
-        };
-        open = seg;
-        changes.push({ kind: "extend", id: seg.id, lastActivityAt: seg.lastActivityAt, working: seg.working, observedAt: seg.observedAt });
-      }
-    }
-  }
-  return { state: { ...s, open, lastEventTime: ev.localTime, lastUptimeS: ev.uptimeS }, changes };
-}
-function onWake(s, now, cfg) {
-  const open = s.open;
-  if (open === null || now.getTime() - ms(open.lastActivityAt) < cfg.idleMs) return { state: s, changes: [] };
-  return { state: { ...s, open: null }, changes: [{ kind: "finalize", id: open.id, stoppedAt: open.lastActivityAt, reason: "idle" }] };
-}
-function idleDueInMs(s, now, cfg) {
-  if (s.open === null) return null;
-  return Math.max(0, ms(s.open.lastActivityAt) + cfg.idleMs - now.getTime());
-}
-
-// hook-src/flusher/segmentation.ts
-var SEGMENTATION_BATCH = 500;
-var ACTIVE_SESSION = "active";
-function newSessionRow(sessionId) {
-  return { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, state: ACTIVE_SESSION, agentVersion: null, provider: null, lateEvents: 0 };
-}
-function toOpen(seg) {
-  return {
-    id: seg.id,
-    mappingVersionId: seg.mappingVersionId,
-    startedAt: seg.startedAt,
-    lastActivityAt: seg.lastActivityAt,
-    working: seg.working,
-    observedAt: seg.observedAt
-  };
-}
-function loadSessionState(store, sessionId) {
-  const row = store.getSession(sessionId) ?? newSessionRow(sessionId);
-  const open = store.openSegmentFor(sessionId);
-  return {
-    row,
-    state: {
-      ...newSessionState(sessionId),
-      open: open ? toOpen(open) : null,
-      lastEventTime: row.lastEventTime,
-      lastUptimeS: row.lastUptimeS,
-      lateEvents: row.lateEvents
-    }
-  };
-}
-function applyChanges(store, sessionId, changes) {
-  for (const c of changes) {
-    if (c.kind === "open") {
-      store.upsertSegment({
-        id: c.seg.id,
-        sessionId,
-        mappingVersionId: c.seg.mappingVersionId,
-        startedAt: c.seg.startedAt,
-        lastActivityAt: c.seg.lastActivityAt,
-        stoppedAt: c.seg.lastActivityAt,
-        working: c.seg.working,
-        observedAt: c.seg.observedAt,
-        final: false,
-        finalReason: null,
-        finalDiagnostic: null,
-        quality: "pending",
-        createdOnServer: false,
-        serverState: null,
-        lastRevision: 0
-      });
-      continue;
-    }
-    const row = store.getSegment(c.id);
-    if (row === null || row.final) continue;
-    if (c.kind === "extend") {
-      store.upsertSegment({ ...row, lastActivityAt: c.lastActivityAt, stoppedAt: c.lastActivityAt, working: c.working, observedAt: c.observedAt });
-    } else {
-      store.upsertSegment({ ...row, stoppedAt: c.stoppedAt, working: false, final: true, finalReason: c.reason, finalDiagnostic: c.diagnostic ?? null });
-    }
-  }
-}
-function segmentSession(store, sessionId, cfg, limit = SEGMENTATION_BATCH) {
-  const { row, state } = loadSessionState(store, sessionId);
-  const events = store.sessionEventsAfter(sessionId, row.lastEventSeq, limit);
-  if (events.length === 0) return 0;
-  let s = state;
-  let provider = row.provider;
-  for (const ev of events) {
-    if (row.state === ACTIVE_SESSION) {
-      const out = applyEvent(s, ev, cfg);
-      s = out.state;
-      applyChanges(store, sessionId, out.changes);
-    }
-    if (ev.provider !== null) provider = ev.provider;
-  }
-  store.upsertSession({
-    ...row,
-    lastEventSeq: events[events.length - 1].seq,
-    lastEventTime: s.lastEventTime,
-    lastUptimeS: s.lastUptimeS,
-    lateEvents: s.lateEvents,
-    provider
-  });
-  return events.length;
-}
-function finalizeIdle(store, now, idleMs) {
-  let due = null;
-  for (const seg of store.openSegments()) {
-    const { state } = loadSessionState(store, seg.sessionId);
-    const out = onWake(state, now, { idleMs });
-    applyChanges(store, seg.sessionId, out.changes);
-    const left = idleDueInMs(out.state, now, { idleMs });
-    if (left !== null) due = due === null ? left : Math.min(due, left);
-  }
-  return due;
-}
-function markClosedByServer(store, segmentId, serverState) {
-  const row = store.getSegment(segmentId);
-  if (row === null) return;
-  store.upsertSegment({ ...row, working: false, final: true, finalReason: row.final ? row.finalReason : "server_closed", serverState });
-}
-var segmentationStage = (ctx) => {
-  const idleMs = ctx.config.idleMinutes * 6e4;
-  const cfg = { idleMs, newId: () => uuidv7(ctx.now().getTime()) };
-  for (const sessionId of ctx.store.pendingEventSessions()) {
-    for (; ; ) {
-      if (ctx.remainingMs() <= 0) return { dueInMs: 0 };
-      const read = ctx.guarded(() => segmentSession(ctx.store, sessionId, cfg));
-      if (read < SEGMENTATION_BATCH) break;
-    }
-  }
-  const due = ctx.guarded(() => finalizeIdle(ctx.store, ctx.now(), idleMs));
-  return due === null ? {} : { dueInMs: due };
-};
 
 // hook-src/flusher/sender.ts
 var MAX_BACKOFF_MS = 5 * 6e4;
@@ -2279,10 +2887,11 @@ function applyMe(store, me, now) {
 }
 
 // hook-src/flusher/stages.ts
-var STAGE_NAMES = ["workspace", "segmentation", "revisions", "send", "bounds"];
+var STAGE_NAMES = ["workspace", "segmentation", "ledger", "revisions", "send", "bounds"];
 var PIPELINE = {
   workspace: workspaceStage(),
   segmentation: segmentationStage,
+  ledger: ledgerStage,
   revisions: revisionsStage(),
   send: sendStage(),
   bounds: boundsStage()
@@ -2291,14 +2900,14 @@ var PIPELINE = {
 // hook-src/flusher/run.ts
 var FLUSHER_BUSY_TIMEOUT_MS = 5e3;
 var WAKE_BUDGET_MS = 6e4;
-var realSleep = (ms2) => new Promise((resolve3) => setTimeout(resolve3, ms2));
+var realSleep = (ms3) => new Promise((resolve3) => setTimeout(resolve3, ms3));
 async function runFlusher(instanceDir2, deps) {
   const clock = deps.clock ?? (() => performance.now());
   const sleep = deps.sleep ?? realSleep;
   const boundary = (point) => deps.onBoundary?.(point);
   const nowIso = () => deps.now().toISOString();
   const endAt = clock() + deps.wakeBudgetMs;
-  const opened = openStore((0, import_node_path7.join)(instanceDir2, DB_FILE), { role: "flusher", busyTimeoutMs: deps.busyTimeoutMs ?? FLUSHER_BUSY_TIMEOUT_MS });
+  const opened = openStore((0, import_node_path8.join)(instanceDir2, DB_FILE), { role: "flusher", busyTimeoutMs: deps.busyTimeoutMs ?? FLUSHER_BUSY_TIMEOUT_MS });
   if (typeof opened === "string") return "newer_schema";
   const store = opened;
   try {
@@ -2318,7 +2927,7 @@ async function runFlusher(instanceDir2, deps) {
       guarded: (fn) => guarded(store, gen, nowIso(), fn),
       boundary
     };
-    const fallback = (0, import_node_path7.join)(instanceDir2, FALLBACK_DIR);
+    const fallback = (0, import_node_path8.join)(instanceDir2, FALLBACK_DIR);
     for (; ; ) {
       ctx.guarded(() => void 0);
       importFallback(store, gen, fallback, { now: deps.now, onCommitted: () => boundary("fallback_committed") });
@@ -2350,7 +2959,7 @@ async function runFlusher(instanceDir2, deps) {
 }
 
 // hook-src/io.ts
-var import_node_fs6 = require("node:fs");
+var import_node_fs7 = require("node:fs");
 var OPTIONAL_STRINGS = [
   "transcript_path",
   "prompt_id",
@@ -2378,10 +2987,10 @@ function toHookInput(raw) {
 function readHookInput(stdin, deadlineMs) {
   return new Promise((resolve3) => {
     const chunks = [];
-    let settled = false;
+    let settled2 = false;
     const finish = (value) => {
-      if (settled) return;
-      settled = true;
+      if (settled2) return;
+      settled2 = true;
       clearTimeout(timer);
       stdin.removeListener("data", onData);
       stdin.removeListener("end", onEnd);
@@ -2407,7 +3016,7 @@ function readHookInput(stdin, deadlineMs) {
   });
 }
 var writeStdout = (text) => {
-  (0, import_node_fs6.writeSync)(1, text);
+  (0, import_node_fs7.writeSync)(1, text);
 };
 function writeHookOutput(out, write = writeStdout) {
   if (!out.systemMessage) return;
@@ -2428,8 +3037,8 @@ function spawnFlusher(bundlePath, instanceDir2, env) {
 }
 
 // hook-src/status.ts
-var import_node_fs7 = require("node:fs");
-var import_node_path8 = require("node:path");
+var import_node_fs8 = require("node:fs");
+var import_node_path9 = require("node:path");
 var MAX_TERMINAL_LISTED = 20;
 var PAUSE_TEXT = {
   unauthorized: "the API key was refused",
@@ -2452,14 +3061,14 @@ function safeText(text, max = MAX_DIAGNOSTIC) {
 }
 function mtimeMs(path) {
   try {
-    return (0, import_node_fs7.statSync)(path).mtimeMs;
+    return (0, import_node_fs8.statSync)(path).mtimeMs;
   } catch {
     return 0;
   }
 }
 function fallbackCount(dir) {
   try {
-    return (0, import_node_fs7.readdirSync)((0, import_node_path8.join)(dir, FALLBACK_DIR)).filter((n) => n.endsWith(".json") && !n.startsWith(".")).length;
+    return (0, import_node_fs8.readdirSync)((0, import_node_path9.join)(dir, FALLBACK_DIR)).filter((n) => n.endsWith(".json") && !n.startsWith(".")).length;
   } catch {
     return 0;
   }
@@ -2494,7 +3103,7 @@ function viewInstance(dir, name, current) {
   const view = {
     host: host(info.base_url),
     workspace: "workspace not checked yet",
-    lastActivityMs: Math.max(mtimeMs((0, import_node_path8.join)(dir, DB_FILE)), mtimeMs((0, import_node_path8.join)(dir, FALLBACK_DIR)), Date.parse(info.created_at) || 0),
+    lastActivityMs: Math.max(mtimeMs((0, import_node_path9.join)(dir, DB_FILE)), mtimeMs((0, import_node_path9.join)(dir, FALLBACK_DIR)), Date.parse(info.created_at) || 0),
     workspaceId: info.workspace_id,
     current: current ? instanceId(current.baseUrl, info.workspace_id, current.apiKey) === name : null,
     lines: [],
@@ -2502,7 +3111,7 @@ function viewInstance(dir, name, current) {
   };
   let opened;
   try {
-    opened = openStore((0, import_node_path8.join)(dir, DB_FILE), { role: "hook", busyTimeoutMs: 1e3 });
+    opened = openStore((0, import_node_path9.join)(dir, DB_FILE), { role: "hook", busyTimeoutMs: 1e3 });
     if (opened === "not_migrated") view.lines.push("  nothing sent yet");
     else if (opened === "newer_schema") view.lines.push("  written by a newer version of the plugin");
     else describeStore(opened, view);
@@ -2518,16 +3127,16 @@ function viewInstance(dir, name, current) {
 function renderStatus(dataDir, current) {
   let names = [];
   try {
-    names = (0, import_node_fs7.readdirSync)(dataDir).filter((n) => {
+    names = (0, import_node_fs8.readdirSync)(dataDir).filter((n) => {
       try {
-        return (0, import_node_fs7.statSync)((0, import_node_path8.join)(dataDir, n, INSTANCE_FILE)).isFile();
+        return (0, import_node_fs8.statSync)((0, import_node_path9.join)(dataDir, n, INSTANCE_FILE)).isFile();
       } catch {
         return false;
       }
     });
   } catch {
   }
-  const views = names.map((n) => viewInstance((0, import_node_path8.join)(dataDir, n), n, current)).filter((v) => v !== null);
+  const views = names.map((n) => viewInstance((0, import_node_path9.join)(dataDir, n), n, current)).filter((v) => v !== null);
   if (views.length === 0) return "Tickr: nothing tracked yet. Link a repository with /tickr:link, then work in it.\n";
   for (const v of views) {
     if (v.current !== null) continue;
@@ -2583,8 +3192,8 @@ async function runFlush(dir, env) {
   if (!dir || loadSqlite() === null) return;
   const config = readPluginConfig(env);
   if ("problem" in config) return;
-  const instanceDir2 = (0, import_node_path9.resolve)(dir);
-  if (!instanceDir2.startsWith((0, import_node_path9.resolve)(config.dataDir) + import_node_path9.sep)) return;
+  const instanceDir2 = (0, import_node_path10.resolve)(dir);
+  if (!instanceDir2.startsWith((0, import_node_path10.resolve)(config.dataDir) + import_node_path10.sep)) return;
   const api = createAgentApi({ baseUrl: config.baseUrl, apiKey: config.apiKey, timeoutMs: REQUEST_TIMEOUT_MS });
   await runFlusher(instanceDir2, { now: () => /* @__PURE__ */ new Date(), uptime: import_node_os2.uptime, api, config, wakeBudgetMs: WAKE_BUDGET_MS });
 }
@@ -2600,7 +3209,7 @@ function runStatus(dir, env, write) {
     return;
   }
   const config = readPluginConfig({ ...env, CLAUDE_PLUGIN_DATA: dataDir });
-  write(renderStatus((0, import_node_path9.resolve)(dataDir), "problem" in config ? void 0 : { baseUrl: config.baseUrl, apiKey: config.apiKey }));
+  write(renderStatus((0, import_node_path10.resolve)(dataDir), "problem" in config ? void 0 : { baseUrl: config.baseUrl, apiKey: config.apiKey }));
 }
 async function main(argv, env, io = processIo()) {
   const [mode] = argv;

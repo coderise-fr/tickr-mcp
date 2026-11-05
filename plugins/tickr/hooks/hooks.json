@@ -80,6 +80,38 @@
           }
         ]
       }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "--no-warnings",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/dist/tickr-hook.cjs",
+              "SubagentStart"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "--no-warnings",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/dist/tickr-hook.cjs",
+              "SubagentStop"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

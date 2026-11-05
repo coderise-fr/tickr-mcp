@@ -462,6 +462,26 @@ export class Store {
     );
   }
 
+  /**
+   * The session's events attribution needs (ledger.ts): turn bounds, subagent start / stop,
+   * delegated entries and subagent transcripts, in journal order.
+   */
+  attributionEvents(sessionId: string): EventRow[] {
+    return this.all(
+      `SELECT * FROM events WHERE session_id = ? AND (type IN ('UserPromptSubmit', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop')
+         OR entry_id IS NOT NULL OR agent_transcript_path IS NOT NULL) ORDER BY seq`,
+      sessionId,
+    ).map(toEvent);
+  }
+
+  /** The main transcripts named by the session's events. */
+  transcriptPaths(sessionId: string): string[] {
+    return this.all(
+      "SELECT DISTINCT transcript_path FROM events WHERE session_id = ? AND transcript_path IS NOT NULL ORDER BY transcript_path",
+      sessionId,
+    ).map((r) => str(r.transcript_path));
+  }
+
   /** Sessions with journalled events after their segmentation cursor (sessions.last_event_seq). */
   pendingEventSessions(): string[] {
     return this.all(
@@ -697,8 +717,10 @@ export class Store {
   /**
    * Retention: deletes what is settled and older than cutoffIso — final segments without a
    * pending revision (and their last committed body), other targets' last committed bodies,
-   * events already segmented, sessions left without events nor segments, unused mapping
-   * versions, terminal items and shown notices. Returns the rows deleted.
+   * events already segmented, sessions left without events nor segments (then their ledger rows
+   * and totals, unless their recipient has a pending revision, their transcript offsets,
+   * subagents and Agent launches), unused mapping versions, terminal items and shown notices.
+   * Returns the rows deleted.
    */
   deleteRetired(cutoffIso: string): number {
     let n = 0;
@@ -725,6 +747,19 @@ export class Store {
          AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.session_id = sessions.session_id)`,
       cutoffIso,
     );
+    // Token data lives as long as its session (rescans need the id -> recipient map), and never
+    // goes while its recipient still has a revision to send.
+    n += this.run(
+      `DELETE FROM ledger WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ledger.session_id)
+         AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = ledger.recipient_kind AND o.target_id = ledger.recipient_id)`,
+    );
+    n += this.run(
+      `DELETE FROM ledger_totals WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ledger_totals.session_id)
+         AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = ledger_totals.recipient_kind AND o.target_id = ledger_totals.recipient_id)`,
+    );
+    for (const table of ["transcript_offsets", "subagents", "agent_launches"]) {
+      n += this.run(`DELETE FROM ${table} WHERE session_id IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ${table}.session_id)`);
+    }
     n += this.run(
       `DELETE FROM mapping_versions WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.mapping_version_id = mapping_versions.id)
          AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.mapping_version_id = mapping_versions.id)`,
