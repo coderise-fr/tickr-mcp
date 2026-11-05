@@ -1,6 +1,6 @@
 import { appendFileSync, writeFileSync } from "node:fs";
 import { uptime as osUptime } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { FALLBACK_DIR, writeFallback } from "../../hook-src/fallback.js";
 import { createAgentApi, OFFLINE_API } from "../../hook-src/flusher/api.js";
@@ -22,7 +22,7 @@ import { DB_FILE, type JournalEvent, openStore, type Store } from "../../hook-sr
 import { SCHEMA_VERSION } from "../../hook-src/store/schema.js";
 import { json, type RecordedRequest, startServer } from "../helpers/httpServer.js";
 import { buildChild, startChild } from "./helpers/children.js";
-import { cleanTempDirs, count, hookInput, instanceFor, listJson, pluginConfig, rawDb, tempDir, WS, writeMapping } from "./helpers/env.js";
+import { cleanTempDirs, count, hookInput, instanceFor, linkCheckout, listJson, pluginConfig, rawDb, tempDir, WS, writeMapping } from "./helpers/env.js";
 import { journalMapping } from "./helpers/stage.js";
 
 afterEach(() => cleanTempDirs());
@@ -52,7 +52,8 @@ function deps(dir: string, extra: Partial<FlusherDeps> = {}, onSleep: (mono: num
     now: () => new Date(),
     uptime: () => 1000,
     api: OFFLINE_API,
-    config: pluginConfig(dir),
+    // The plugin data directory holds the instance directory (and the links, consent.ts).
+    config: pluginConfig(dirname(dir)),
     wakeBudgetMs: 60_000,
     clock: () => mono,
     sleep: (ms) => {
@@ -522,6 +523,8 @@ describe("flusher processes", () => {
         const cwd = writeMapping(join(root, "repo"));
         const data = join(root, "data");
         const cfg = pluginConfig(data);
+      linkCheckout(data, cwd);
+        linkCheckout(data, cwd);
         const dir = instanceFor(data);
         const path = join(dir, DB_FILE);
         // Events 10 minutes old: the segments are open and not working, so their desired bodies
@@ -625,6 +628,7 @@ describe("flusher processes", () => {
       const cwd = writeMapping(join(root, "repo"));
       const data = join(root, "data");
       const cfg = pluginConfig(data);
+      linkCheckout(data, cwd);
       const dir = instanceFor(data);
       const api = createAgentApi({ baseUrl: server.baseUrl, apiKey: cfg.apiKey, timeoutMs: 3000 });
       // The transcript names the Claude Code version from the start: no creation waits for it.
@@ -741,6 +745,7 @@ describe("a segment's creation waiting for the agent version (hooks, ledger and 
     const root = tempDir();
     const cwd = writeMapping(join(root, "repo"));
     const cfg = pluginConfig(join(root, "data"));
+    linkCheckout(cfg.dataDir, cwd);
     const dir = instanceFor(cfg.dataDir);
     const transcript = join(root, "s-v.jsonl");
     writeFileSync(transcript, "");

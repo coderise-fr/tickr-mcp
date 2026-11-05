@@ -4,6 +4,7 @@
 import { uptime as osUptime } from "node:os";
 import { join } from "node:path";
 import type { PluginConfig } from "./config.js";
+import { linkKey } from "./consent.js";
 import { entryIdForEvent } from "./delegated.js";
 import { FALLBACK_DIR, recordGap, takeGaps, writeFallback } from "./fallback.js";
 import { isOwnerFresh } from "./flusher/owner.js";
@@ -50,6 +51,13 @@ export interface RecordOptions {
    * passes it; when absent, no check is made (tests of the journal itself).
    */
   linked?: (mappingDir: string, mappingHash: string) => boolean;
+  /**
+   * Called when the mapping is not linked, by any event but a tool call: revokes the links of the
+   * same checkout made for another content (consent.ts revokeStaleLinks), so that the flusher stops
+   * the sessions recorded under them. A tool call does not revoke: /tickr:link itself writes a new
+   * .tickr.json before linking it; the end of that turn, or the next prompt, does.
+   */
+  revokeStale?: (mappingDir: string, mappingHash: string) => void;
 }
 
 function enabled(value: string | undefined): boolean {
@@ -72,6 +80,7 @@ export function buildEvent(
   now: Date,
   uptimeS: number,
   env: NodeJS.ProcessEnv,
+  link?: string,
 ): JournalEvent {
   const ev: JournalEvent = {
     eventId: ulid(now.getTime()),
@@ -88,6 +97,7 @@ export function buildEvent(
   if (input.tool_use_id !== undefined) ev.toolUseId = input.tool_use_id;
   if (input.agent_id !== undefined) ev.agentId = input.agent_id;
   if (input.agent_transcript_path !== undefined) ev.agentTranscriptPath = input.agent_transcript_path;
+  if (link !== undefined) ev.linkKey = link;
   // A delegated entry (start_timer / create_entry of the plugin's MCP server): only its id is kept.
   const entryId = entryIdForEvent(input.hook_event_name, input.tool_name, input.tool_response);
   if (entryId !== null) ev.entryId = entryId;
@@ -133,6 +143,11 @@ export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: num
   }
 
   if (opts.linked && !opts.linked(found.dir, found.hash)) {
+    try {
+      if (input.hook_event_name !== "PostToolUse") opts.revokeStale?.(found.dir, found.hash);
+    } catch {
+      // Best effort: the next hook of this checkout tries again.
+    }
     return input.hook_event_name === "SessionStart" && input.source !== "resume" && input.source !== "compact"
       ? { systemMessage: NOT_LINKED_MESSAGE }
       : {};
@@ -140,7 +155,8 @@ export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: num
 
   const now = (opts.now ?? (() => new Date()))();
   const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
-  const ev = buildEvent(input, { hash: found.hash, json: found.json }, now, (opts.uptime ?? osUptime)(), env);
+  // The link the event is journalled under: the flusher stops the session once it is revoked.
+  const ev = buildEvent(input, { hash: found.hash, json: found.json }, now, (opts.uptime ?? osUptime)(), env, linkKey(found.dir, found.hash));
 
   let dirReady = true;
   try {

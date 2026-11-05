@@ -36,7 +36,7 @@ export function writeFallback(dir: string, ev: JournalEvent): boolean {
   }
 }
 
-const OPTIONAL = ["transcriptPath", "provider", "promptId", "toolName", "toolUseId", "entryId", "agentId", "agentTranscriptPath"] as const;
+const OPTIONAL = ["transcriptPath", "provider", "promptId", "toolName", "toolUseId", "entryId", "agentId", "agentTranscriptPath", "linkKey"] as const;
 
 function parseFallback(text: string): JournalEvent | null {
   let raw: unknown;

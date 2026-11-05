@@ -23,7 +23,7 @@ import type { StageRun } from "./stages.js";
 
 /** Events read per guarded transaction. */
 export const SEGMENTATION_BATCH = 500;
-/** Sessions in any other state (set by the workspace check, B8) consume events without segments. */
+/** Sessions in any other state (stopped_mismatch, unlinked: set by the workspace stage) consume events without segments. */
 export const ACTIVE_SESSION = "active";
 
 export type ServerClosedState = "detached" | "finalized";

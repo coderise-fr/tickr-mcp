@@ -52,7 +52,7 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
   "mcpServers": {
     "tickr": {
       "command": "npx",
-      "args": ["-y", "@coderise-fr/tickr-mcp@0.2.0"],
+      "args": ["-y", "@coderise-fr/tickr-mcp@0.2.1"],
       "env": { "TICKR_API_KEY": "YOUR_TICKR_API_KEY" }
     }
   }
@@ -60,12 +60,12 @@ Windows: `%APPDATA%\Claude\`), then restart the app:
 ```
 
 On Windows, if the client cannot find `npx`, use `"command": "cmd"` and
-`"args": ["/c", "npx", "-y", "@coderise-fr/tickr-mcp@0.2.0"]`.
+`"args": ["/c", "npx", "-y", "@coderise-fr/tickr-mcp@0.2.1"]`.
 
 **Claude Code:**
 
 ```bash
-claude mcp add tickr --scope user --env TICKR_API_KEY=YOUR_TICKR_API_KEY -- npx -y @coderise-fr/tickr-mcp@0.2.0
+claude mcp add tickr --scope user --env TICKR_API_KEY=YOUR_TICKR_API_KEY -- npx -y @coderise-fr/tickr-mcp@0.2.1
 ```
 
 `--scope user` (all your projects) and the default `local` scope keep the key
@@ -141,6 +141,16 @@ project (and optionally the task, tags and description), writes a
 and never committed. Each developer links their own checkout. A session in a
 directory without `.tickr.json` is not recorded.
 
+**Why linking is needed on each machine.** A `.tickr.json` can arrive with a clone or
+a pull, written by someone else. The plugin therefore tracks a checkout only after
+`/tickr:link` recorded, on your machine, that you linked that directory with that file
+content. After a `git pull` that changes `.tickr.json`, or if you move the checkout,
+run `/tickr:link` again (it offers to keep the existing file and only link it); until
+then the session says it is not tracked. Claude Code asks your permission to write the
+file and to record the link. A session already recorded stops being tracked once
+`.tickr.json` changes or its link is removed from the plugin data: nothing more of it
+is read or sent.
+
 **What is sent.** Start and end times, the project, task, tags and description
 from `.tickr.json`, whether the session is still working, and token counts per
 model. **Never sent:** your prompts, Claude's answers, file names, branch names,
@@ -160,6 +170,7 @@ The messages the plugin can show:
 | `clock is ahead of Tickr` | Correct the system clock; sending resumes by itself |
 | `.tickr.json names another workspace` | Run `/tickr:link` with a key of that workspace, or link again |
 | `not a member of the project named in .tickr.json` | Run `/tickr:link` and pick a project you belong to |
+| `no longer linked on this machine` | Run `/tickr:link` in that repository to track it again |
 | `local queue reached its size limit` | Tickr was unreachable for a long time; it resumes once the queue is sent |
 | `collection interrupted` | Some events could not be written locally (disk full or unwritable); check `/tickr:status` |
 

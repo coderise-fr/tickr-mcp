@@ -6,7 +6,7 @@
 import { uptime } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { readPluginConfig } from "./config.js";
-import { isLinked, recordLink } from "./consent.js";
+import { isLinked, recordLink, revokeStaleLinks } from "./consent.js";
 import { createAgentApi, REQUEST_TIMEOUT_MS } from "./flusher/api.js";
 import { DEBUG_ENV, DEBUG_FILE, debugLogger, runFlusher, WAKE_BUDGET_MS } from "./flusher/run.js";
 import { recordEvent } from "./intake.js";
@@ -74,6 +74,7 @@ async function runHook(event: HookEvent, env: NodeJS.ProcessEnv, io: HookIo): Pr
       env,
       startFlusher,
       linked: (mappingDir, hash) => isLinked(config.dataDir, mappingDir, hash),
+      revokeStale: (mappingDir, hash) => revokeStaleLinks(config.dataDir, mappingDir, hash),
     }), io.write);
 }
 
@@ -128,20 +129,18 @@ function runStatus(dir: string | undefined, env: NodeJS.ProcessEnv, write: Write
  */
 function runAccept(dataDir: string | undefined, checkoutDir: string | undefined, write: Write): void {
   if (!dataDir?.trim() || !checkoutDir?.trim()) {
-    write("Tickr: usage: accept <plugin data directory> <repository directory>
-");
+    write(line("Tickr: usage: accept <plugin data directory> <repository directory>"));
     return;
   }
   const found = findMapping(resolve(checkoutDir));
-  if (found === null) write("Tickr: no .tickr.json found; nothing was linked.
-");
-  else if ("invalid" in found) write(`Tickr: ${found.invalid} Nothing was linked.
-`);
-  else if (recordLink(resolve(dataDir), found.dir, found.hash)) write("Tickr: this checkout is linked on this machine. Tracking starts with the next session.
-");
-  else write("Tickr: the link could not be saved (is the plugin data directory writable?).
-");
+  if (found === null) write(line("Tickr: no .tickr.json found; nothing was linked."));
+  else if ("invalid" in found) write(line(`Tickr: ${found.invalid} Nothing was linked.`));
+  else if (recordLink(resolve(dataDir), found.dir, found.hash)) {
+    write(line("Tickr: this checkout is linked on this machine. Tracking starts with the next session."));
+  } else write(line("Tickr: the link could not be saved (is the plugin data directory writable?)."));
 }
+
+const line = (text: string): string => `${text}\n`;
 
 export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = processIo()): Promise<number> {
   const [mode] = argv;

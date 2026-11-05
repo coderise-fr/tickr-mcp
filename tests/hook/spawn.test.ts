@@ -19,7 +19,7 @@ import {
 import { instanceDir, instanceId } from "../../hook-src/identity.js";
 import { DB_FILE } from "../../hook-src/store/db.js";
 import { problem, startServer } from "../helpers/httpServer.js";
-import { cleanTempDirs, hookInput, KEY, listJson, pluginEnv, rawDb, tempDir, WS, writeMapping } from "./helpers/env.js";
+import { cleanTempDirs, hookInput, KEY, listJson, linkCheckout, pluginEnv, rawDb, tempDir, WS, writeMapping } from "./helpers/env.js";
 
 afterAll(() => cleanTempDirs());
 
@@ -144,6 +144,7 @@ describe("hook to flusher, through the built bundle", () => {
     const root = tempDir("tickr e2e ");
     const cwd = writeMapping(join(root, "repo"));
     const data = join(root, "plugin data");
+    linkCheckout(data, cwd);
     const dir = instanceDir(data, instanceId(tickr.baseUrl, WS, KEY));
 
     const result = await runHook("UserPromptSubmit", cwd, data);

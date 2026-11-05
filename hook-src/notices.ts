@@ -9,7 +9,8 @@ export type NoticeKind =
   | "segments_disabled"
   | "clock_skew"
   | "workspace_mismatch"
-  | "not_project_member";
+  | "not_project_member"
+  | "unlinked";
 
 const MESSAGES: Record<NoticeKind, string> = {
   intake_paused:
@@ -21,6 +22,8 @@ const MESSAGES: Record<NoticeKind, string> = {
   workspace_mismatch:
     "Tickr: .tickr.json names another workspace than the API key's. This session is not tracked; run /tickr:link.",
   not_project_member: "Tickr: you are not a member of the project named in .tickr.json. Run /tickr:link to pick another one.",
+  unlinked:
+    "Tickr: this repository is no longer linked on this machine, so its session stopped being tracked. Run /tickr:link to link it again.",
 };
 
 export function noticeMessage(kind: string): string {

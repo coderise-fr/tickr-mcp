@@ -129,9 +129,50 @@ describe("schema v2", () => {
     );
     v1.close();
     const store = flusherStore(path);
-    expect(store.schemaVersion()).toBe(2);
+    expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
     expect(store.eventsAfter(0)).toEqual([expect.objectContaining({ eventId: "E1", agentId: null, agentTranscriptPath: null })]);
     store.close();
+  });
+});
+
+describe("schema v3", () => {
+  it("migrates a v2 store in place: every row is kept, events gain link_key (null: never judged)", () => {
+    const path = join(tempDir(), DB_FILE);
+    const v2 = rawDb(path);
+    migrate(v2, MIGRATIONS.slice(0, 2));
+    expect(userVersion(v2)).toBe(2);
+    v2.exec(`
+      INSERT INTO mapping_versions (id, hash, normalized_json) VALUES (1, 'h', '{"projectId":"p"}');
+      INSERT INTO events (event_id, session_id, type, local_time, uptime_s, mapping_version_id, agent_id)
+        VALUES ('E1', 's-1', 'UserPromptSubmit', '2026-11-05T10:00:00.000Z', 1, 1, 'a-1');
+      INSERT INTO sessions (session_id, last_event_seq, state) VALUES ('s-1', 1, 'active');
+      INSERT INTO segments (id, session_id, mapping_version_id, started_at, last_activity_at, stopped_at, working, observed_at)
+        VALUES ('g-1', 's-1', 1, '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', 1, '2026-11-05T10:00:00.000Z');
+      INSERT INTO outbox (target_kind, target_id, revision, body_json, next_attempt_at) VALUES ('segment', 'g-1', 1, '{}', '2026-11-05T10:00:00.000Z');
+      INSERT INTO ledger (message_id, session_id, recipient_kind, provider, model, at) VALUES ('m-1', 's-1', 'segment', 'anthropic', 'x', '2026-11-05T10:00:00.000Z');
+    `);
+    v2.close();
+    const store = flusherStore(path);
+    expect(store.schemaVersion()).toBe(3);
+    expect(SCHEMA_VERSION).toBe(3);
+    expect(store.eventsAfter(0)).toEqual([expect.objectContaining({ eventId: "E1", agentId: "a-1", mappingVersionId: 1, linkKey: null })]);
+    expect(store.lastLinkKey("s-1")).toBeNull();
+    expect(store.getSession("s-1")).toMatchObject({ state: "active", lastEventSeq: 1 });
+    expect(store.getSegment("g-1")).toMatchObject({ sessionId: "s-1", working: true });
+    expect(store.pendingOutboxCount()).toBe(1);
+    expect(count(store.db, "ledger")).toBe(1);
+    store.journal(journalEvent("E2", { linkKey: "k" }));
+    expect(store.lastLinkKey("s-1")).toBe("k");
+    store.close();
+  });
+
+  it("a hook facing a v2 store (not migrated yet by the flusher) writes a fallback file", () => {
+    const { cwd, dir, dbPath, cfg } = linked();
+    const db = rawDb(dbPath);
+    db.exec("PRAGMA user_version = 2");
+    db.close();
+    recordEvent(hookInput("UserPromptSubmit", cwd), cfg, Date.now() + 1000);
+    expect(listJson(join(dir, "fallback"))).toHaveLength(1);
   });
 
   it("a hook facing a v1 store (not migrated yet by the flusher) writes a fallback file", () => {

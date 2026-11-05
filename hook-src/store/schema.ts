@@ -3,7 +3,7 @@
 // user_version than its own code never writes.
 import type { DatabaseSync } from "node:sqlite";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** Step i brings the schema from version i to version i + 1. */
 export type MigrationStep = (db: DatabaseSync) => void;
@@ -190,7 +190,15 @@ CREATE TABLE usage_snapshots (
 );
 `;
 
-export const MIGRATIONS: readonly MigrationStep[] = [(db) => db.exec(V1), (db) => db.exec(V2)];
+// v3: the link of each event (consent.ts linkKey): the key under which this machine linked the
+// checkout's .tickr.json when the hook journalled it (a hash: no path). The flusher stops a session
+// whose last event's link was revoked since (flusher/workspace.ts checkLinks). NULL for the events
+// journalled before v3: they are never judged.
+const V3 = `
+ALTER TABLE events ADD COLUMN link_key TEXT NULL;
+`;
+
+export const MIGRATIONS: readonly MigrationStep[] = [(db) => db.exec(V1), (db) => db.exec(V2), (db) => db.exec(V3)];
 
 export function userVersion(db: DatabaseSync): number {
   const row = db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.1 — 2026-11-05
+
+- Security: zod 4.6.7 (an advisory on memory exhaustion while validating very large
+  collections) and updated transitive dependencies; no runtime dependency has a known
+  advisory left.
+
+## Plugin `tickr` 0.1.1 — 2026-11-05
+
+- Security: a `.tickr.json` that arrives with a clone or a pull is no longer trusted
+  by itself. A checkout is tracked only after `/tickr:link` recorded, on this machine,
+  that this directory and this file content were linked; a changed file or a moved
+  checkout must be linked again. Sessions in an unlinked checkout are not tracked and
+  say so once at the start.
+- Security: revoking a link also stops the sessions already recorded under it: once
+  `.tickr.json` changed or the link was removed, nothing more of the session is read
+  or sent (store schema v3). Links are stored independently, so two links recorded
+  at once are both kept. Keeping an existing `.tickr.json` in `/tickr:link` still
+  links it on this machine.
+- Security: `/tickr:link` no longer pre-authorises file reads and writes, and
+  `/tickr:status` no longer pre-authorises arbitrary `node` commands; Claude Code asks
+  before the link is written and recorded.
+- A `.tickr.json` larger than 64 KB or that is not a regular file is refused.
+- Bundles MCP server 0.2.1.
+- **Existing users:** run `/tickr:link` once in each linked repository after updating.
+
 ## Plugin `tickr` 0.1.0 — 2026-11-05
 
 - New Claude Code plugin (marketplace `tickr-mcp`, tag `plugin-v0.1.0`): records

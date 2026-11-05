@@ -1,6 +1,7 @@
 // The flusher pipeline, run in this order on every pass after the fallback import:
 //
-//   workspace     GET /me once per instance: workspace check and clock skew
+//   workspace     link check of the sessions (consent.ts), then GET /me once per instance:
+//                 workspace check and clock skew
 //   segmentation  events -> segments (pure reducer, flusher/segmenter.ts)
 //   ledger        transcripts -> per-message ledger and attribution (ledger.ts, attribution.ts)
 //   revisions     desired state -> immutable outbox revisions (flusher/revisions.ts)

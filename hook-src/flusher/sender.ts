@@ -25,7 +25,7 @@ import type { OutboxRow, Store, TargetKind } from "../store/db.js";
 import { type AgentApi, type PauseReason, REQUEST_TIMEOUT_MS, type SendOutcome, type UsageBody } from "./api.js";
 import { guarded } from "./owner.js";
 import type { SegmentBody } from "./revisions.js";
-import { markClosedByServer } from "./segmentation.js";
+import { ACTIVE_SESSION, markClosedByServer } from "./segmentation.js";
 import type { FlusherBoundary, StageRun } from "./stages.js";
 
 export const MAX_BACKOFF_MS = 5 * 60_000;
@@ -41,6 +41,8 @@ export const AGENT_VERSION_GRACE_MS = 2 * 60_000;
 export const SEND_BATCH = 50;
 /** Session state of a session whose .tickr.json names another workspace than the key's. */
 export const STOPPED_MISMATCH = "stopped_mismatch";
+/** Session state of a session whose checkout is no longer linked on this machine (consent.ts). */
+export const UNLINKED = "unlinked";
 
 export const PAUSE_KEY = "send_pause";
 export const WORKSPACE_KEY = "workspace";
@@ -150,6 +152,44 @@ export function stopMismatchedSession(store: Store, sessionId: string, now: Date
     });
   }
   addNotice(store, "workspace_mismatch", now);
+}
+
+/**
+ * Stops tracking one session whose checkout is no longer linked on this machine (inside a guarded
+ * transaction): state unlinked (segmentation then consumes its events without segments, and the
+ * ledger no longer reads its transcripts), its open segment closed locally, every segment and
+ * delegated entry terminal with its outbox rows dropped, one notice. Nothing of the session is
+ * sent again; a later relink reactivates the session (reactivateLinkedSession), whose next
+ * activity opens a new segment.
+ */
+export function stopUnlinkedSession(store: Store, sessionId: string, now: Date): void {
+  const row = store.getSession(sessionId);
+  if (row?.state === UNLINKED) return;
+  store.upsertSession({
+    ...(row ?? { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, agentVersion: null, provider: null, lateEvents: 0 }),
+    state: UNLINKED,
+  });
+  const at = now.toISOString();
+  const diagnostic = "The repository is no longer linked on this machine.";
+  for (const seg of store.segmentsForSession(sessionId)) {
+    if (!seg.final) store.upsertSegment({ ...seg, working: false, final: true, finalReason: UNLINKED });
+    store.deleteOutboxFor("segment", seg.id);
+    if (store.isTerminal("segment", seg.id)) continue;
+    store.addTerminal({ targetKind: "segment", targetId: seg.id, revision: seg.lastRevision > 0 ? seg.lastRevision : null, code: UNLINKED, at, diagnostic });
+  }
+  for (const entry of store.delegatedForSession(sessionId)) {
+    store.deleteOutboxFor("delegated", entry.entryId);
+    if (store.isTerminal("delegated", entry.entryId)) continue;
+    const revision = store.getLastCommitted("delegated", entry.entryId)?.revision ?? null;
+    store.addTerminal({ targetKind: "delegated", targetId: entry.entryId, revision, code: UNLINKED, at, diagnostic });
+  }
+  addNotice(store, UNLINKED, now);
+}
+
+/** The checkout of an unlinked session was linked again: the session is tracked again (never a stopped_mismatch one). */
+export function reactivateLinkedSession(store: Store, sessionId: string): void {
+  const row = store.getSession(sessionId);
+  if (row?.state === UNLINKED) store.upsertSession({ ...row, state: ACTIVE_SESSION });
 }
 
 function recordTerminal(store: Store, row: OutboxRow, code: string, diagnostic: string, now: Date): void {

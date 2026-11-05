@@ -45,6 +45,8 @@ export interface EventRow {
   agentId: string | null;
   /** The subagent's own transcript (hook input agent_transcript_path). */
   agentTranscriptPath: string | null;
+  /** The link of the checkout's .tickr.json (consent.ts linkKey); null before schema v3. */
+  linkKey: string | null;
 }
 
 export type NewEventRow = Omit<EventRow, "seq">;
@@ -68,6 +70,7 @@ export interface JournalEvent {
   entryId?: string;
   agentId?: string;
   agentTranscriptPath?: string;
+  linkKey?: string;
 }
 
 export interface SessionRow {
@@ -209,6 +212,7 @@ function toEvent(r: Row): EventRow {
     entryId: optStr(r.entry_id),
     agentId: optStr(r.agent_id),
     agentTranscriptPath: optStr(r.agent_transcript_path),
+    linkKey: optStr(r.link_key),
   };
 }
 
@@ -424,8 +428,8 @@ export class Store {
     return (
       this.run(
         `INSERT INTO events (event_id, session_id, type, local_time, uptime_s, mapping_version_id, transcript_path, provider,
-           prompt_id, tool_name, tool_use_id, entry_id, agent_id, agent_transcript_path)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING`,
+           prompt_id, tool_name, tool_use_id, entry_id, agent_id, agent_transcript_path, link_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING`,
         ev.eventId,
         ev.sessionId,
         ev.type,
@@ -440,6 +444,7 @@ export class Store {
         ev.entryId,
         ev.agentId,
         ev.agentTranscriptPath,
+        ev.linkKey,
       ) === 1
     );
   }
@@ -469,6 +474,7 @@ export class Store {
       entryId: ev.entryId ?? null,
       agentId: ev.agentId ?? null,
       agentTranscriptPath: ev.agentTranscriptPath ?? null,
+      linkKey: ev.linkKey ?? null,
     });
     if (inserted && ev.entryId !== undefined) {
       const seq = optNum(this.get("SELECT seq FROM events WHERE event_id = ?", ev.eventId)?.seq);
@@ -559,6 +565,14 @@ export class Store {
       `SELECT DISTINCT e.session_id FROM events e LEFT JOIN sessions s ON s.session_id = e.session_id
        WHERE e.seq > COALESCE(s.last_event_seq, 0) ORDER BY e.session_id`,
     ).map((r) => str(r.session_id));
+  }
+
+  /**
+   * The link key of the session's last journalled event: null when the session has no event left,
+   * or when that event was journalled before schema v3.
+   */
+  lastLinkKey(sessionId: string): string | null {
+    return optStr(this.get("SELECT link_key FROM events WHERE session_id = ? ORDER BY seq DESC LIMIT 1", sessionId)?.link_key);
   }
 
   maxEventSeq(): number {

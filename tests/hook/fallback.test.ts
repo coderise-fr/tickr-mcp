@@ -58,6 +58,18 @@ describe("writeFallback", () => {
     store.close();
   });
 
+  it("a fallback file carries the event's link to the store", () => {
+    const dir = tempDir();
+    const ev = event({ linkKey: LINK });
+    writeFallback(join(dir, FALLBACK_DIR), ev);
+    const store = flusherStore(join(dir, DB_FILE));
+    const gen = claimOwnership(store, 1, new Date().toISOString())!;
+    expect(importFallback(store, gen, join(dir, FALLBACK_DIR))).toBe(1);
+    expect(store.eventsAfter(0)[0]).toMatchObject({ eventId: ev.eventId, linkKey: LINK });
+    expect(store.lastLinkKey(ev.sessionId)).toBe(LINK);
+    store.close();
+  });
+
   it("a hook's fallback file holds no key and no prompt text", () => {
     const root = tempDir();
     const cwd = writeMapping(join(root, "repo"));
@@ -77,6 +89,8 @@ describe("writeFallback", () => {
     expect(writeFallback(join(root, "file", FALLBACK_DIR), event())).toBe(false);
   });
 });
+
+const LINK = `${"a".repeat(32)}-${"b".repeat(64)}`;
 
 describe("importFallback", () => {
   it("fallback carrying a mapping never seen ⇒ version created", () => {

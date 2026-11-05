@@ -2,7 +2,9 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
+import { isLinked, linkKey } from "../../hook-src/consent.js";
 import { isOwnerFresh, OWNER_STALE_MS } from "../../hook-src/flusher/owner.js";
+import { findMapping, type FoundMapping } from "../../hook-src/mapping.js";
 import { INTAKE_PAUSED_KEY, providerFrom, recordEvent } from "../../hook-src/intake.js";
 import { main } from "../../hook-src/main.js";
 import { DB_FILE, openStore, type Store } from "../../hook-src/store/db.js";
@@ -12,6 +14,7 @@ import {
   hookInput,
   instanceFor,
   KEY,
+  linkCheckout,
   listJson,
   OTHER_PROJECT,
   pluginConfig,
@@ -33,6 +36,7 @@ function linked(migrated = true) {
   const root = tempDir();
   const cwd = writeMapping(join(root, "repo"));
   const data = join(root, "data");
+  linkCheckout(data, cwd);
   const dir = instanceFor(data);
   const dbPath = join(dir, DB_FILE);
   if (migrated) flusherStore(dbPath).close();
@@ -76,6 +80,21 @@ describe("recordEvent", () => {
       taskId: null,
       workspaceId: WS,
     });
+    store.close();
+  });
+
+  it("journals the link of the checkout's .tickr.json with every event (a key, no path)", () => {
+    const { cwd, data, dbPath, cfg } = linked();
+    const nested = join(cwd, "src", "deep");
+    mkdirSync(nested, { recursive: true });
+    recordEvent(hookInput("UserPromptSubmit", nested), cfg, soon(), { linked: (dir, hash) => isLinked(data, dir, hash) });
+    const store = flusherStore(dbPath);
+    const found = findMapping(cwd) as FoundMapping;
+    const [ev] = store.eventsAfter(0);
+    expect(ev).toMatchObject({ linkKey: linkKey(found.dir, found.hash) });
+    expect(store.lastLinkKey("s-1")).toBe(linkKey(found.dir, found.hash));
+    expect(store.lastLinkKey("s-unknown")).toBeNull();
+    expect(JSON.stringify(store.eventsAfter(0))).not.toContain(JSON.stringify(cwd).slice(1, -1));
     store.close();
   });
 

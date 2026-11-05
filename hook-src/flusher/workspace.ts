@@ -7,8 +7,13 @@
 // - A paused instance re-probes at most once an hour (PROBE_INTERVAL_MS).
 // - Sessions whose mapping names another workspace than the key's stop being tracked
 //   (sender.stopMismatchedSession): their segments go terminal, one notice.
+// - First of all, on every pass and offline too: sessions whose last event's link was revoked
+//   since (its link file deleted, or removed by a hook that found the checkout's .tickr.json
+//   changed, consent.ts) stop being tracked (checkLinks, sender.stopUnlinkedSession) before
+//   segmentation, the ledger or the sender touch them again; a relinked one is tracked again.
 //
 // The stage never halts the pass: segmentation, revisions and bounds run while offline or paused.
+import { isLinkKeyActive } from "../consent.js";
 import { parseStoredMapping } from "../mapping.js";
 import type { Store } from "../store/db.js";
 import type { MeInfo } from "./api.js";
@@ -18,12 +23,16 @@ import {
   PROBE_INTERVAL_MS,
   pauseSending,
   readPause,
+  reactivateLinkedSession,
   readWorkspace,
   resumeSending,
   retryDelayMs,
   stopMismatchedSession,
+  stopUnlinkedSession,
+  UNLINKED,
   writeWorkspace,
 } from "./sender.js";
+import { ACTIVE_SESSION } from "./segmentation.js";
 import type { StageRun } from "./stages.js";
 
 /** A local clock further ahead of Tickr than this pauses sending. */
@@ -32,6 +41,8 @@ export const CLOCK_SKEW_LIMIT_MS = 4 * 60_000;
 export const PROBE_RETRY_KEY = "workspace_probe_retry";
 /** meta: the last event seq checked for a workspace mismatch. */
 export const MISMATCH_CURSOR_KEY = "workspace_checked_seq";
+/** Sessions whose last event is older than this, and that have no open segment, are not checked for their link. */
+export const LINK_CHECK_WINDOW_MS = 48 * 3_600_000;
 
 interface ProbeRetry {
   attempts: number;
@@ -75,9 +86,35 @@ export function checkMismatch(store: Store, workspaceId: string, now: Date): voi
   store.setMeta(MISMATCH_CURSOR_KEY, String(last));
 }
 
+/**
+ * Judges the link of each session that may still be collected or sent: active or unlinked, with
+ * an event since LINK_CHECK_WINDOW_MS or an open segment, or with events not segmented yet. The
+ * link of its last event decides: revoked, the session stops (stopUnlinkedSession); holding again
+ * for an unlinked session, it is tracked again. A last event journalled before schema v3 (no link)
+ * is not judged. Runs inside a guarded transaction.
+ */
+export function checkLinks(store: Store, dataDir: string, now: Date): void {
+  const since = new Date(now.getTime() - LINK_CHECK_WINDOW_MS).toISOString();
+  const candidates = new Set<string>(store.pendingEventSessions());
+  for (const s of store.listSessions()) {
+    if (s.state !== ACTIVE_SESSION && s.state !== UNLINKED) continue;
+    if ((s.lastEventTime !== null && s.lastEventTime >= since) || store.openSegmentFor(s.sessionId) !== null) candidates.add(s.sessionId);
+  }
+  for (const sessionId of candidates) {
+    const state = store.getSession(sessionId)?.state ?? ACTIVE_SESSION;
+    if (state !== ACTIVE_SESSION && state !== UNLINKED) continue;
+    const key = store.lastLinkKey(sessionId);
+    if (key === null) continue;
+    const holds = isLinkKeyActive(dataDir, key);
+    if (!holds && state === ACTIVE_SESSION) stopUnlinkedSession(store, sessionId, now);
+    else if (holds && state === UNLINKED) reactivateLinkedSession(store, sessionId);
+  }
+}
+
 export function workspaceStage(opts: { random?: () => number } = {}): StageRun {
   return async (ctx) => {
     const { store } = ctx;
+    ctx.guarded(() => checkLinks(store, ctx.config.dataDir, ctx.now()));
     if (probeDue(store, ctx.now())) {
       const answer = await ctx.api.me();
       const now = ctx.now();
