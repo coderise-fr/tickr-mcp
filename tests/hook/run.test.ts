@@ -1,3 +1,4 @@
+import { appendFileSync, writeFileSync } from "node:fs";
 import { uptime as osUptime } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -13,7 +14,7 @@ import {
   SEND_RESERVE_MS,
   SUCCESSOR_MIN_INTERVAL_MS,
 } from "../../hook-src/flusher/run.js";
-import { writeWorkspace } from "../../hook-src/flusher/sender.js";
+import { AGENT_VERSION_GRACE_MS, writeWorkspace } from "../../hook-src/flusher/sender.js";
 import { type FlusherBoundary, STAGE_NAMES, type StageName, type StageRun } from "../../hook-src/flusher/stages.js";
 import { ulid } from "../../hook-src/ids.js";
 import { recordEvent } from "../../hook-src/intake.js";
@@ -67,6 +68,11 @@ function deps(dir: string, extra: Partial<FlusherDeps> = {}, onSleep: (mono: num
 }
 
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+/** A user line of a transcript, with the Claude Code version that wrote it. */
+function versionLine(sessionId: string, at: Date, version = "2.1.300"): string {
+  return `${JSON.stringify({ type: "user", timestamp: at.toISOString(), sessionId, version, message: { role: "user", content: "<redacted>" } })}\n`;
+}
 
 describe("runFlusher", () => {
   it("creates and migrates the store, imports the fallback files, runs the stages in order and releases the instance", async () => {
@@ -621,12 +627,16 @@ describe("flusher processes", () => {
       const cfg = pluginConfig(data);
       const dir = instanceFor(data);
       const api = createAgentApi({ baseUrl: server.baseUrl, apiKey: cfg.apiKey, timeoutMs: 3000 });
+      // The transcript names the Claude Code version from the start: no creation waits for it.
+      const transcript = join(root, "s-live.jsonl");
+      writeFileSync(transcript, versionLine("s-live", now()));
       // A hook that sees no fresh owner starts a flusher: it runs once the current one is done.
       let toStart = 0;
       const at: Record<string, number> = {};
       const fire = (name: string) => {
         at[name] = mono;
-        recordEvent(hookInput(name, cwd, { session_id: "s-live" }), cfg, Date.now() + 1000, { now, uptime, startFlusher: () => void (toStart += 1) });
+        const input = hookInput(name, cwd, { session_id: "s-live", transcript_path: transcript });
+        recordEvent(input, cfg, Date.now() + 1000, { now, uptime, startFlusher: () => void (toStart += 1) });
       };
       const later = [
         { after: 2500, name: "PostToolUse" },
@@ -704,5 +714,145 @@ describe("flusher processes", () => {
     const reopened = flusherStore(path);
     expect(reopened.eventsAfter(0)).toHaveLength(1);
     reopened.close();
+  });
+});
+
+describe("a segment's creation waiting for the agent version (hooks, ledger and sender together)", () => {
+  /**
+   * One session driven by hooks with fake clocks: the transcript is empty until `withVersion()`
+   * appends a line with the Claude Code version. Every PUT is recorded with its time.
+   */
+  async function rig() {
+    let mono = 0;
+    const base = Date.now();
+    const now = () => new Date(base + mono);
+    const puts: { at: number; agent: string; revision: number; final: boolean }[] = [];
+    const seen = new Set<string>();
+    const server = await startServer((req: RecordedRequest) => {
+      if (req.url === "/api/v1/me") {
+        return json(200, { user: { id: "u", displayName: "D", email: "d@example.test", timezone: "UTC" }, workspace: { id: WS, name: "Acme", timezone: "UTC" }, role: "workspace_user", serverTime: now().toISOString() });
+      }
+      const body = JSON.parse(req.body) as { revision: number; final: boolean };
+      puts.push({ at: mono, agent: String(req.headers["tickr-agent"]), revision: body.revision, final: body.final });
+      const created = !seen.has(req.url);
+      seen.add(req.url);
+      return json(created ? 201 : 200, { id: "e", agentFinalized: false, agentDetached: false });
+    });
+    const root = tempDir();
+    const cwd = writeMapping(join(root, "repo"));
+    const cfg = pluginConfig(join(root, "data"));
+    const dir = instanceFor(cfg.dataDir);
+    const transcript = join(root, "s-v.jsonl");
+    writeFileSync(transcript, "");
+    const api = createAgentApi({ baseUrl: server.baseUrl, apiKey: cfg.apiKey, timeoutMs: 3000 });
+    const started = { flushers: 0 };
+    let onSleep: (mono: number) => void = () => undefined;
+    const handovers: number[] = [];
+    return {
+      puts,
+      handovers,
+      started,
+      close: () => server.close(),
+      setMono: (ms: number) => (mono = ms),
+      mono: () => mono,
+      finals: () => puts.filter((p) => p.final).length,
+      onSleep: (fn: (mono: number) => void) => (onSleep = fn),
+      withVersion: () => appendFileSync(transcript, versionLine("s-v", now())),
+      fire: (name: string) =>
+        recordEvent(hookInput(name, cwd, { session_id: "s-v", transcript_path: transcript }), cfg, Date.now() + 1000, {
+          now,
+          uptime: () => 1000 + mono / 1000,
+          startFlusher: () => void (started.flushers += 1),
+        }),
+      /** Runs one flusher; returns how many passes it ran. */
+      run: async () => {
+        let passes = 0;
+        const outcome = await runFlusher(dir, {
+          now,
+          uptime: () => 1000 + mono / 1000,
+          api,
+          config: cfg,
+          wakeBudgetMs: 60_000,
+          clock: () => mono,
+          sleep: (ms) => {
+            mono += ms;
+            onSleep(mono);
+            return Promise.resolve();
+          },
+          handover: (ms) => void handovers.push(ms),
+          debug: (rec) => void (rec.step === "pass" && (passes += 1)),
+        });
+        expect(outcome).toBe("done");
+        return passes;
+      },
+    };
+  }
+
+  it("held while the version is unknown (one pass, a successor at the end of the grace), then sent with the version the next event brings", async () => {
+    const r = await rig();
+    try {
+      r.fire("SessionStart");
+      r.fire("UserPromptSubmit");
+      expect(await r.run()).toBe(1);
+      expect(r.puts).toEqual([]);
+      expect(r.handovers).toEqual([AGENT_VERSION_GRACE_MS]);
+
+      // PostToolUse 20 s later: the transcript now names the version; the flusher it starts sends.
+      r.setMono(20_000);
+      r.withVersion();
+      const before = r.started.flushers;
+      r.fire("PostToolUse");
+      expect(r.started.flushers).toBe(before + 1); // the instance was released: its hook starts one
+      expect(await r.run()).toBeLessThanOrEqual(4);
+      expect(r.puts[0]).toEqual({ at: 20_000, agent: "claude-code/2.1.300", revision: 1, final: false });
+
+      // Stop and SessionEnd: the final revision goes, every request names the version.
+      for (const [name, at] of [["Stop", 90_000], ["SessionEnd", 100_000]] as const) {
+        r.setMono(Math.max(at, r.mono()));
+        r.fire(name);
+        await r.run();
+      }
+      expect(r.finals()).toBe(1);
+      expect(r.puts.length).toBeGreaterThan(1);
+      expect(r.puts.every((p) => p.agent === "claude-code/2.1.300")).toBe(true);
+    } finally {
+      await r.close();
+    }
+  });
+
+  it("no version ever: the successor at the end of the grace sends the creation with claude-code/unknown", async () => {
+    const r = await rig();
+    try {
+      r.fire("UserPromptSubmit");
+      expect(await r.run()).toBe(1);
+      r.setMono(r.handovers[0]!);
+      expect(await r.run()).toBeLessThanOrEqual(3);
+      expect(r.puts[0]).toEqual({ at: AGENT_VERSION_GRACE_MS, agent: "claude-code/unknown", revision: 1, final: false });
+    } finally {
+      await r.close();
+    }
+  });
+
+  it("a flusher waiting out the rest of the grace wakes within a poll slice when the event that brings the version arrives", async () => {
+    const r = await rig();
+    try {
+      r.fire("UserPromptSubmit");
+      r.setMono(70_000); // its flusher starts late: 50 s of grace left, within the budget
+      let fired = false;
+      r.onSleep((mono) => {
+        if (fired || mono < 80_000) return;
+        fired = true;
+        r.withVersion();
+        r.fire("PostToolUse"); // sees the sleeping owner's fresh heartbeat: starts nobody
+      });
+      const passes = await r.run();
+      expect(passes).toBeLessThanOrEqual(5);
+      expect(r.started.flushers).toBe(1);
+      expect(r.puts[0]!.agent).toBe("claude-code/2.1.300");
+      expect(r.puts[0]!.revision).toBe(1);
+      expect(r.puts[0]!.at - 80_000).toBeLessThanOrEqual(POLL_MS);
+    } finally {
+      await r.close();
+    }
   });
 });

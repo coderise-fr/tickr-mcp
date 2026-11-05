@@ -3,18 +3,21 @@ import { createAgentApi, ROUTE_NOT_FOUND } from "../../hook-src/flusher/api.js";
 import { commitIfChanged, revisionsStage } from "../../hook-src/flusher/revisions.js";
 import { segmentationStage } from "../../hook-src/flusher/segmentation.js";
 import {
+  AGENT_VERSION_GRACE_MS,
   backoffMs,
   INGESTION_WINDOW_MS,
   MAX_BACKOFF_MS,
   PROBE_INTERVAL_MS,
   readPause,
   readWorkspace,
+  SEND_BATCH,
   sendDue,
   STOPPED_MISMATCH,
   writeWorkspace,
 } from "../../hook-src/flusher/sender.js";
 import { CLOCK_SKEW_LIMIT_MS, workspaceStage } from "../../hook-src/flusher/workspace.js";
 import { canonicalJson } from "../../hook-src/mapping.js";
+import type { JournalEvent } from "../../hook-src/store/db.js";
 import { json, problem, type RecordedRequest, type Reply, startServer } from "../helpers/httpServer.js";
 import { cleanTempDirs, WS } from "./helpers/env.js";
 import { journalMapping, MAPPING, type StageHarness, stageHarness } from "./helpers/stage.js";
@@ -22,6 +25,7 @@ import { journalMapping, MAPPING, type StageHarness, stageHarness } from "./help
 const NOW = "2026-11-05T10:00:00.000Z";
 const MIN = 60_000;
 const OTHER_WS = "9b9b9b9b-0000-4000-8000-000000000099";
+const VERSION = "2.1.300";
 
 const harnesses: StageHarness[] = [];
 const servers: { close(): Promise<void> }[] = [];
@@ -63,10 +67,15 @@ async function setup(segment: (req: RecordedRequest, i: number) => Reply, opts: 
     server,
     puts,
     setSkew: (ms: number) => (skewMs = ms),
-    /** One user prompt at `at`, segmented and committed as a revision. */
-    activity: (at: string = h.ctx.now().toISOString(), extra = {}) => {
+    /**
+     * One user prompt at `at`, segmented and committed as a revision. Its session's Claude Code
+     * version is `version` (as the ledger stage reads it from the transcript), or unknown (null).
+     */
+    activity: (at: string = h.ctx.now().toISOString(), extra: Partial<JournalEvent> = {}, version: string | null = VERSION) => {
       h.journal("UserPromptSubmit", at, 1000, extra);
       segmentationStage(h.ctx);
+      const sessionId = extra.sessionId ?? "s-1";
+      if (version !== null && h.store.getSession(sessionId)?.agentVersion === null) h.store.setSessionAgentVersion(sessionId, version);
       void revisionsStage()(h.ctx);
     },
     check: () => workspaceStage({ random: () => 1 })(h.ctx),
@@ -93,18 +102,18 @@ describe("sendDue", () => {
     t.activity();
     await t.send();
     const [req] = t.puts();
-    expect(req!.headers["tickr-agent"]).toBe("claude-code/unknown");
+    expect(req!.headers["tickr-agent"]).toBe("claude-code/2.1.300");
     const seg = t.h.store.segmentsForSession("s-1")[0]!;
     expect(seg.createdOnServer).toBe(true);
     expect(t.h.store.pendingOutboxCount()).toBe(0);
     expect(req!.body).toBe(t.h.store.getLastCommitted("segment", seg.id)!.bodyJson);
     expect(t.h.boundaries).toEqual(expect.arrayContaining(["sent", "acknowledged"]));
 
-    t.h.store.upsertSession({ ...t.h.store.getSession("s-1")!, agentVersion: "2.1.300" });
+    t.h.store.upsertSession({ ...t.h.store.getSession("s-1")!, agentVersion: "2.1.301" });
     t.h.setNow(plus(NOW, 2 * MIN));
     t.activity();
     await t.send();
-    expect(t.puts()[1]!.headers["tickr-agent"]).toBe("claude-code/2.1.300");
+    expect(t.puts()[1]!.headers["tickr-agent"]).toBe("claude-code/2.1.301");
   });
 
   it("503 workspace_busy ⇒ same revision and same body after Retry-After, never acknowledged meanwhile", async () => {
@@ -258,6 +267,7 @@ describe("sendDue", () => {
     t.h.journal("UserPromptSubmit", plus(NOW, 20 * MIN), 2200, { sessionId: "s-2" });
     t.h.setNow(plus(NOW, 20 * MIN));
     segmentationStage(t.h.ctx);
+    t.h.store.setSessionAgentVersion("s-2", VERSION);
     await revisionsStage()(t.h.ctx);
     await t.send();
     expect(t.h.store.listTerminal().map((r) => r.code)).toEqual(["invalid_tag", "not_found"]);
@@ -324,6 +334,106 @@ describe("sendDue", () => {
     expect(out).toEqual({ dueInMs: 0, outOfBudget: true });
     expect(t.puts()).toHaveLength(0);
     expect(t.h.store.pendingOutboxCount()).toBe(2);
+  });
+});
+
+describe("the creation of a segment waits for the agent version", () => {
+  const bodyOf = (r: RecordedRequest) => JSON.parse(r.body) as { revision: number; startedAt: string; working: boolean; final: boolean };
+  const segmentUrl = (id: string) => `/api/v1/agent-segments/${id}`;
+
+  it("waits while the session's version is unknown, at most the grace after the segment's start, reporting the time left", async () => {
+    const t = await setup(() => ok(201));
+    await t.check();
+    t.activity(NOW, {}, null);
+    expect(await t.send()).toEqual({ dueInMs: AGENT_VERSION_GRACE_MS });
+    t.h.setNow(plus(NOW, 90_000));
+    expect(await t.send()).toEqual({ dueInMs: AGENT_VERSION_GRACE_MS - 90_000 });
+    expect(t.puts()).toHaveLength(0);
+    expect(t.h.store.pendingOutboxCount()).toBe(1);
+    expect(t.h.boundaries).not.toContain("sent");
+  });
+
+  it("goes as soon as the version is known: Tickr-Agent carries it, revision 1 byte for byte", async () => {
+    const t = await setup(() => ok(201));
+    await t.check();
+    t.activity(NOW, {}, null);
+    await t.send();
+    t.h.setNow(plus(NOW, 30_000));
+    t.h.store.setSessionAgentVersion("s-1", "2.1.301");
+    expect(await t.send()).toEqual({ dueInMs: null });
+    const [req] = t.puts();
+    const seg = t.h.store.segmentsForSession("s-1")[0]!;
+    expect(req!.headers["tickr-agent"]).toBe("claude-code/2.1.301");
+    expect(req!.body).toBe(t.h.store.getLastCommitted("segment", seg.id)!.bodyJson);
+    expect(bodyOf(req!)).toMatchObject({ revision: 1, startedAt: NOW, working: true, final: false });
+    expect(t.h.store.getSegment(seg.id)!.createdOnServer).toBe(true);
+  });
+
+  it("goes with claude-code/unknown once the grace is over", async () => {
+    const t = await setup(() => ok(201));
+    await t.check();
+    t.activity(NOW, {}, null);
+    t.h.setNow(plus(NOW, AGENT_VERSION_GRACE_MS - 1));
+    expect(await t.send()).toEqual({ dueInMs: 1 });
+    expect(t.puts()).toHaveLength(0);
+    t.h.setNow(plus(NOW, AGENT_VERSION_GRACE_MS));
+    expect(await t.send()).toEqual({ dueInMs: null });
+    expect(t.puts().map((r) => r.headers["tickr-agent"])).toEqual(["claude-code/unknown"]);
+    expect(bodyOf(t.puts()[0]!)).toMatchObject({ revision: 1, startedAt: NOW, working: true });
+  });
+
+  it("a creation sent after the wait never claims a stale working: the latest revision goes, from the same start", async () => {
+    const t = await setup(() => ok(201));
+    await t.check();
+    t.activity(NOW, {}, null);
+    await t.send();
+    // Past the working freshness, the revisions stage (before the send) commits working: false.
+    t.h.setNow(plus(NOW, AGENT_VERSION_GRACE_MS + 1));
+    await revisionsStage()(t.h.ctx);
+    await t.send();
+    expect(t.puts()).toHaveLength(1);
+    expect(bodyOf(t.puts()[0]!)).toMatchObject({ revision: 2, startedAt: NOW, working: false, final: false });
+    expect(t.h.store.pendingOutboxCount()).toBe(0);
+  });
+
+  it("never waits for an update of a created segment, a final segment or a delegated entry", async () => {
+    const t = await setup(() => ok(201));
+    await t.check();
+    // s-1: already created (with claude-code/unknown), then updated within the grace of its start.
+    t.activity(NOW, {}, null);
+    const created = t.h.store.segmentsForSession("s-1")[0]!;
+    t.h.store.markSegmentCreated(created.id);
+    t.h.store.deleteOutboxFor("segment", created.id);
+    // s-2: the session ended, its segment is final. s-3: waits (the control).
+    t.activity(NOW, { sessionId: "s-2" }, null);
+    t.h.journal("SessionEnd", plus(NOW, 1000), 1001, { sessionId: "s-2" });
+    t.activity(NOW, { sessionId: "s-3" }, null);
+    t.h.setNow(plus(NOW, 61_000));
+    t.activity(plus(NOW, 61_000), {}, null);
+    commitIfChanged(t.h.store, t.h.ctx.generation, { kind: "delegated", id: "e-1" }, { agentSessionId: "s-3", usageQuality: "complete", usage: [] }, t.h.ctx.now());
+
+    expect(await t.send()).toEqual({ dueInMs: AGENT_VERSION_GRACE_MS - 61_000 });
+    const final = t.h.store.segmentsForSession("s-2")[0]!;
+    expect(final.final).toBe(true);
+    expect(t.puts().map((r) => r.url).sort()).toEqual([segmentUrl(created.id), segmentUrl(final.id), "/api/v1/entries/e-1/agent-usage"].sort());
+    const segmentPuts = t.puts().filter((r) => r.url.startsWith("/api/v1/agent-segments/"));
+    expect(segmentPuts.map((r) => r.headers["tickr-agent"])).toEqual(["claude-code/unknown", "claude-code/unknown"]);
+    expect(segmentPuts.map((r) => bodyOf(r).final).sort()).toEqual([false, true]);
+    expect(t.h.store.latestOutbox().map((r) => r.targetId)).toEqual([t.h.store.segmentsForSession("s-3")[0]!.id]);
+  });
+
+  it("waiting creations never hold back the rows due after them, past one batch", async () => {
+    const t = await setup(() => ok(201));
+    await t.check();
+    const waiting = SEND_BATCH + 5;
+    for (let i = 0; i < waiting; i++) t.h.journal("UserPromptSubmit", NOW, 1000, { sessionId: `w-${String(i).padStart(3, "0")}` });
+    segmentationStage(t.h.ctx);
+    await revisionsStage()(t.h.ctx);
+    t.h.setNow(plus(NOW, 1000));
+    t.activity(plus(NOW, 1000), { sessionId: "z-ready" });
+    expect(await t.send()).toEqual({ dueInMs: AGENT_VERSION_GRACE_MS - 1000 });
+    expect(t.puts().map((r) => r.url)).toEqual([segmentUrl(t.h.store.segmentsForSession("z-ready")[0]!.id)]);
+    expect(t.h.store.pendingOutboxCount()).toBe(waiting);
   });
 });
 

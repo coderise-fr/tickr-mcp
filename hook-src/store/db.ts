@@ -754,16 +754,6 @@ export class Store {
     ).map(toOutbox);
   }
 
-  /** The earliest next attempt among the latest pending revisions, or null when none is pending. */
-  nextOutboxDue(): string | null {
-    return optStr(
-      this.get(
-        `SELECT MIN(o.next_attempt_at) AS m FROM outbox o
-         WHERE o.revision = (SELECT MAX(i.revision) FROM outbox i WHERE i.target_kind = o.target_kind AND i.target_id = o.target_id)`,
-      )?.m,
-    );
-  }
-
   /** Removes every pending revision of one target; returns how many. */
   deleteOutboxFor(kind: TargetKind, id: string): number {
     return this.run("DELETE FROM outbox WHERE target_kind = ? AND target_id = ?", kind, id);

@@ -11,6 +11,13 @@
 //
 // Nothing is sent before the workspace check (GET /me) succeeded, nor while the instance is
 // paused. An unsent creation older than the 30-day ingestion window goes terminal before any send.
+//
+// Tickr keeps the Tickr-Agent version of a segment's creation request for its entry, and the
+// version is only read from the session's transcript (ledger stage). The creation of a segment
+// (never acknowledged, not final) therefore waits while its session's version is unknown, at most
+// AGENT_VERSION_GRACE_MS after the segment's start; then it goes with claude-code/unknown. The
+// held revision is committed and replayed as any other (immutable body), and the stage reports the
+// time left as its due. Updates of created segments, final segments and delegated entries never wait.
 import { agentHeaderValue } from "../../src/api/agent.js";
 import { parseStoredMapping } from "../mapping.js";
 import { addNotice } from "../notices.js";
@@ -28,6 +35,8 @@ export const MAX_RETRY_AFTER_MS = 60 * 60_000;
 export const PROBE_INTERVAL_MS = 60 * 60_000;
 /** Tickr refuses to create a segment that started longer ago than this (§4.3 step 7). */
 export const INGESTION_WINDOW_MS = 30 * 24 * 60 * 60_000;
+/** The creation of a segment waits for its session's agent version this long after its start, at most. */
+export const AGENT_VERSION_GRACE_MS = 2 * 60_000;
 /** Due rows read per query. */
 export const SEND_BATCH = 50;
 /** Session state of a session whose .tickr.json names another workspace than the key's. */
@@ -180,6 +189,36 @@ function expireBeforeSend(store: Store, workspaceId: string, now: Date): void {
   }
 }
 
+/**
+ * Milliseconds the outbox row still waits for its session's agent version, or null to send it now:
+ * only the creation of a live segment (never acknowledged, not final) whose session has no
+ * version yet and that started less than AGENT_VERSION_GRACE_MS ago (a start in the future, after
+ * the clock moved back, does not wait).
+ */
+export function versionHoldMs(store: Store, row: OutboxRow, now: Date): number | null {
+  if (row.targetKind !== "segment") return null;
+  const seg = store.getSegment(row.targetId);
+  if (seg === null || seg.createdOnServer || seg.final) return null;
+  if ((JSON.parse(row.bodyJson) as Partial<SegmentBody>).final === true) return null;
+  if ((store.getSession(seg.sessionId)?.agentVersion ?? null) !== null) return null;
+  const elapsed = now.getTime() - Date.parse(seg.startedAt);
+  if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= AGENT_VERSION_GRACE_MS) return null;
+  return AGENT_VERSION_GRACE_MS - elapsed;
+}
+
+/** The segments whose creation waits for the agent version now, and the earliest end of a wait. */
+function versionHolds(store: Store, now: Date): { held: Set<string>; dueInMs: number | null } {
+  const held = new Set<string>();
+  let dueInMs: number | null = null;
+  for (const row of store.latestOutbox()) {
+    const wait = versionHoldMs(store, row, now);
+    if (wait === null) continue;
+    held.add(row.targetId);
+    dueInMs = dueInMs === null ? wait : Math.min(dueInMs, wait);
+  }
+  return { held, dueInMs };
+}
+
 export interface SendOptions {
   /** Jitter source in [0, 1) (tests inject a fixed one). */
   random?: () => number;
@@ -258,8 +297,12 @@ export async function sendDue(store: Store, gen: number, api: AgentApi, now: () 
   if (workspace === null || !canSend(store)) return { dueInMs: null };
   inTx(() => expireBeforeSend(store, workspace.workspaceId, now()));
 
+  // Fixed for the pass: a wait that ends meanwhile is sent by the next pass (due at once).
+  const { held } = versionHolds(store, now());
+  const waiting = (row: OutboxRow) => row.targetKind === "segment" && held.has(row.targetId);
   for (;;) {
-    const rows = store.dueOutbox(now().toISOString(), SEND_BATCH);
+    // At most held.size of the rows read wait: an empty remainder means nothing else is due.
+    const rows = store.dueOutbox(now().toISOString(), SEND_BATCH + held.size).filter((row) => !waiting(row));
     if (rows.length === 0) break;
     for (const row of rows) {
       // Too little time left for one more request: the rest is due at once, for a successor.
@@ -276,8 +319,19 @@ export async function sendDue(store: Store, gen: number, api: AgentApi, now: () 
       if (outcome.kind === "pause") return { dueInMs: null };
     }
   }
-  const next = store.nextOutboxDue();
-  return { dueInMs: next === null ? null : Math.max(0, Date.parse(next) - now().getTime()) };
+  return { dueInMs: nextDueMs(store, now()) };
+}
+
+/** Milliseconds until the next row is due (a version wait counting as its time left), or null. */
+function nextDueMs(store: Store, now: Date): number | null {
+  const holds = versionHolds(store, now);
+  let due = holds.dueInMs;
+  for (const row of store.latestOutbox()) {
+    if (row.targetKind === "segment" && holds.held.has(row.targetId)) continue;
+    const wait = Math.max(0, Date.parse(row.nextAttemptAt) - now.getTime());
+    due = due === null ? wait : Math.min(due, wait);
+  }
+  return due;
 }
 
 export function sendStage(opts: Pick<SendOptions, "random"> = {}): StageRun {

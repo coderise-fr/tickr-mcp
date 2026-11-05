@@ -1168,15 +1168,6 @@ var Store = class {
        ORDER BY o.target_kind, o.target_id`
     ).map(toOutbox);
   }
-  /** The earliest next attempt among the latest pending revisions, or null when none is pending. */
-  nextOutboxDue() {
-    return optStr(
-      this.get(
-        `SELECT MIN(o.next_attempt_at) AS m FROM outbox o
-         WHERE o.revision = (SELECT MAX(i.revision) FROM outbox i WHERE i.target_kind = o.target_kind AND i.target_id = o.target_id)`
-      )?.m
-    );
-  }
   /** Removes every pending revision of one target; returns how many. */
   deleteOutboxFor(kind, id) {
     return this.run("DELETE FROM outbox WHERE target_kind = ? AND target_id = ?", kind, id);
@@ -1819,6 +1810,7 @@ var MAX_BACKOFF_MS = 5 * 6e4;
 var MAX_RETRY_AFTER_MS = 60 * 6e4;
 var PROBE_INTERVAL_MS = 60 * 6e4;
 var INGESTION_WINDOW_MS = 30 * 24 * 60 * 6e4;
+var AGENT_VERSION_GRACE_MS = 2 * 6e4;
 var SEND_BATCH = 50;
 var STOPPED_MISMATCH = "stopped_mismatch";
 var PAUSE_KEY = "send_pause";
@@ -1917,6 +1909,27 @@ function expireBeforeSend(store, workspaceId, now) {
     }
   }
 }
+function versionHoldMs(store, row, now) {
+  if (row.targetKind !== "segment") return null;
+  const seg = store.getSegment(row.targetId);
+  if (seg === null || seg.createdOnServer || seg.final) return null;
+  if (JSON.parse(row.bodyJson).final === true) return null;
+  if ((store.getSession(seg.sessionId)?.agentVersion ?? null) !== null) return null;
+  const elapsed = now.getTime() - Date.parse(seg.startedAt);
+  if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= AGENT_VERSION_GRACE_MS) return null;
+  return AGENT_VERSION_GRACE_MS - elapsed;
+}
+function versionHolds(store, now) {
+  const held = /* @__PURE__ */ new Set();
+  let dueInMs = null;
+  for (const row of store.latestOutbox()) {
+    const wait = versionHoldMs(store, row, now);
+    if (wait === null) continue;
+    held.add(row.targetId);
+    dueInMs = dueInMs === null ? wait : Math.min(dueInMs, wait);
+  }
+  return { held, dueInMs };
+}
 async function sendRow(store, api, row) {
   const body = JSON.parse(row.bodyJson);
   if (row.targetKind === "segment") {
@@ -1970,8 +1983,10 @@ async function sendDue(store, gen, api, now, budgetMs, opts = {}) {
   const workspace = readWorkspace(store);
   if (workspace === null || !canSend(store)) return { dueInMs: null };
   inTx(() => expireBeforeSend(store, workspace.workspaceId, now()));
+  const { held } = versionHolds(store, now());
+  const waiting = (row) => row.targetKind === "segment" && held.has(row.targetId);
   for (; ; ) {
-    const rows = store.dueOutbox(now().toISOString(), SEND_BATCH);
+    const rows = store.dueOutbox(now().toISOString(), SEND_BATCH + held.size).filter((row) => !waiting(row));
     if (rows.length === 0) break;
     for (const row of rows) {
       if (remaining() < timeoutMs) return { dueInMs: 0, outOfBudget: true };
@@ -1987,8 +2002,17 @@ async function sendDue(store, gen, api, now, budgetMs, opts = {}) {
       if (outcome.kind === "pause") return { dueInMs: null };
     }
   }
-  const next = store.nextOutboxDue();
-  return { dueInMs: next === null ? null : Math.max(0, Date.parse(next) - now().getTime()) };
+  return { dueInMs: nextDueMs(store, now()) };
+}
+function nextDueMs(store, now) {
+  const holds = versionHolds(store, now);
+  let due = holds.dueInMs;
+  for (const row of store.latestOutbox()) {
+    if (row.targetKind === "segment" && holds.held.has(row.targetId)) continue;
+    const wait = Math.max(0, Date.parse(row.nextAttemptAt) - now.getTime());
+    due = due === null ? wait : Math.min(due, wait);
+  }
+  return due;
 }
 function sendStage(opts = {}) {
   return async (ctx) => {

@@ -114,8 +114,13 @@ describe("flusher survival", () => {
         CLAUDE_PLUGIN_OPTION_API_KEY: KEY,
         CLAUDE_PLUGIN_OPTION_BASE_URL: server.baseUrl,
       };
+      // The transcript names the Claude Code version: the creation request carries it.
+      const transcript = join(root, "s-survival.jsonl");
+      const line = { type: "user", timestamp: new Date().toISOString(), sessionId: "s-survival", version: "2.1.300", message: { role: "user", content: "<redacted>" } };
+      writeFileSync(transcript, `${JSON.stringify(line)}\n`);
       const started = Date.now();
-      const parent = await runParent("UserPromptSubmit", { session_id: "s-survival", cwd: repo, hook_event_name: "UserPromptSubmit", prompt_id: "p-1" }, env);
+      const input = { session_id: "s-survival", transcript_path: transcript, cwd: repo, hook_event_name: "UserPromptSubmit", prompt_id: "p-1" };
+      const parent = await runParent("UserPromptSubmit", input, env);
       expect(parent.code).toBe(0);
       expect(parent.out).toBe("");
 
@@ -126,11 +131,12 @@ describe("flusher survival", () => {
 
       expect(put!.url).toMatch(/^\/api\/v1\/agent-segments\/[0-9a-f-]{36}$/);
       expect(put!.headers.authorization).toBe(`Bearer ${KEY}`);
-      expect(put!.headers["tickr-agent"]).toBe("claude-code/unknown");
+      expect(put!.headers["tickr-agent"]).toBe("claude-code/2.1.300");
       expect(put!.headers["user-agent"]).toBe(`tickr-plugin/${PLUGIN_VERSION}`);
       const body = JSON.parse(put!.body) as Record<string, unknown>;
-      expect(Object.keys(body)).toEqual(SEGMENT_BODY_KEYS.filter((k) => k !== "usage"));
-      expect(body).toMatchObject({ revision: 1, agentSessionId: "s-survival", projectId: PROJECT, working: true, final: false });
+      // The transcript was read to its end: the latest complete usage set (no message yet) goes along.
+      expect(Object.keys(body)).toEqual([...SEGMENT_BODY_KEYS]);
+      expect(body).toMatchObject({ revision: 1, agentSessionId: "s-survival", projectId: PROJECT, working: true, final: false, usage: [] });
 
       // The flusher then gives the instance up and exits (so its files can be removed).
       const db = join(instanceDir(data, instanceId(server.baseUrl, WS, KEY)), DB_FILE);
