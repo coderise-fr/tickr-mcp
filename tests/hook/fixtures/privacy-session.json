@@ -1,0 +1,110 @@
+{
+  "comment": "Synthetic session for tests/hook/privacy.test.ts. Every text a user or Claude Code could write carries a SENTINEL marker; {{cwd}}, {{transcript}}, {{agentTranscript}} and {{now}} are filled at run time.",
+  "sessionId": "5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+  "steps": [
+    { "hook": { "hook_event_name": "SessionStart", "source": "startup", "model": "claude-SENTINEL_MODEL_CHOICE" } },
+    { "hook": { "hook_event_name": "UserPromptSubmit", "prompt_id": "p-SENTINEL-0001", "prompt": "SENTINEL_PROMPT please fix the failing build on my branch" } },
+    { "transcript": { "type": "user", "message": { "role": "user", "content": "SENTINEL_PROMPT please fix the failing build on my branch" } } },
+    {
+      "transcript": {
+        "type": "assistant",
+        "message": {
+          "id": "msg_SENTINEL_0001",
+          "model": "claude-opus-4-7",
+          "role": "assistant",
+          "content": [
+            { "type": "text", "text": "SENTINEL_RESPONSE I will look at the build." },
+            { "type": "tool_use", "id": "toolu_SENTINEL_bash", "name": "Bash", "input": { "command": "cat SENTINEL_FILE.txt" } }
+          ],
+          "usage": { "input_tokens": 12, "output_tokens": 34, "cache_creation_input_tokens": 56, "cache_read_input_tokens": 78 }
+        }
+      }
+    },
+    {
+      "hook": {
+        "hook_event_name": "PostToolUse",
+        "prompt_id": "p-SENTINEL-0001",
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_SENTINEL_bash",
+        "tool_input": { "command": "cat SENTINEL_FILE.txt" },
+        "tool_response": { "stdout": "SENTINEL_TOOL_OUTPUT", "stderr": "", "interrupted": false }
+      }
+    },
+    {
+      "transcript": {
+        "type": "assistant",
+        "message": {
+          "id": "msg_SENTINEL_0002",
+          "model": "claude-opus-4-7",
+          "role": "assistant",
+          "content": [{ "type": "tool_use", "id": "toolu_SENTINEL_agent", "name": "Agent", "input": { "prompt": "SENTINEL_SUBAGENT_PROMPT", "description": "SENTINEL_SUBAGENT_DESCRIPTION" } }],
+          "usage": { "input_tokens": 5, "output_tokens": 6, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 100 }
+        }
+      }
+    },
+    { "hook": { "hook_event_name": "SubagentStart", "agent_id": "a1b2c3d4e5", "agent_type": "SENTINEL_AGENT_TYPE" } },
+    {
+      "agentTranscript": {
+        "type": "assistant",
+        "isSidechain": true,
+        "agentId": "a1b2c3d4e5",
+        "message": {
+          "id": "msg_SENTINEL_sub1",
+          "model": "claude-haiku-4-5",
+          "role": "assistant",
+          "content": [{ "type": "text", "text": "SENTINEL_SUBAGENT_RESPONSE" }],
+          "usage": { "input_tokens": 7, "output_tokens": 8, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 9 }
+        }
+      }
+    },
+    { "hook": { "hook_event_name": "SubagentStop", "agent_id": "a1b2c3d4e5", "agent_transcript_path": "{{agentTranscript}}", "last_assistant_message": "SENTINEL_SUBAGENT_RESPONSE" } },
+    {
+      "hook": {
+        "hook_event_name": "PostToolUse",
+        "prompt_id": "p-SENTINEL-0001",
+        "tool_name": "mcp__plugin_tickr_tickr__start_timer",
+        "tool_use_id": "toolu_SENTINEL_timer",
+        "tool_input": { "description": "SENTINEL_TIMER_DESCRIPTION" },
+        "tool_response": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"entry\":{\"id\":\"0190f0c0-4444-7000-8000-0000000000e1\",\"description\":\"SENTINEL_TIMER_DESCRIPTION\",\"project_id\":null,\"project_name\":null,\"client_name\":null,\"task_id\":null,\"tag_ids\":[],\"started_at\":\"2026-11-05T10:02:00.000Z\",\"stopped_at\":null,\"duration_seconds\":0,\"duration\":\"0:00:00\",\"billable\":false,\"running\":true}}"
+            }
+          ],
+          "structuredContent": {
+            "entry": {
+              "id": "0190f0c0-4444-7000-8000-0000000000e1",
+              "description": "SENTINEL_TIMER_DESCRIPTION",
+              "project_id": null,
+              "project_name": null,
+              "client_name": null,
+              "task_id": null,
+              "tag_ids": [],
+              "started_at": "2026-11-05T10:02:00.000Z",
+              "stopped_at": null,
+              "duration_seconds": 0,
+              "duration": "0:00:00",
+              "billable": false,
+              "running": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "transcript": {
+        "type": "assistant",
+        "message": {
+          "id": "msg_SENTINEL_0003",
+          "model": "claude-opus-4-7",
+          "role": "assistant",
+          "content": [{ "type": "text", "text": "SENTINEL_FINAL_RESPONSE the build is fixed." }],
+          "usage": { "input_tokens": 1, "output_tokens": 2, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4 }
+        }
+      }
+    },
+    { "hook": { "hook_event_name": "Stop", "prompt_id": "p-SENTINEL-0001", "stop_hook_active": false, "last_assistant_message": "SENTINEL_FINAL_RESPONSE" } },
+    { "hook": { "hook_event_name": "SessionEnd", "reason": "SENTINEL_REASON" } }
+  ]
+}

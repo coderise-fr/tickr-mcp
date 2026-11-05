@@ -4,10 +4,10 @@
 //   tickr-hook.cjs flush <instanceDir>    the detached flusher
 //   tickr-hook.cjs status <dataDir>       /tickr:status (plain text)
 import { uptime } from "node:os";
-import { resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { readPluginConfig } from "./config.js";
 import { createAgentApi, REQUEST_TIMEOUT_MS } from "./flusher/api.js";
-import { runFlusher, WAKE_BUDGET_MS } from "./flusher/run.js";
+import { DEBUG_ENV, DEBUG_FILE, debugLogger, runFlusher, WAKE_BUDGET_MS } from "./flusher/run.js";
 import { recordEvent } from "./intake.js";
 import { type HookInput, readHookInput, type Write, writeHookOutput, writeStdout } from "./io.js";
 import { loadSqlite, unsupportedRuntimeMessage } from "./runtime.js";
@@ -80,7 +80,8 @@ async function runFlush(dir: string | undefined, env: NodeJS.ProcessEnv): Promis
   if (!instanceDir.startsWith(resolve(config.dataDir) + sep)) return;
   // The key comes from the inherited environment (PD-18), never from argv.
   const api = createAgentApi({ baseUrl: config.baseUrl, apiKey: config.apiKey, timeoutMs: REQUEST_TIMEOUT_MS });
-  await runFlusher(instanceDir, { now: () => new Date(), uptime, api, config, wakeBudgetMs: WAKE_BUDGET_MS });
+  const debug = env[DEBUG_ENV] === "1" ? debugLogger(join(instanceDir, DEBUG_FILE)) : undefined;
+  await runFlusher(instanceDir, { now: () => new Date(), uptime, api, config, wakeBudgetMs: WAKE_BUDGET_MS, ...(debug ? { debug } : {}) });
 }
 
 /**

@@ -257,6 +257,7 @@ function createAgentApi(o) {
 }
 
 // hook-src/flusher/run.ts
+var import_node_fs7 = require("node:fs");
 var import_node_path8 = require("node:path");
 
 // hook-src/fallback.ts
@@ -3229,20 +3230,74 @@ var PIPELINE = {
 // hook-src/flusher/run.ts
 var FLUSHER_BUSY_TIMEOUT_MS = 5e3;
 var WAKE_BUDGET_MS = 6e4;
+var DEBUG_ENV = "TICKR_PLUGIN_DEBUG";
+var DEBUG_FILE = "debug.log";
+var DEBUG_MAX_BYTES = 1e6;
+var STEPS = /* @__PURE__ */ new Set(["start", "claimed", "pass", "stage", "boundary", "end"]);
+var OUTCOMES = /* @__PURE__ */ new Set(["done", "not_owner", "newer_schema", "lost_ownership"]);
+var BOUNDARY = /^(claimed|fallback_committed|revision_committed|sent|acknowledged|released|stage:[a-z]+)$/;
+var NUMBERS = ["generation", "pass", "dueInMs", "ms", "pendingRevisions", "terminalItems"];
+function debugLine(rec, at) {
+  const out = { at: at.toISOString() };
+  if (!STEPS.has(rec.step)) return "";
+  out.step = rec.step;
+  if (rec.stage !== void 0 && STAGE_NAMES.includes(rec.stage)) out.stage = rec.stage;
+  if (rec.point !== void 0 && BOUNDARY.test(rec.point)) out.point = rec.point;
+  if (rec.outcome !== void 0 && OUTCOMES.has(rec.outcome)) out.outcome = rec.outcome;
+  for (const key of NUMBERS) {
+    const v = rec[key];
+    if (v === null) out[key] = null;
+    else if (typeof v === "number" && Number.isFinite(v)) out[key] = Math.round(v);
+  }
+  return `${JSON.stringify(out)}
+`;
+}
+function debugLogger(path, now = () => /* @__PURE__ */ new Date()) {
+  try {
+    if ((0, import_node_fs7.statSync)(path).size > DEBUG_MAX_BYTES) (0, import_node_fs7.writeFileSync)(path, "");
+  } catch {
+  }
+  return (rec) => {
+    try {
+      const text = debugLine(rec, now());
+      if (text !== "") (0, import_node_fs7.appendFileSync)(path, text);
+    } catch {
+    }
+  };
+}
 var realSleep = (ms4) => new Promise((resolve3) => setTimeout(resolve3, ms4));
 async function runFlusher(instanceDir2, deps) {
   const clock = deps.clock ?? (() => performance.now());
   const sleep = deps.sleep ?? realSleep;
-  const boundary = (point) => deps.onBoundary?.(point);
+  const debug = deps.debug ?? (() => void 0);
+  const boundary = (point) => {
+    deps.onBoundary?.(point);
+    if (!point.startsWith("stage:")) debug({ step: "boundary", point });
+  };
   const nowIso = () => deps.now().toISOString();
   const endAt = clock() + deps.wakeBudgetMs;
+  const started = clock();
+  debug({ step: "start" });
   const opened = openStore((0, import_node_path8.join)(instanceDir2, DB_FILE), { role: "flusher", busyTimeoutMs: deps.busyTimeoutMs ?? FLUSHER_BUSY_TIMEOUT_MS });
-  if (typeof opened === "string") return "newer_schema";
+  if (typeof opened === "string") {
+    debug({ step: "end", outcome: "newer_schema" });
+    return "newer_schema";
+  }
   const store = opened;
+  const end = (outcome) => {
+    let counts = {};
+    try {
+      counts = { pendingRevisions: store.pendingOutboxCount(), terminalItems: store.listTerminal().length };
+    } catch {
+    }
+    debug({ step: "end", outcome, ms: clock() - started, ...counts });
+    return outcome;
+  };
   try {
     const gen = claimOwnership(store, deps.pid ?? process.pid, nowIso());
-    if (gen === null) return store.schemaVersion() > SCHEMA_VERSION ? "newer_schema" : "not_owner";
+    if (gen === null) return end(store.schemaVersion() > SCHEMA_VERSION ? "newer_schema" : "not_owner");
     boundary("claimed");
+    debug({ step: "claimed", generation: gen });
     const stages = STAGE_NAMES.map((name) => ({ name, run: deps.stages?.[name] ?? PIPELINE[name] }));
     const ctx = {
       store,
@@ -3257,13 +3312,18 @@ async function runFlusher(instanceDir2, deps) {
       boundary
     };
     const fallback = (0, import_node_path8.join)(instanceDir2, FALLBACK_DIR);
+    let pass = 0;
     for (; ; ) {
+      pass += 1;
+      debug({ step: "pass", pass });
       ctx.guarded(() => void 0);
       importFallback(store, gen, fallback, { now: deps.now, onCommitted: () => boundary("fallback_committed") });
       const seen = store.maxEventSeq();
       let due = null;
       for (const stage of stages) {
+        const stageStart = clock();
         const result = await stage.run(ctx);
+        debug({ step: "stage", stage: stage.name, ms: clock() - stageStart, dueInMs: result.dueInMs ?? null });
         boundary(`stage:${stage.name}`);
         if (typeof result.dueInMs === "number") due = due === null ? result.dueInMs : Math.min(due, result.dueInMs);
         if (result.halt) break;
@@ -3276,11 +3336,11 @@ async function runFlusher(instanceDir2, deps) {
       const idle = () => left <= 0 || store.maxEventSeq() === seen && pendingFallbackCount(fallback) === 0;
       if (releaseOwnership(store, gen, nowIso(), idle)) {
         boundary("released");
-        return "done";
+        return end("done");
       }
     }
   } catch (error) {
-    if (error instanceof LostOwnership) return error.reason === "newer_schema" ? "newer_schema" : "lost_ownership";
+    if (error instanceof LostOwnership) return end(error.reason === "newer_schema" ? "newer_schema" : "lost_ownership");
     throw error;
   } finally {
     store.close();
@@ -3288,7 +3348,7 @@ async function runFlusher(instanceDir2, deps) {
 }
 
 // hook-src/io.ts
-var import_node_fs7 = require("node:fs");
+var import_node_fs8 = require("node:fs");
 var OPTIONAL_STRINGS = [
   "transcript_path",
   "prompt_id",
@@ -3345,7 +3405,7 @@ function readHookInput(stdin, deadlineMs) {
   });
 }
 var writeStdout = (text) => {
-  (0, import_node_fs7.writeSync)(1, text);
+  (0, import_node_fs8.writeSync)(1, text);
 };
 function writeHookOutput(out, write = writeStdout) {
   if (!out.systemMessage) return;
@@ -3366,7 +3426,7 @@ function spawnFlusher(bundlePath, instanceDir2, env) {
 }
 
 // hook-src/status.ts
-var import_node_fs8 = require("node:fs");
+var import_node_fs9 = require("node:fs");
 var import_node_path9 = require("node:path");
 var MAX_TERMINAL_LISTED = 20;
 var PAUSE_TEXT = {
@@ -3390,14 +3450,14 @@ function safeText(text, max = MAX_DIAGNOSTIC) {
 }
 function mtimeMs(path) {
   try {
-    return (0, import_node_fs8.statSync)(path).mtimeMs;
+    return (0, import_node_fs9.statSync)(path).mtimeMs;
   } catch {
     return 0;
   }
 }
 function fallbackCount(dir) {
   try {
-    return (0, import_node_fs8.readdirSync)((0, import_node_path9.join)(dir, FALLBACK_DIR)).filter((n) => n.endsWith(".json") && !n.startsWith(".")).length;
+    return (0, import_node_fs9.readdirSync)((0, import_node_path9.join)(dir, FALLBACK_DIR)).filter((n) => n.endsWith(".json") && !n.startsWith(".")).length;
   } catch {
     return 0;
   }
@@ -3456,9 +3516,9 @@ function viewInstance(dir, name, current) {
 function renderStatus(dataDir, current) {
   let names = [];
   try {
-    names = (0, import_node_fs8.readdirSync)(dataDir).filter((n) => {
+    names = (0, import_node_fs9.readdirSync)(dataDir).filter((n) => {
       try {
-        return (0, import_node_fs8.statSync)((0, import_node_path9.join)(dataDir, n, INSTANCE_FILE)).isFile();
+        return (0, import_node_fs9.statSync)((0, import_node_path9.join)(dataDir, n, INSTANCE_FILE)).isFile();
       } catch {
         return false;
       }
@@ -3524,7 +3584,8 @@ async function runFlush(dir, env) {
   const instanceDir2 = (0, import_node_path10.resolve)(dir);
   if (!instanceDir2.startsWith((0, import_node_path10.resolve)(config.dataDir) + import_node_path10.sep)) return;
   const api = createAgentApi({ baseUrl: config.baseUrl, apiKey: config.apiKey, timeoutMs: REQUEST_TIMEOUT_MS });
-  await runFlusher(instanceDir2, { now: () => /* @__PURE__ */ new Date(), uptime: import_node_os2.uptime, api, config, wakeBudgetMs: WAKE_BUDGET_MS });
+  const debug = env[DEBUG_ENV] === "1" ? debugLogger((0, import_node_path10.join)(instanceDir2, DEBUG_FILE)) : void 0;
+  await runFlusher(instanceDir2, { now: () => /* @__PURE__ */ new Date(), uptime: import_node_os2.uptime, api, config, wakeBudgetMs: WAKE_BUDGET_MS, ...debug ? { debug } : {} });
 }
 function runStatus(dir, env, write) {
   if (loadSqlite() === null) {
