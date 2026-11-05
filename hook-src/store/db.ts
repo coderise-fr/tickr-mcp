@@ -72,6 +72,8 @@ export interface SessionRow {
   state: string;
   agentVersion: string | null;
   provider: string | null;
+  /** Events older than the session's cursor that fell outside the open segment (PD-11). */
+  lateEvents: number;
 }
 
 export interface SegmentRow {
@@ -85,6 +87,8 @@ export interface SegmentRow {
   observedAt: string;
   final: boolean;
   finalReason: string | null;
+  /** Why a clock-jump split was made, for diagnostics. */
+  finalDiagnostic: string | null;
   quality: string;
   createdOnServer: boolean;
   serverState: string | null;
@@ -169,6 +173,7 @@ function toSession(r: Row): SessionRow {
     state: str(r.state),
     agentVersion: optStr(r.agent_version),
     provider: optStr(r.provider),
+    lateEvents: num(r.late_events),
   };
 }
 
@@ -184,6 +189,7 @@ function toSegment(r: Row): SegmentRow {
     observedAt: str(r.observed_at),
     final: bool(r.final),
     finalReason: optStr(r.final_reason),
+    finalDiagnostic: optStr(r.final_diagnostic),
     quality: str(r.quality),
     createdOnServer: bool(r.created_on_server),
     serverState: optStr(r.server_state),
@@ -404,6 +410,14 @@ export class Store {
     );
   }
 
+  /** Sessions with journalled events after their segmentation cursor (sessions.last_event_seq). */
+  pendingEventSessions(): string[] {
+    return this.all(
+      `SELECT DISTINCT e.session_id FROM events e LEFT JOIN sessions s ON s.session_id = e.session_id
+       WHERE e.seq > COALESCE(s.last_event_seq, 0) ORDER BY e.session_id`,
+    ).map((r) => str(r.session_id));
+  }
+
   maxEventSeq(): number {
     return num(this.get("SELECT COALESCE(MAX(seq), 0) AS m FROM events")?.m);
   }
@@ -421,11 +435,11 @@ export class Store {
 
   upsertSession(s: SessionRow): void {
     this.run(
-      `INSERT INTO sessions (session_id, last_event_seq, last_event_time, last_uptime_s, state, agent_version, provider)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sessions (session_id, last_event_seq, last_event_time, last_uptime_s, state, agent_version, provider, late_events)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (session_id) DO UPDATE SET last_event_seq = excluded.last_event_seq, last_event_time = excluded.last_event_time,
          last_uptime_s = excluded.last_uptime_s, state = excluded.state, agent_version = excluded.agent_version,
-         provider = excluded.provider`,
+         provider = excluded.provider, late_events = excluded.late_events`,
       s.sessionId,
       s.lastEventSeq,
       s.lastEventTime,
@@ -433,6 +447,7 @@ export class Store {
       s.state,
       s.agentVersion,
       s.provider,
+      s.lateEvents,
     );
   }
 
@@ -452,15 +467,21 @@ export class Store {
     return this.all("SELECT * FROM segments WHERE final = 0 ORDER BY started_at, id").map(toSegment);
   }
 
+  /** The session's segment that is not final yet (the segmenter keeps at most one). */
+  openSegmentFor(sessionId: string): SegmentRow | null {
+    const r = this.get("SELECT * FROM segments WHERE session_id = ? AND final = 0 ORDER BY started_at DESC, id DESC LIMIT 1", sessionId);
+    return r ? toSegment(r) : null;
+  }
+
   upsertSegment(s: SegmentRow): void {
     this.run(
       `INSERT INTO segments (id, session_id, mapping_version_id, started_at, last_activity_at, stopped_at, working, observed_at,
-         final, final_reason, quality, created_on_server, server_state, last_revision)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         final, final_reason, final_diagnostic, quality, created_on_server, server_state, last_revision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET session_id = excluded.session_id, mapping_version_id = excluded.mapping_version_id,
          started_at = excluded.started_at, last_activity_at = excluded.last_activity_at, stopped_at = excluded.stopped_at,
          working = excluded.working, observed_at = excluded.observed_at, final = excluded.final,
-         final_reason = excluded.final_reason, quality = excluded.quality, created_on_server = excluded.created_on_server,
+         final_reason = excluded.final_reason, final_diagnostic = excluded.final_diagnostic, quality = excluded.quality, created_on_server = excluded.created_on_server,
          server_state = excluded.server_state, last_revision = excluded.last_revision`,
       s.id,
       s.sessionId,
@@ -472,6 +493,7 @@ export class Store {
       s.observedAt,
       s.final ? 1 : 0,
       s.finalReason,
+      s.finalDiagnostic,
       s.quality,
       s.createdOnServer ? 1 : 0,
       s.serverState,

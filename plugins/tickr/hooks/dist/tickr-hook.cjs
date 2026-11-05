@@ -148,7 +148,8 @@ CREATE TABLE sessions (
   last_uptime_s REAL NULL,
   state TEXT NOT NULL DEFAULT 'active',
   agent_version TEXT NULL,
-  provider TEXT NULL
+  provider TEXT NULL,
+  late_events INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE segments (
   id TEXT PRIMARY KEY,
@@ -161,6 +162,7 @@ CREATE TABLE segments (
   observed_at TEXT NOT NULL,
   final INTEGER NOT NULL DEFAULT 0,
   final_reason TEXT NULL,
+  final_diagnostic TEXT NULL,
   quality TEXT NOT NULL DEFAULT 'pending',
   created_on_server INTEGER NOT NULL DEFAULT 0,
   server_state TEXT NULL,
@@ -236,8 +238,8 @@ var LostOwnership = class extends Error {
   }
   reason;
 };
-function shift(nowIso, ms) {
-  return new Date(Date.parse(nowIso) + ms).toISOString();
+function shift(nowIso, ms2) {
+  return new Date(Date.parse(nowIso) + ms2).toISOString();
 }
 function isOwnerFresh(owner, now) {
   if (owner === null) return false;
@@ -432,8 +434,8 @@ function isBusy(error) {
   return typeof code === "number" && ((code & 255) === 5 || (code & 255) === 6);
 }
 var pause = new Int32Array(new SharedArrayBuffer(4));
-function sleepSync(ms) {
-  if (ms > 0) Atomics.wait(pause, 0, 0, ms);
+function sleepSync(ms2) {
+  if (ms2 > 0) Atomics.wait(pause, 0, 0, ms2);
 }
 var str = (value) => String(value);
 var optStr = (value) => value === null || value === void 0 ? null : String(value);
@@ -465,7 +467,8 @@ function toSession(r) {
     lastUptimeS: optNum(r.last_uptime_s),
     state: str(r.state),
     agentVersion: optStr(r.agent_version),
-    provider: optStr(r.provider)
+    provider: optStr(r.provider),
+    lateEvents: num(r.late_events)
   };
 }
 function toSegment(r) {
@@ -480,6 +483,7 @@ function toSegment(r) {
     observedAt: str(r.observed_at),
     final: bool(r.final),
     finalReason: optStr(r.final_reason),
+    finalDiagnostic: optStr(r.final_diagnostic),
     quality: str(r.quality),
     createdOnServer: bool(r.created_on_server),
     serverState: optStr(r.server_state),
@@ -672,6 +676,13 @@ var Store = class {
       toEvent
     );
   }
+  /** Sessions with journalled events after their segmentation cursor (sessions.last_event_seq). */
+  pendingEventSessions() {
+    return this.all(
+      `SELECT DISTINCT e.session_id FROM events e LEFT JOIN sessions s ON s.session_id = e.session_id
+       WHERE e.seq > COALESCE(s.last_event_seq, 0) ORDER BY e.session_id`
+    ).map((r) => str(r.session_id));
+  }
   maxEventSeq() {
     return num(this.get("SELECT COALESCE(MAX(seq), 0) AS m FROM events")?.m);
   }
@@ -685,18 +696,19 @@ var Store = class {
   }
   upsertSession(s) {
     this.run(
-      `INSERT INTO sessions (session_id, last_event_seq, last_event_time, last_uptime_s, state, agent_version, provider)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sessions (session_id, last_event_seq, last_event_time, last_uptime_s, state, agent_version, provider, late_events)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (session_id) DO UPDATE SET last_event_seq = excluded.last_event_seq, last_event_time = excluded.last_event_time,
          last_uptime_s = excluded.last_uptime_s, state = excluded.state, agent_version = excluded.agent_version,
-         provider = excluded.provider`,
+         provider = excluded.provider, late_events = excluded.late_events`,
       s.sessionId,
       s.lastEventSeq,
       s.lastEventTime,
       s.lastUptimeS,
       s.state,
       s.agentVersion,
-      s.provider
+      s.provider,
+      s.lateEvents
     );
   }
   // segments
@@ -711,15 +723,20 @@ var Store = class {
   openSegments() {
     return this.all("SELECT * FROM segments WHERE final = 0 ORDER BY started_at, id").map(toSegment);
   }
+  /** The session's segment that is not final yet (the segmenter keeps at most one). */
+  openSegmentFor(sessionId) {
+    const r = this.get("SELECT * FROM segments WHERE session_id = ? AND final = 0 ORDER BY started_at DESC, id DESC LIMIT 1", sessionId);
+    return r ? toSegment(r) : null;
+  }
   upsertSegment(s) {
     this.run(
       `INSERT INTO segments (id, session_id, mapping_version_id, started_at, last_activity_at, stopped_at, working, observed_at,
-         final, final_reason, quality, created_on_server, server_state, last_revision)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         final, final_reason, final_diagnostic, quality, created_on_server, server_state, last_revision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET session_id = excluded.session_id, mapping_version_id = excluded.mapping_version_id,
          started_at = excluded.started_at, last_activity_at = excluded.last_activity_at, stopped_at = excluded.stopped_at,
          working = excluded.working, observed_at = excluded.observed_at, final = excluded.final,
-         final_reason = excluded.final_reason, quality = excluded.quality, created_on_server = excluded.created_on_server,
+         final_reason = excluded.final_reason, final_diagnostic = excluded.final_diagnostic, quality = excluded.quality, created_on_server = excluded.created_on_server,
          server_state = excluded.server_state, last_revision = excluded.last_revision`,
       s.id,
       s.sessionId,
@@ -731,6 +748,7 @@ var Store = class {
       s.observedAt,
       s.final ? 1 : 0,
       s.finalReason,
+      s.finalDiagnostic,
       s.quality,
       s.createdOnServer ? 1 : 0,
       s.serverState,
@@ -872,12 +890,299 @@ function openStore(path, opts) {
   }
 }
 
+// hook-src/ids.ts
+var import_node_crypto2 = require("node:crypto");
+var CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+var MAX_TIME = 2 ** 48 - 1;
+function timeBytes(nowMs) {
+  let ms2 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
+  const bytes = new Array(6);
+  for (let i = 5; i >= 0; i--) {
+    bytes[i] = ms2 % 256;
+    ms2 = Math.floor(ms2 / 256);
+  }
+  return bytes;
+}
+function hex(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+function uuidv7(nowMs, rand = import_node_crypto2.randomBytes) {
+  const bytes = new Uint8Array(16);
+  bytes.set(timeBytes(nowMs), 0);
+  bytes.set(rand(10).subarray(0, 10), 6);
+  bytes[6] = 112 | bytes[6] & 15;
+  bytes[8] = 128 | bytes[8] & 63;
+  const h = hex(bytes);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+function encodeTime(ms2) {
+  let rest = ms2;
+  let text = "";
+  for (let i = 0; i < 10; i++) {
+    text = CROCKFORD[rest % 32] + text;
+    rest = Math.floor(rest / 32);
+  }
+  return text;
+}
+function randomDigits(rand) {
+  const bytes = rand(10);
+  const digits = [];
+  let buffer = 0;
+  let bits = 0;
+  for (let i = 0; i < 10; i++) {
+    buffer = buffer << 8 | bytes[i];
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      digits.push(buffer >> bits & 31);
+    }
+    buffer &= (1 << bits) - 1;
+  }
+  return digits;
+}
+function increment(digits) {
+  for (let i = digits.length - 1; i >= 0; i--) {
+    if (digits[i] < 31) {
+      digits[i] += 1;
+      return true;
+    }
+    digits[i] = 0;
+  }
+  return false;
+}
+var lastMs = -1;
+var lastDigits = [];
+function ulid(nowMs, rand = import_node_crypto2.randomBytes) {
+  let ms2 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
+  if (ms2 <= lastMs) {
+    ms2 = lastMs;
+    if (!increment(lastDigits)) {
+      ms2 = Math.min(lastMs + 1, MAX_TIME);
+      lastDigits = randomDigits(rand);
+    }
+  } else {
+    lastDigits = randomDigits(rand);
+  }
+  lastMs = ms2;
+  return encodeTime(ms2) + lastDigits.map((d) => CROCKFORD[d]).join("");
+}
+
+// hook-src/flusher/segmenter.ts
+var CLOCK_TOLERANCE_MS = 2 * 6e4;
+var MAX_SEGMENT_MS = 23 * 36e5;
+var DRIFT_DIAGNOSTIC = "clock drift or possible reboot";
+var BACKWARDS_DIAGNOSTIC = "wall clock moved backwards";
+var OPENING = /* @__PURE__ */ new Set(["UserPromptSubmit", "PostToolUse"]);
+function newSessionState(sessionId) {
+  return { sessionId, open: null, lastEventTime: null, lastUptimeS: null, lateEvents: 0 };
+}
+var ms = (iso2) => Date.parse(iso2);
+var iso = (t) => new Date(t).toISOString();
+function segmentBoundary(seg) {
+  const start = new Date(seg.startedAt);
+  const midnight = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate() + 1);
+  const max = start.getTime() + MAX_SEGMENT_MS;
+  return max < midnight ? { at: max, reason: "max_duration" } : { at: midnight, reason: "midnight" };
+}
+function judgeClock(s, wall, uptimeS) {
+  if (s.lastEventTime === null || s.lastUptimeS === null) return "normal";
+  const dWall = wall - ms(s.lastEventTime);
+  const dUptime = (uptimeS - s.lastUptimeS) * 1e3;
+  if (dWall < 0 && dUptime <= 0) return "late";
+  if (dUptime < 0) return "reboot";
+  const drift = dWall - dUptime;
+  if (drift > CLOCK_TOLERANCE_MS) return "forward";
+  if (drift < -CLOCK_TOLERANCE_MS) return "backward";
+  return "normal";
+}
+function later(a, b) {
+  return ms(b) > ms(a) ? b : a;
+}
+function applyLate(s, ev, wall, cfg) {
+  const open = s.open;
+  const activity = OPENING.has(ev.type) || ev.type === "Stop";
+  const inside = open !== null && wall >= ms(open.startedAt) && wall <= segmentBoundary(open).at && wall - ms(open.lastActivityAt) < cfg.idleMs && (!OPENING.has(ev.type) || ev.mappingVersionId === open.mappingVersionId);
+  if (!inside) return { state: { ...s, lateEvents: s.lateEvents + 1 }, changes: [] };
+  if (!activity || wall <= ms(open.lastActivityAt)) return { state: s, changes: [] };
+  const seg = { ...open, lastActivityAt: ev.localTime };
+  return {
+    state: { ...s, open: seg },
+    changes: [{ kind: "extend", id: seg.id, lastActivityAt: seg.lastActivityAt, working: seg.working, observedAt: seg.observedAt }]
+  };
+}
+function applyEvent(s, ev, cfg) {
+  const wall = ms(ev.localTime);
+  const verdict = judgeClock(s, wall, ev.uptimeS);
+  if (verdict === "late") return applyLate(s, ev, wall, cfg);
+  const changes = [];
+  let open = s.open;
+  const finalize = (seg, stoppedAt, reason, diagnostic) => {
+    changes.push(diagnostic === void 0 ? { kind: "finalize", id: seg.id, stoppedAt, reason } : { kind: "finalize", id: seg.id, stoppedAt, reason, diagnostic });
+    open = null;
+  };
+  const start = (startedAt, mappingVersionId, working) => {
+    open = { id: cfg.newId(), mappingVersionId, startedAt, lastActivityAt: ev.localTime, working, observedAt: ev.localTime };
+    changes.push({ kind: "open", seg: open });
+  };
+  if (open !== null && (verdict === "forward" || verdict === "backward")) {
+    finalize(open, open.lastActivityAt, "clock_jump", verdict === "forward" ? DRIFT_DIAGNOSTIC : BACKWARDS_DIAGNOSTIC);
+  }
+  if (open !== null && wall - ms(open.lastActivityAt) >= cfg.idleMs) finalize(open, open.lastActivityAt, "idle");
+  const current = open;
+  if (ev.type === "SessionEnd") {
+    if (current !== null) finalize(current, current.lastActivityAt, "session_end");
+  } else if (OPENING.has(ev.type) || ev.type === "Stop") {
+    const working = ev.type !== "Stop";
+    if (current === null) {
+      if (working && ev.mappingVersionId !== null) start(ev.localTime, ev.mappingVersionId, true);
+    } else {
+      const boundary = segmentBoundary(current);
+      const otherMapping = working && ev.mappingVersionId !== current.mappingVersionId;
+      if (otherMapping || wall > boundary.at) {
+        const at = wall > boundary.at ? iso(boundary.at) : ev.localTime;
+        finalize(current, at, wall > boundary.at ? boundary.reason : "mapping");
+        const mapping = otherMapping ? ev.mappingVersionId : current.mappingVersionId;
+        if (mapping !== null) start(at, mapping, working);
+      } else {
+        const seg = {
+          ...current,
+          lastActivityAt: later(current.lastActivityAt, ev.localTime),
+          working,
+          observedAt: later(current.observedAt, ev.localTime)
+        };
+        open = seg;
+        changes.push({ kind: "extend", id: seg.id, lastActivityAt: seg.lastActivityAt, working: seg.working, observedAt: seg.observedAt });
+      }
+    }
+  }
+  return { state: { ...s, open, lastEventTime: ev.localTime, lastUptimeS: ev.uptimeS }, changes };
+}
+function onWake(s, now, cfg) {
+  const open = s.open;
+  if (open === null || now.getTime() - ms(open.lastActivityAt) < cfg.idleMs) return { state: s, changes: [] };
+  return { state: { ...s, open: null }, changes: [{ kind: "finalize", id: open.id, stoppedAt: open.lastActivityAt, reason: "idle" }] };
+}
+function idleDueInMs(s, now, cfg) {
+  if (s.open === null) return null;
+  return Math.max(0, ms(s.open.lastActivityAt) + cfg.idleMs - now.getTime());
+}
+
+// hook-src/flusher/segmentation.ts
+var SEGMENTATION_BATCH = 500;
+var ACTIVE_SESSION = "active";
+function newSessionRow(sessionId) {
+  return { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, state: ACTIVE_SESSION, agentVersion: null, provider: null, lateEvents: 0 };
+}
+function toOpen(seg) {
+  return {
+    id: seg.id,
+    mappingVersionId: seg.mappingVersionId,
+    startedAt: seg.startedAt,
+    lastActivityAt: seg.lastActivityAt,
+    working: seg.working,
+    observedAt: seg.observedAt
+  };
+}
+function loadSessionState(store, sessionId) {
+  const row = store.getSession(sessionId) ?? newSessionRow(sessionId);
+  const open = store.openSegmentFor(sessionId);
+  return {
+    row,
+    state: {
+      ...newSessionState(sessionId),
+      open: open ? toOpen(open) : null,
+      lastEventTime: row.lastEventTime,
+      lastUptimeS: row.lastUptimeS,
+      lateEvents: row.lateEvents
+    }
+  };
+}
+function applyChanges(store, sessionId, changes) {
+  for (const c of changes) {
+    if (c.kind === "open") {
+      store.upsertSegment({
+        id: c.seg.id,
+        sessionId,
+        mappingVersionId: c.seg.mappingVersionId,
+        startedAt: c.seg.startedAt,
+        lastActivityAt: c.seg.lastActivityAt,
+        stoppedAt: c.seg.lastActivityAt,
+        working: c.seg.working,
+        observedAt: c.seg.observedAt,
+        final: false,
+        finalReason: null,
+        finalDiagnostic: null,
+        quality: "pending",
+        createdOnServer: false,
+        serverState: null,
+        lastRevision: 0
+      });
+      continue;
+    }
+    const row = store.getSegment(c.id);
+    if (row === null || row.final) continue;
+    if (c.kind === "extend") {
+      store.upsertSegment({ ...row, lastActivityAt: c.lastActivityAt, stoppedAt: c.lastActivityAt, working: c.working, observedAt: c.observedAt });
+    } else {
+      store.upsertSegment({ ...row, stoppedAt: c.stoppedAt, working: false, final: true, finalReason: c.reason, finalDiagnostic: c.diagnostic ?? null });
+    }
+  }
+}
+function segmentSession(store, sessionId, cfg, limit = SEGMENTATION_BATCH) {
+  const { row, state } = loadSessionState(store, sessionId);
+  const events = store.sessionEventsAfter(sessionId, row.lastEventSeq, limit);
+  if (events.length === 0) return 0;
+  let s = state;
+  let provider = row.provider;
+  for (const ev of events) {
+    if (row.state === ACTIVE_SESSION) {
+      const out = applyEvent(s, ev, cfg);
+      s = out.state;
+      applyChanges(store, sessionId, out.changes);
+    }
+    if (ev.provider !== null) provider = ev.provider;
+  }
+  store.upsertSession({
+    ...row,
+    lastEventSeq: events[events.length - 1].seq,
+    lastEventTime: s.lastEventTime,
+    lastUptimeS: s.lastUptimeS,
+    lateEvents: s.lateEvents,
+    provider
+  });
+  return events.length;
+}
+function finalizeIdle(store, now, idleMs) {
+  let due = null;
+  for (const seg of store.openSegments()) {
+    const { state } = loadSessionState(store, seg.sessionId);
+    const out = onWake(state, now, { idleMs });
+    applyChanges(store, seg.sessionId, out.changes);
+    const left = idleDueInMs(out.state, now, { idleMs });
+    if (left !== null) due = due === null ? left : Math.min(due, left);
+  }
+  return due;
+}
+var segmentationStage = (ctx) => {
+  const idleMs = ctx.config.idleMinutes * 6e4;
+  const cfg = { idleMs, newId: () => uuidv7(ctx.now().getTime()) };
+  for (const sessionId of ctx.store.pendingEventSessions()) {
+    for (; ; ) {
+      if (ctx.remainingMs() <= 0) return { dueInMs: 0 };
+      const read = ctx.guarded(() => segmentSession(ctx.store, sessionId, cfg));
+      if (read < SEGMENTATION_BATCH) break;
+    }
+  }
+  const due = ctx.guarded(() => finalizeIdle(ctx.store, ctx.now(), idleMs));
+  return due === null ? {} : { dueInMs: due };
+};
+
 // hook-src/flusher/stages.ts
 var STAGE_NAMES = ["workspace", "segmentation", "revisions", "send", "bounds"];
 var idleStage = () => ({});
 var PIPELINE = {
   workspace: idleStage,
-  segmentation: idleStage,
+  segmentation: segmentationStage,
   revisions: idleStage,
   send: idleStage,
   bounds: idleStage
@@ -886,7 +1191,7 @@ var PIPELINE = {
 // hook-src/flusher/run.ts
 var FLUSHER_BUSY_TIMEOUT_MS = 5e3;
 var WAKE_BUDGET_MS = 6e4;
-var realSleep = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
+var realSleep = (ms2) => new Promise((resolve3) => setTimeout(resolve3, ms2));
 async function runFlusher(instanceDir2, deps) {
   const clock = deps.clock ?? (() => performance.now());
   const sleep = deps.sleep ?? realSleep;
@@ -949,12 +1254,12 @@ var import_node_os = require("node:os");
 var import_node_path6 = require("node:path");
 
 // hook-src/identity.ts
-var import_node_crypto2 = require("node:crypto");
+var import_node_crypto3 = require("node:crypto");
 var import_node_fs3 = require("node:fs");
 var import_node_path4 = require("node:path");
 var INSTANCE_FILE = "instance.json";
 function instanceId(baseUrl, workspaceId, apiKey) {
-  return (0, import_node_crypto2.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
+  return (0, import_node_crypto3.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
 }
 function instanceDir(dataDir, id) {
   return (0, import_node_path4.join)(dataDir, id);
@@ -968,62 +1273,6 @@ function writeInstanceInfo(dir, who, now) {
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
   }
-}
-
-// hook-src/ids.ts
-var import_node_crypto3 = require("node:crypto");
-var CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-var MAX_TIME = 2 ** 48 - 1;
-function encodeTime(ms) {
-  let rest = ms;
-  let text = "";
-  for (let i = 0; i < 10; i++) {
-    text = CROCKFORD[rest % 32] + text;
-    rest = Math.floor(rest / 32);
-  }
-  return text;
-}
-function randomDigits(rand) {
-  const bytes = rand(10);
-  const digits = [];
-  let buffer = 0;
-  let bits = 0;
-  for (let i = 0; i < 10; i++) {
-    buffer = buffer << 8 | bytes[i];
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      digits.push(buffer >> bits & 31);
-    }
-    buffer &= (1 << bits) - 1;
-  }
-  return digits;
-}
-function increment(digits) {
-  for (let i = digits.length - 1; i >= 0; i--) {
-    if (digits[i] < 31) {
-      digits[i] += 1;
-      return true;
-    }
-    digits[i] = 0;
-  }
-  return false;
-}
-var lastMs = -1;
-var lastDigits = [];
-function ulid(nowMs, rand = import_node_crypto3.randomBytes) {
-  let ms = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
-  if (ms <= lastMs) {
-    ms = lastMs;
-    if (!increment(lastDigits)) {
-      ms = Math.min(lastMs + 1, MAX_TIME);
-      lastDigits = randomDigits(rand);
-    }
-  } else {
-    lastDigits = randomDigits(rand);
-  }
-  lastMs = ms;
-  return encodeTime(ms) + lastDigits.map((d) => CROCKFORD[d]).join("");
 }
 
 // hook-src/mapping.ts

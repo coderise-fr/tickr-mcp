@@ -10,6 +10,7 @@
 import type { PluginConfig } from "../config.js";
 import type { Store } from "../store/db.js";
 import type { AgentApi } from "./api.js";
+import { segmentationStage } from "./segmentation.js";
 
 export const STAGE_NAMES = ["workspace", "segmentation", "revisions", "send", "bounds"] as const;
 export type StageName = (typeof STAGE_NAMES)[number];
@@ -60,7 +61,7 @@ export const idleStage: StageRun = () => ({});
 /** The stage behind each name. */
 export const PIPELINE: Record<StageName, StageRun> = {
   workspace: idleStage,
-  segmentation: idleStage,
+  segmentation: segmentationStage,
   revisions: idleStage,
   send: idleStage,
   bounds: idleStage,

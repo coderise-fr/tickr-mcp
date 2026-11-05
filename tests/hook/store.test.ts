@@ -208,9 +208,9 @@ describe("Store", () => {
 
   it("keeps sessions, segments, meta and the owner row", () => {
     const s = store();
-    s.upsertSession({ sessionId: "s-1", lastEventSeq: 3, lastEventTime: null, lastUptimeS: null, state: "active", agentVersion: null, provider: "anthropic" });
-    s.upsertSession({ sessionId: "s-1", lastEventSeq: 4, lastEventTime: "t", lastUptimeS: 5.5, state: "active", agentVersion: "2.1.0", provider: "anthropic" });
-    expect(s.getSession("s-1")).toEqual({ sessionId: "s-1", lastEventSeq: 4, lastEventTime: "t", lastUptimeS: 5.5, state: "active", agentVersion: "2.1.0", provider: "anthropic" });
+    s.upsertSession({ sessionId: "s-1", lastEventSeq: 3, lastEventTime: null, lastUptimeS: null, state: "active", agentVersion: null, provider: "anthropic", lateEvents: 0 });
+    s.upsertSession({ sessionId: "s-1", lastEventSeq: 4, lastEventTime: "t", lastUptimeS: 5.5, state: "active", agentVersion: "2.1.0", provider: "anthropic", lateEvents: 2 });
+    expect(s.getSession("s-1")).toEqual({ sessionId: "s-1", lastEventSeq: 4, lastEventTime: "t", lastUptimeS: 5.5, state: "active", agentVersion: "2.1.0", provider: "anthropic", lateEvents: 2 });
     expect(s.listSessions()).toHaveLength(1);
 
     const seg: SegmentRow = {
@@ -224,6 +224,7 @@ describe("Store", () => {
       observedAt: "2026-11-05T10:05:00.000Z",
       final: false,
       finalReason: null,
+      finalDiagnostic: null,
       quality: "pending",
       createdOnServer: false,
       serverState: null,

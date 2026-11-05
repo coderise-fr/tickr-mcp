@@ -41,7 +41,8 @@ CREATE TABLE sessions (
   last_uptime_s REAL NULL,
   state TEXT NOT NULL DEFAULT 'active',
   agent_version TEXT NULL,
-  provider TEXT NULL
+  provider TEXT NULL,
+  late_events INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE segments (
   id TEXT PRIMARY KEY,
@@ -54,6 +55,7 @@ CREATE TABLE segments (
   observed_at TEXT NOT NULL,
   final INTEGER NOT NULL DEFAULT 0,
   final_reason TEXT NULL,
+  final_diagnostic TEXT NULL,
   quality TEXT NOT NULL DEFAULT 'pending',
   created_on_server INTEGER NOT NULL DEFAULT 0,
   server_state TEXT NULL,
