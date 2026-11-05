@@ -13,6 +13,11 @@
   that this directory and this file content were linked; a changed file or a moved
   checkout must be linked again. Sessions in an unlinked checkout are not tracked and
   say so once at the start.
+- Security: revoking a link also stops the sessions already recorded under it: once
+  `.tickr.json` changed or the link was removed, nothing more of the session is read
+  or sent (store schema v3). Links are stored independently, so two links recorded
+  at once are both kept. Keeping an existing `.tickr.json` in `/tickr:link` still
+  links it on this machine.
 - Security: `/tickr:link` no longer pre-authorises file reads and writes, and
   `/tickr:status` no longer pre-authorises arbitrary `node` commands; Claude Code asks
   before the link is written and recorded.

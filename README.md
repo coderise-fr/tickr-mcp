@@ -145,8 +145,11 @@ directory without `.tickr.json` is not recorded.
 a pull, written by someone else. The plugin therefore tracks a checkout only after
 `/tickr:link` recorded, on your machine, that you linked that directory with that file
 content. After a `git pull` that changes `.tickr.json`, or if you move the checkout,
-run `/tickr:link` again; until then the session says it is not tracked. Claude Code asks
-your permission to write the file and to record the link.
+run `/tickr:link` again (it offers to keep the existing file and only link it); until
+then the session says it is not tracked. Claude Code asks your permission to write the
+file and to record the link. A session already recorded stops being tracked once
+`.tickr.json` changes or its link is removed from the plugin data: nothing more of it
+is read or sent.
 
 **What is sent.** Start and end times, the project, task, tags and description
 from `.tickr.json`, whether the session is still working, and token counts per
@@ -167,6 +170,7 @@ The messages the plugin can show:
 | `clock is ahead of Tickr` | Correct the system clock; sending resumes by itself |
 | `.tickr.json names another workspace` | Run `/tickr:link` with a key of that workspace, or link again |
 | `not a member of the project named in .tickr.json` | Run `/tickr:link` and pick a project you belong to |
+| `no longer linked on this machine` | Run `/tickr:link` in that repository to track it again |
 | `local queue reached its size limit` | Tickr was unreachable for a long time; it resumes once the queue is sent |
 | `collection interrupted` | Some events could not be written locally (disk full or unwritable); check `/tickr:status` |
 
