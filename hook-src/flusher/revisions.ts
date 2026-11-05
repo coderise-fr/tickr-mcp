@@ -6,7 +6,8 @@
 // byte) and the target's last_committed row (kept after the acknowledgement, for the next
 // comparison) are written in one guarded transaction, before any send.
 import { buildTurns, delegatedByTurn, type Turn } from "../attribution.js";
-import { LEDGER_WINDOW_MS, totalsFor } from "../ledger.js";
+import { LEDGER_WINDOW_MS } from "../ledger.js";
+import { delegatedQuality, finalSegmentQuality, type FinalQuality, nextQuality, type SessionContext, sessionContext, usageForRevision } from "../quality.js";
 import type { CommittedRow, DelegatedRow, SegmentRow, Store, TargetKind } from "../store/db.js";
 import { canonicalJson, type NormalizedMapping, parseStoredMapping } from "../mapping.js";
 import type { UsageBody } from "./api.js";
@@ -70,11 +71,27 @@ export interface RevisionTarget {
   id: string;
 }
 
-/** Usage quality of a finalised segment. Part B has no token data: always incomplete (Part C replaces it). */
-export const finalQuality: (seg: SegmentRow) => "complete" | "incomplete" = () => "incomplete";
+export { usageForRevision } from "../quality.js";
 
-/** The body the segment should have on the server now (without its revision). */
-export function desiredSegmentBody(seg: SegmentRow, mapping: NormalizedMapping, now: Date, usage?: UsageRow[]): Omit<SegmentBody, "revision"> {
+/**
+ * Usage quality of a finalised segment from the local state (quality.ts, D21): complete iff
+ * every turn and known subagent attributed to it ended and a complete read covered them.
+ */
+export function finalQuality(store: Store, seg: SegmentRow, now: Date, ctx: SessionContext = sessionContext(store, seg.sessionId, now)): FinalQuality {
+  return finalSegmentQuality(seg, ctx);
+}
+
+/**
+ * The body the segment should have on the server now (without its revision). `quality` is the
+ * usageQuality once final (pending before, whatever is given).
+ */
+export function desiredSegmentBody(
+  seg: SegmentRow,
+  mapping: NormalizedMapping,
+  now: Date,
+  usage?: UsageRow[],
+  quality: UsageQuality = "incomplete",
+): Omit<SegmentBody, "revision"> {
   const fresh = now.getTime() - Date.parse(seg.observedAt) <= WORKING_FRESH_MS;
   const body: Omit<SegmentBody, "revision"> = {
     agentSessionId: seg.sessionId,
@@ -87,7 +104,7 @@ export function desiredSegmentBody(seg: SegmentRow, mapping: NormalizedMapping, 
     working: !seg.final && seg.working && fresh,
     observedAt: seg.observedAt,
     final: seg.final,
-    usageQuality: seg.final ? finalQuality(seg) : "pending",
+    usageQuality: seg.final ? quality : "pending",
   };
   if (usage !== undefined && usage !== null) body.usage = usage;
   return body;
@@ -163,28 +180,64 @@ function refreshWait(last: CommittedRow | null, desired: Omit<SegmentBody, "revi
   if (canonicalBody(desired) === last.canonicalJson) return null; // unchanged: nothing to refresh
   const previous = JSON.parse(last.bodyJson) as Partial<SegmentBody>;
   if (previous.working !== true || previous.final !== false) return null;
-  const moved = { ...desired, stoppedAt: previous.stoppedAt, observedAt: previous.observedAt };
+  // The tokens of a live turn grow with its end: refreshed at the same pace.
+  const moved: Partial<SegmentBody> = { ...desired, stoppedAt: previous.stoppedAt, observedAt: previous.observedAt };
+  if (previous.usage === undefined) delete moved.usage;
+  else moved.usage = previous.usage;
   if (canonicalBody(moved) !== last.canonicalJson) return null;
   const wait = Date.parse(last.committedAt) + LEASE_REFRESH_MS - now.getTime();
   return wait > 0 ? wait : null;
 }
 
-/** Segments: one desired body each, from the segment row and its own mapping version. */
+/** The usageQuality of the last committed revision of a target, or null. */
+function committedQuality(last: CommittedRow | null): UsageQuality | null {
+  if (last === null) return null;
+  const q = (JSON.parse(last.bodyJson) as { usageQuality?: unknown }).usageQuality;
+  return q === "pending" || q === "complete" || q === "incomplete" ? q : null;
+}
+
+/** The session contexts of one pass, built once per session. */
+function contexts(store: Store, now: Date): (sessionId: string) => SessionContext {
+  const cache = new Map<string, SessionContext>();
+  return (sessionId) => {
+    let c = cache.get(sessionId);
+    if (c === undefined) {
+      c = sessionContext(store, sessionId, now);
+      cache.set(sessionId, c);
+    }
+    return c;
+  };
+}
+
+/**
+ * Segments: one desired body each, from the segment row, its own mapping version, the latest
+ * complete usage set and, once final, its quality (never a transition Tickr refuses). A final
+ * segment is evaluated again while its session is read (LEDGER_WINDOW_MS) and its quality or
+ * tokens may still change.
+ */
 export const segmentRevisions: RevisionSource = (ctx) => {
   const now = ctx.now();
   const desired: DesiredRevision[] = [];
   let due: number | null = null;
   const mappings = new Map<number, NormalizedMapping | null>();
-  for (const seg of ctx.store.segmentsForRevision()) {
+  const contextOf = contexts(ctx.store, now);
+  for (const seg of ctx.store.segmentsForRevision(new Date(now.getTime() - LEDGER_WINDOW_MS).toISOString())) {
     if (!mappings.has(seg.mappingVersionId)) {
       const version = ctx.store.getMapping(seg.mappingVersionId);
       mappings.set(seg.mappingVersionId, version ? parseStoredMapping(version.normalizedJson) : null);
     }
     const mapping = mappings.get(seg.mappingVersionId);
     if (!mapping) continue;
-    const body = desiredSegmentBody(seg, mapping, now);
     const target: RevisionTarget = { kind: "segment", id: seg.id };
-    const wait = refreshWait(ctx.store.getLastCommitted("segment", seg.id), body, now);
+    const last = ctx.store.getLastCommitted("segment", seg.id);
+    const usage = usageForRevision(ctx.store, target);
+    let quality: UsageQuality = "pending";
+    if (seg.final) {
+      const computed: FinalQuality = usage?.clamped ? "incomplete" : finalQuality(ctx.store, seg, now, contextOf(seg.sessionId));
+      quality = nextQuality(committedQuality(last), computed, { segment: true, final: true });
+    }
+    const body = desiredSegmentBody(seg, mapping, now, usage?.usage, quality);
+    const wait = refreshWait(last, body, now);
     if (wait !== null) {
       due = minDue(due, wait);
       continue;
@@ -218,16 +271,21 @@ export function delegatedPlaces(store: Store, sessionId: string): Map<string, De
 
 /**
  * The body a delegated entry should have on the server now (without its revision): always both
- * agentSessionId and usage (the usage route requires usage). The first delegated entry of a turn
- * carries the turn's tokens as the ledger attributed them (final response included); the others
- * carry the session link only: usage [] and usageQuality complete.
+ * agentSessionId and usage (the usage route requires usage; [] until a complete set exists). The
+ * first delegated entry of a turn carries the turn's tokens as the ledger attributed them (final
+ * response included); the others carry the session link only (their own tokens, none in
+ * practice) with usageQuality complete.
  */
-export function desiredDelegatedBody(store: Store, row: DelegatedRow, place: DelegatedPlace | undefined): Omit<UsageBody, "revision"> {
-  if (place === undefined || place.turn === null || !place.first) {
-    return { agentSessionId: row.sessionId, usageQuality: "complete", usage: [] };
-  }
-  const usage = totalsFor(store, { kind: "delegated", entryId: row.entryId });
-  return { agentSessionId: row.sessionId, usageQuality: place.turn.endedAt === null ? "pending" : "complete", usage };
+export function desiredDelegatedBody(
+  store: Store,
+  row: DelegatedRow,
+  place: DelegatedPlace | undefined,
+  ctx: SessionContext,
+  previous: UsageQuality | null = null,
+): Omit<UsageBody, "revision"> {
+  const usage = usageForRevision(store, { kind: "delegated", id: row.entryId });
+  const computed = usage?.clamped ? "incomplete" : delegatedQuality(place, ctx.subagents, ctx.reads, ctx.ended, ctx.provisional);
+  return { agentSessionId: row.sessionId, usageQuality: nextQuality(previous, computed, { segment: false, final: false }), usage: usage?.usage ?? [] };
 }
 
 /** Delegated entries: one desired usage body each (PUT /api/v1/entries/{id}/agent-usage). */
@@ -235,10 +293,12 @@ export const delegatedRevisions: RevisionSource = (ctx) => {
   const now = ctx.now();
   const rows = ctx.store.delegatedForRevision(new Date(now.getTime() - LEDGER_WINDOW_MS).toISOString());
   const places = new Map<string, Map<string, DelegatedPlace>>();
+  const contextOf = contexts(ctx.store, now);
   const desired: DesiredRevision[] = [];
   for (const row of rows) {
     if (!places.has(row.sessionId)) places.set(row.sessionId, delegatedPlaces(ctx.store, row.sessionId));
-    const body = desiredDelegatedBody(ctx.store, row, places.get(row.sessionId)!.get(row.entryId));
+    const previous = committedQuality(ctx.store.getLastCommitted("delegated", row.entryId));
+    const body = desiredDelegatedBody(ctx.store, row, places.get(row.sessionId)!.get(row.entryId), contextOf(row.sessionId), previous);
     desired.push({ target: { kind: "delegated", id: row.entryId }, body });
   }
   return { desired, dueInMs: null };

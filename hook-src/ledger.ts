@@ -18,7 +18,9 @@
 // activity (an event in the last 24 h, or an open segment) it reads the main transcript (the
 // events' transcript_path) and the subagent transcripts (<session>/subagents/agent-*.jsonl and the
 // hook's agent_transcript_path) outside any transaction, then records the messages, the read
-// offsets, the subagents and the session's agent version in one guarded transaction.
+// offsets, the subagents and the session's agent version in one guarded transaction. When every
+// read of the session in that pass was complete, the same transaction snapshots the totals of each
+// of the session's targets (usage_snapshots): a revision carries that latest complete set (quality.ts).
 import {
   type AttributionContext,
   buildTurns,
@@ -210,7 +212,7 @@ function recipientWhere(recipient: Recipient): { sql: string; params: string[] }
 
 /**
  * Token totals of a recipient, one row per (provider, model) sorted by provider then model:
- * its unfolded ledger rows plus its folded totals. Not clamped nor capped (C4 applies PD-17).
+ * its unfolded ledger rows plus its folded totals. Not clamped nor capped (quality.ts boundUsage applies PD-17).
  */
 export function totalsFor(store: Store, recipient: Recipient): UsageRow[] {
   const { sql, params } = recipientWhere(recipient);
@@ -470,12 +472,40 @@ export function recordSession(store: Store, sessionId: string, reads: SessionRea
   if (version !== undefined && session !== null) store.setSessionAgentVersion(sessionId, version.slice(0, 64));
 }
 
+// Usage snapshots
+
+/** Records the target's current totals as its latest complete set (inside the caller's guarded transaction). */
+export function snapshotUsage(store: Store, target: { kind: "segment" | "delegated"; id: string }, nowIso: string): void {
+  const recipient: Recipient = target.kind === "segment" ? { kind: "segment", id: target.id } : { kind: "delegated", entryId: target.id };
+  store.db
+    .prepare(
+      `INSERT INTO usage_snapshots (target_kind, target_id, usage_json, quality, at) VALUES (?, ?, ?, 'complete', ?)
+       ON CONFLICT (target_kind, target_id) DO UPDATE SET usage_json = excluded.usage_json, quality = excluded.quality, at = excluded.at
+       WHERE usage_snapshots.usage_json IS NOT excluded.usage_json`,
+    )
+    .run(target.kind, target.id, JSON.stringify(totalsFor(store, recipient)), nowIso);
+}
+
+/** Snapshots every target of the session (segments, delegated entries). */
+export function snapshotSession(store: Store, sessionId: string, nowIso: string): void {
+  for (const seg of store.segmentsForSession(sessionId)) snapshotUsage(store, { kind: "segment", id: seg.id }, nowIso);
+  for (const d of store.delegatedForSession(sessionId)) snapshotUsage(store, { kind: "delegated", id: d.entryId }, nowIso);
+}
+
+/** Every transcript of the session was read to its end without a malformed line. */
+export function readsComplete(reads: SessionReads): boolean {
+  return reads.mains.length > 0 && [...reads.mains, ...reads.subs.map((s) => s.read)].every((r) => r.status === "complete");
+}
+
 export const ledgerStage: StageRun = (ctx) => {
   const now = ctx.now();
   for (const sessionId of sessionsToRead(ctx.store, new Date(now.getTime() - LEDGER_WINDOW_MS).toISOString())) {
     if (ctx.remainingMs() <= 0) return { dueInMs: 0 };
     const reads = readSession(ctx.store, sessionId, now);
-    ctx.guarded(() => recordSession(ctx.store, sessionId, reads));
+    ctx.guarded(() => {
+      recordSession(ctx.store, sessionId, reads);
+      if (readsComplete(reads)) snapshotSession(ctx.store, sessionId, now.toISOString());
+    });
   }
   ctx.guarded(() => foldSettled(ctx.store));
   return {};

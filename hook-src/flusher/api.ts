@@ -2,7 +2,7 @@
 //
 //   GET /api/v1/me                          workspace check and clock skew (once per instance)
 //   PUT /api/v1/agent-segments/{id}         segment revisions (Tickr-Agent header)
-//   PUT /api/v1/entries/{id}/agent-usage    usage of delegated entries (Part C)
+//   PUT /api/v1/entries/{id}/agent-usage    usage of delegated entries
 //
 // The client never follows a redirect (the key and a body must not be replayed elsewhere), never
 // reads a body that is not an RFC 7807 problem on an error, and never puts the key anywhere but

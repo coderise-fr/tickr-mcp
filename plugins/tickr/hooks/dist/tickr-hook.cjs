@@ -471,8 +471,8 @@ var LostOwnership = class extends Error {
   }
   reason;
 };
-function shift(nowIso, ms3) {
-  return new Date(Date.parse(nowIso) + ms3).toISOString();
+function shift(nowIso, ms4) {
+  return new Date(Date.parse(nowIso) + ms4).toISOString();
 }
 function isOwnerFresh(owner, now) {
   if (owner === null) return false;
@@ -667,8 +667,8 @@ function isBusy(error) {
   return typeof code2 === "number" && ((code2 & 255) === 5 || (code2 & 255) === 6);
 }
 var pause = new Int32Array(new SharedArrayBuffer(4));
-function sleepSync(ms3) {
-  if (ms3 > 0) Atomics.wait(pause, 0, 0, ms3);
+function sleepSync(ms4) {
+  if (ms4 > 0) Atomics.wait(pause, 0, 0, ms4);
 }
 var str = (value) => String(value);
 var optStr = (value) => value === null || value === void 0 ? null : String(value);
@@ -943,6 +943,9 @@ var Store = class {
       row.eventSeq
     );
   }
+  delegatedForSession(sessionId) {
+    return this.all("SELECT * FROM delegated WHERE session_id = ? ORDER BY created_at, entry_id", sessionId).map(toDelegated);
+  }
   getDelegated(entryId) {
     const r = this.get("SELECT * FROM delegated WHERE entry_id = ?", entryId);
     return r ? toDelegated(r) : null;
@@ -1075,17 +1078,21 @@ var Store = class {
   }
   /**
    * Segments the revisions stage evaluates: not closed by the server, not terminal, and either
-   * still open or not yet committed as final.
+   * still open, or not yet committed as final, or (their session active since `sinceIso`, when
+   * given) final but whose usage may still change: quality not complete yet, or tokens not folded.
    */
-  segmentsForRevision() {
-    return this.all(
+  segmentsForRevision(sinceIso) {
+    const recheck = sinceIso === void 0 ? "" : `OR (EXISTS (SELECT 1 FROM sessions x WHERE x.session_id = s.session_id AND x.last_event_time >= ?)
+             AND (json_extract(c.body_json, '$.usageQuality') IS NOT 'complete'
+               OR EXISTS (SELECT 1 FROM ledger l WHERE l.recipient_kind = 'segment' AND l.recipient_id = s.id AND l.folded = 0)))`;
+    return this.db.prepare(
       `SELECT s.* FROM segments s
-       LEFT JOIN last_committed c ON c.target_kind = 'segment' AND c.target_id = s.id
-       WHERE s.server_state IS NULL
-         AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'segment' AND t.target_id = s.id)
-         AND (s.final = 0 OR c.target_id IS NULL OR json_extract(c.body_json, '$.final') IS NOT 1)
-       ORDER BY s.started_at, s.id`
-    ).map(toSegment);
+         LEFT JOIN last_committed c ON c.target_kind = 'segment' AND c.target_id = s.id
+         WHERE s.server_state IS NULL
+           AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'segment' AND t.target_id = s.id)
+           AND (s.final = 0 OR c.target_id IS NULL OR json_extract(c.body_json, '$.final') IS NOT 1 ${recheck})
+         ORDER BY s.started_at, s.id`
+    ).all(...sinceIso === void 0 ? [] : [sinceIso]).map((r) => toSegment(r));
   }
   setSegmentRevision(id, revision) {
     this.run("UPDATE segments SET last_revision = ? WHERE id = ?", revision, id);
@@ -1199,7 +1206,8 @@ var Store = class {
    * their delegated row is gone, events already segmented, sessions left without events nor
    * segments (then their ledger rows and totals, unless their recipient has a pending revision,
    * their delegated entries without a pending revision, transcript offsets, subagents and Agent
-   * launches), unused mapping versions, terminal items and shown notices.
+   * launches), usage snapshots of targets gone, unused mapping versions, terminal items and shown
+   * notices.
    * Returns the rows deleted.
    */
   deleteRetired(cutoffIso) {
@@ -1239,6 +1247,11 @@ var Store = class {
     n += this.run(
       `DELETE FROM delegated WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = delegated.session_id)
          AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = 'delegated' AND o.target_id = delegated.entry_id)`
+    );
+    n += this.run(
+      `DELETE FROM usage_snapshots WHERE
+         (target_kind = 'segment' AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = usage_snapshots.target_id))
+         OR (target_kind = 'delegated' AND NOT EXISTS (SELECT 1 FROM delegated d WHERE d.entry_id = usage_snapshots.target_id))`
     );
     for (const table of ["transcript_offsets", "subagents", "agent_launches"]) {
       n += this.run(`DELETE FROM ${table} WHERE session_id IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ${table}.session_id)`);
@@ -1463,11 +1476,11 @@ var import_node_crypto2 = require("node:crypto");
 var CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 var MAX_TIME = 2 ** 48 - 1;
 function timeBytes(nowMs) {
-  let ms3 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
+  let ms4 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
   const bytes = new Array(6);
   for (let i = 5; i >= 0; i--) {
-    bytes[i] = ms3 % 256;
-    ms3 = Math.floor(ms3 / 256);
+    bytes[i] = ms4 % 256;
+    ms4 = Math.floor(ms4 / 256);
   }
   return bytes;
 }
@@ -1483,8 +1496,8 @@ function uuidv7(nowMs, rand = import_node_crypto2.randomBytes) {
   const h = hex(bytes);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
-function encodeTime(ms3) {
-  let rest = ms3;
+function encodeTime(ms4) {
+  let rest = ms4;
   let text = "";
   for (let i = 0; i < 10; i++) {
     text = CROCKFORD[rest % 32] + text;
@@ -1521,18 +1534,18 @@ function increment(digits) {
 var lastMs = -1;
 var lastDigits = [];
 function ulid(nowMs, rand = import_node_crypto2.randomBytes) {
-  let ms3 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
-  if (ms3 <= lastMs) {
-    ms3 = lastMs;
+  let ms4 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
+  if (ms4 <= lastMs) {
+    ms4 = lastMs;
     if (!increment(lastDigits)) {
-      ms3 = Math.min(lastMs + 1, MAX_TIME);
+      ms4 = Math.min(lastMs + 1, MAX_TIME);
       lastDigits = randomDigits(rand);
     }
   } else {
     lastDigits = randomDigits(rand);
   }
-  lastMs = ms3;
-  return encodeTime(ms3) + lastDigits.map((d) => CROCKFORD[d]).join("");
+  lastMs = ms4;
+  return encodeTime(ms4) + lastDigits.map((d) => CROCKFORD[d]).join("");
 }
 
 // hook-src/flusher/segmenter.ts
@@ -1776,8 +1789,8 @@ function isRecord(value) {
 }
 function validTime(value) {
   if (typeof value !== "string") return null;
-  const ms3 = Date.parse(value);
-  return Number.isNaN(ms3) ? null : new Date(ms3).toISOString();
+  const ms4 = Date.parse(value);
+  return Number.isNaN(ms4) ? null : new Date(ms4).toISOString();
 }
 function earlier(a, b) {
   return Date.parse(b) < Date.parse(a) ? b : a;
@@ -2262,12 +2275,30 @@ function recordSession(store, sessionId, reads) {
   const version = [...reads.mains].reverse().find((r) => r.version !== void 0)?.version;
   if (version !== void 0 && session !== null) store.setSessionAgentVersion(sessionId, version.slice(0, 64));
 }
+function snapshotUsage(store, target, nowIso) {
+  const recipient = target.kind === "segment" ? { kind: "segment", id: target.id } : { kind: "delegated", entryId: target.id };
+  store.db.prepare(
+    `INSERT INTO usage_snapshots (target_kind, target_id, usage_json, quality, at) VALUES (?, ?, ?, 'complete', ?)
+       ON CONFLICT (target_kind, target_id) DO UPDATE SET usage_json = excluded.usage_json, quality = excluded.quality, at = excluded.at
+       WHERE usage_snapshots.usage_json IS NOT excluded.usage_json`
+  ).run(target.kind, target.id, JSON.stringify(totalsFor(store, recipient)), nowIso);
+}
+function snapshotSession(store, sessionId, nowIso) {
+  for (const seg of store.segmentsForSession(sessionId)) snapshotUsage(store, { kind: "segment", id: seg.id }, nowIso);
+  for (const d of store.delegatedForSession(sessionId)) snapshotUsage(store, { kind: "delegated", id: d.entryId }, nowIso);
+}
+function readsComplete(reads) {
+  return reads.mains.length > 0 && [...reads.mains, ...reads.subs.map((s) => s.read)].every((r) => r.status === "complete");
+}
 var ledgerStage = (ctx) => {
   const now = ctx.now();
   for (const sessionId of sessionsToRead(ctx.store, new Date(now.getTime() - LEDGER_WINDOW_MS).toISOString())) {
     if (ctx.remainingMs() <= 0) return { dueInMs: 0 };
     const reads = readSession(ctx.store, sessionId, now);
-    ctx.guarded(() => recordSession(ctx.store, sessionId, reads));
+    ctx.guarded(() => {
+      recordSession(ctx.store, sessionId, reads);
+      if (readsComplete(reads)) snapshotSession(ctx.store, sessionId, now.toISOString());
+    });
   }
   ctx.guarded(() => foldSettled(ctx.store));
   return {};
@@ -2639,11 +2670,139 @@ function boundsStage(opts = {}) {
   };
 }
 
+// hook-src/quality.ts
+var MAX_USAGE_ROWS = 20;
+var MAX_TOKENS = 1e12;
+var OTHER_PROVIDER = "other";
+var OTHER_MODELS = "other-models";
+var ms3 = (iso2) => Date.parse(iso2);
+var NEVER = Number.POSITIVE_INFINITY;
+function turnAt2(t, turns) {
+  let found = null;
+  for (const turn of turns) if (ms3(turn.startedAt) <= t && (turn.endedAt === null || t < ms3(turn.endedAt))) found = turn;
+  return found;
+}
+function subagentEnd(sub, turns) {
+  if (sub.stoppedAt !== null) return ms3(sub.stoppedAt);
+  if (sub.source === "hook" || sub.launchedAt === null) return null;
+  const turn = turnAt2(ms3(sub.launchedAt), turns);
+  return turn?.endedAt ? ms3(turn.endedAt) : null;
+}
+function coveredAfter(reads, after) {
+  return reads.length > 0 && reads.every((r) => r.status === "complete" && r.readAt !== null && ms3(r.readAt) >= after);
+}
+function latest(ends, floor) {
+  let max = floor;
+  for (const end of ends) {
+    if (end === null) return null;
+    max = Math.max(max, end);
+  }
+  return max;
+}
+function segmentQuality(seg, turns, subagents, reads, provisional = [], until = null) {
+  const start = ms3(seg.startedAt);
+  const stop = ms3(seg.stoppedAt);
+  const spanEnd = until === null ? NEVER : ms3(until);
+  const inSpan = (iso2) => ms3(iso2) >= start && ms3(iso2) < spanEnd;
+  if (provisional.some(inSpan)) return "incomplete";
+  const mine = turns.filter((t) => ms3(t.startedAt) < Math.max(stop, start + 1) && (t.endedAt === null || ms3(t.endedAt) > start));
+  const subs = subagents.filter(
+    (s) => s.recipientKind === "segment" && s.recipientId === seg.id || s.recipientKind === null && s.launchedAt !== null && inSpan(s.launchedAt)
+  );
+  if (subs.some((s) => s.recipientKind === null)) return "incomplete";
+  const end = latest([...mine.map((t) => t.endedAt === null ? null : ms3(t.endedAt)), ...subs.map((s) => subagentEnd(s, turns))], stop);
+  return end !== null && coveredAfter(reads, end) ? "complete" : "incomplete";
+}
+function delegatedQuality(place, subagents, reads, sessionEnded, provisional = []) {
+  if (place === void 0 || place.turn === null || !place.first) return "complete";
+  const turn = place.turn;
+  const start = ms3(turn.startedAt);
+  const turnEnd = turn.endedAt === null ? null : ms3(turn.endedAt);
+  const inTurn = (iso2) => ms3(iso2) >= start && (turnEnd === null || ms3(iso2) < turnEnd);
+  const launched = subagents.filter((s) => s.launchedAt !== null && inTurn(s.launchedAt));
+  const end = turnEnd === null ? null : latest(launched.map((s) => subagentEnd(s, [turn])), turnEnd);
+  const complete = end !== null && !provisional.some(inTurn) && launched.every((s) => s.recipientKind !== null) && coveredAfter(reads, end);
+  if (complete) return "complete";
+  return sessionEnded ? "incomplete" : "pending";
+}
+var RANK = { pending: 0, incomplete: 1, complete: 2 };
+function nextQuality(previous, computed, target) {
+  if (target.segment && !target.final) return "pending";
+  if (previous === null) return computed;
+  return RANK[computed] >= RANK[previous] ? computed : previous;
+}
+var tokensOf = (r) => r.inputTokens + r.outputTokens + r.cacheCreationInputTokens + r.cacheReadInputTokens;
+var byKey = (a, b) => a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : a.model < b.model ? -1 : a.model > b.model ? 1 : 0;
+function boundUsage(rows) {
+  let kept = rows.map((r) => ({ ...r }));
+  if (kept.length > MAX_USAGE_ROWS) {
+    const sorted = [...kept].sort((a, b) => tokensOf(b) - tokensOf(a) || byKey(a, b));
+    const other = sorted.filter((r) => r.provider === OTHER_PROVIDER && r.model === OTHER_MODELS);
+    const rest = sorted.filter((r) => !(r.provider === OTHER_PROVIDER && r.model === OTHER_MODELS));
+    const top = rest.slice(0, MAX_USAGE_ROWS - 1);
+    const folded = { provider: OTHER_PROVIDER, model: OTHER_MODELS, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+    for (const r of [...rest.slice(MAX_USAGE_ROWS - 1), ...other]) {
+      folded.inputTokens += r.inputTokens;
+      folded.outputTokens += r.outputTokens;
+      folded.cacheCreationInputTokens += r.cacheCreationInputTokens;
+      folded.cacheReadInputTokens += r.cacheReadInputTokens;
+    }
+    kept = [...top, folded];
+  }
+  let clamped = false;
+  const clamp = (n) => {
+    if (n > MAX_TOKENS) {
+      clamped = true;
+      return MAX_TOKENS;
+    }
+    return n;
+  };
+  const usage = kept.map((r) => ({
+    ...r,
+    inputTokens: clamp(r.inputTokens),
+    outputTokens: clamp(r.outputTokens),
+    cacheCreationInputTokens: clamp(r.cacheCreationInputTokens),
+    cacheReadInputTokens: clamp(r.cacheReadInputTokens)
+  })).sort(byKey);
+  return { usage, clamped };
+}
+function usageForRevision(store, target) {
+  const row = store.db.prepare("SELECT usage_json FROM usage_snapshots WHERE target_kind = ? AND target_id = ?").get(target.kind, target.id);
+  if (row === void 0) return void 0;
+  return boundUsage(JSON.parse(row.usage_json));
+}
+function sessionReads(store, sessionId) {
+  return store.db.prepare("SELECT status, read_at FROM transcript_offsets WHERE session_id = ? ORDER BY path").all(sessionId).map((r) => ({ status: r.status, readAt: r.read_at }));
+}
+function provisionalTimes(store, sessionId) {
+  return store.db.prepare("SELECT at FROM ledger WHERE session_id = ? AND recipient_kind IN ('pending', 'turn') ORDER BY at").all(sessionId).map((r) => r.at);
+}
+function sessionContext(store, sessionId, now) {
+  const events = store.attributionEvents(sessionId);
+  const session = store.getSession(sessionId);
+  const quietSince = now.getTime() - LEDGER_WINDOW_MS;
+  const ended = events.some((e) => e.type === "SessionEnd") || session !== null && (session.state !== ACTIVE_SESSION || session.lastEventTime !== null && ms3(session.lastEventTime) < quietSince);
+  return {
+    turns: buildTurns(sessionId, events),
+    subagents: subagentsFor(store, sessionId),
+    reads: sessionReads(store, sessionId),
+    provisional: provisionalTimes(store, sessionId),
+    segments: store.segmentsForSession(sessionId),
+    ended
+  };
+}
+function finalSegmentQuality(seg, ctx) {
+  const next = ctx.segments.find((s) => s.id !== seg.id && ms3(s.startedAt) > ms3(seg.startedAt));
+  return segmentQuality(seg, ctx.turns, ctx.subagents, ctx.reads, ctx.provisional, next?.startedAt ?? null);
+}
+
 // hook-src/flusher/revisions.ts
 var WORKING_FRESH_MS = 2 * 6e4;
 var LEASE_REFRESH_MS = 6e4;
-var finalQuality = () => "incomplete";
-function desiredSegmentBody(seg, mapping, now, usage) {
+function finalQuality(store, seg, now, ctx = sessionContext(store, seg.sessionId, now)) {
+  return finalSegmentQuality(seg, ctx);
+}
+function desiredSegmentBody(seg, mapping, now, usage, quality = "incomplete") {
   const fresh = now.getTime() - Date.parse(seg.observedAt) <= WORKING_FRESH_MS;
   const body = {
     agentSessionId: seg.sessionId,
@@ -2656,7 +2815,7 @@ function desiredSegmentBody(seg, mapping, now, usage) {
     working: !seg.final && seg.working && fresh,
     observedAt: seg.observedAt,
     final: seg.final,
-    usageQuality: seg.final ? finalQuality(seg) : "pending"
+    usageQuality: seg.final ? quality : "pending"
   };
   if (usage !== void 0 && usage !== null) body.usage = usage;
   return body;
@@ -2696,25 +2855,51 @@ function refreshWait(last, desired, now) {
   const previous = JSON.parse(last.bodyJson);
   if (previous.working !== true || previous.final !== false) return null;
   const moved = { ...desired, stoppedAt: previous.stoppedAt, observedAt: previous.observedAt };
+  if (previous.usage === void 0) delete moved.usage;
+  else moved.usage = previous.usage;
   if (canonicalBody(moved) !== last.canonicalJson) return null;
   const wait = Date.parse(last.committedAt) + LEASE_REFRESH_MS - now.getTime();
   return wait > 0 ? wait : null;
+}
+function committedQuality(last) {
+  if (last === null) return null;
+  const q = JSON.parse(last.bodyJson).usageQuality;
+  return q === "pending" || q === "complete" || q === "incomplete" ? q : null;
+}
+function contexts(store, now) {
+  const cache = /* @__PURE__ */ new Map();
+  return (sessionId) => {
+    let c = cache.get(sessionId);
+    if (c === void 0) {
+      c = sessionContext(store, sessionId, now);
+      cache.set(sessionId, c);
+    }
+    return c;
+  };
 }
 var segmentRevisions = (ctx) => {
   const now = ctx.now();
   const desired = [];
   let due = null;
   const mappings = /* @__PURE__ */ new Map();
-  for (const seg of ctx.store.segmentsForRevision()) {
+  const contextOf = contexts(ctx.store, now);
+  for (const seg of ctx.store.segmentsForRevision(new Date(now.getTime() - LEDGER_WINDOW_MS).toISOString())) {
     if (!mappings.has(seg.mappingVersionId)) {
       const version = ctx.store.getMapping(seg.mappingVersionId);
       mappings.set(seg.mappingVersionId, version ? parseStoredMapping(version.normalizedJson) : null);
     }
     const mapping = mappings.get(seg.mappingVersionId);
     if (!mapping) continue;
-    const body = desiredSegmentBody(seg, mapping, now);
     const target = { kind: "segment", id: seg.id };
-    const wait = refreshWait(ctx.store.getLastCommitted("segment", seg.id), body, now);
+    const last = ctx.store.getLastCommitted("segment", seg.id);
+    const usage = usageForRevision(ctx.store, target);
+    let quality = "pending";
+    if (seg.final) {
+      const computed = usage?.clamped ? "incomplete" : finalQuality(ctx.store, seg, now, contextOf(seg.sessionId));
+      quality = nextQuality(committedQuality(last), computed, { segment: true, final: true });
+    }
+    const body = desiredSegmentBody(seg, mapping, now, usage?.usage, quality);
+    const wait = refreshWait(last, body, now);
     if (wait !== null) {
       due = minDue(due, wait);
       continue;
@@ -2734,21 +2919,21 @@ function delegatedPlaces(store, sessionId) {
   }
   return out;
 }
-function desiredDelegatedBody(store, row, place) {
-  if (place === void 0 || place.turn === null || !place.first) {
-    return { agentSessionId: row.sessionId, usageQuality: "complete", usage: [] };
-  }
-  const usage = totalsFor(store, { kind: "delegated", entryId: row.entryId });
-  return { agentSessionId: row.sessionId, usageQuality: place.turn.endedAt === null ? "pending" : "complete", usage };
+function desiredDelegatedBody(store, row, place, ctx, previous = null) {
+  const usage = usageForRevision(store, { kind: "delegated", id: row.entryId });
+  const computed = usage?.clamped ? "incomplete" : delegatedQuality(place, ctx.subagents, ctx.reads, ctx.ended, ctx.provisional);
+  return { agentSessionId: row.sessionId, usageQuality: nextQuality(previous, computed, { segment: false, final: false }), usage: usage?.usage ?? [] };
 }
 var delegatedRevisions = (ctx) => {
   const now = ctx.now();
   const rows = ctx.store.delegatedForRevision(new Date(now.getTime() - LEDGER_WINDOW_MS).toISOString());
   const places = /* @__PURE__ */ new Map();
+  const contextOf = contexts(ctx.store, now);
   const desired = [];
   for (const row of rows) {
     if (!places.has(row.sessionId)) places.set(row.sessionId, delegatedPlaces(ctx.store, row.sessionId));
-    const body = desiredDelegatedBody(ctx.store, row, places.get(row.sessionId).get(row.entryId));
+    const previous = committedQuality(ctx.store.getLastCommitted("delegated", row.entryId));
+    const body = desiredDelegatedBody(ctx.store, row, places.get(row.sessionId).get(row.entryId), contextOf(row.sessionId), previous);
     desired.push({ target: { kind: "delegated", id: row.entryId }, body });
   }
   return { desired, dueInMs: null };
@@ -3044,7 +3229,7 @@ var PIPELINE = {
 // hook-src/flusher/run.ts
 var FLUSHER_BUSY_TIMEOUT_MS = 5e3;
 var WAKE_BUDGET_MS = 6e4;
-var realSleep = (ms3) => new Promise((resolve3) => setTimeout(resolve3, ms3));
+var realSleep = (ms4) => new Promise((resolve3) => setTimeout(resolve3, ms4));
 async function runFlusher(instanceDir2, deps) {
   const clock = deps.clock ?? (() => performance.now());
   const sleep = deps.sleep ?? realSleep;

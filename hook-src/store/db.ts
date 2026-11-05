@@ -492,6 +492,10 @@ export class Store {
     );
   }
 
+  delegatedForSession(sessionId: string): DelegatedRow[] {
+    return this.all("SELECT * FROM delegated WHERE session_id = ? ORDER BY created_at, entry_id", sessionId).map(toDelegated);
+  }
+
   getDelegated(entryId: string): DelegatedRow | null {
     const r = this.get("SELECT * FROM delegated WHERE entry_id = ?", entryId);
     return r ? toDelegated(r) : null;
@@ -642,17 +646,27 @@ export class Store {
 
   /**
    * Segments the revisions stage evaluates: not closed by the server, not terminal, and either
-   * still open or not yet committed as final.
+   * still open, or not yet committed as final, or (their session active since `sinceIso`, when
+   * given) final but whose usage may still change: quality not complete yet, or tokens not folded.
    */
-  segmentsForRevision(): SegmentRow[] {
-    return this.all(
-      `SELECT s.* FROM segments s
-       LEFT JOIN last_committed c ON c.target_kind = 'segment' AND c.target_id = s.id
-       WHERE s.server_state IS NULL
-         AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'segment' AND t.target_id = s.id)
-         AND (s.final = 0 OR c.target_id IS NULL OR json_extract(c.body_json, '$.final') IS NOT 1)
-       ORDER BY s.started_at, s.id`,
-    ).map(toSegment);
+  segmentsForRevision(sinceIso?: string): SegmentRow[] {
+    const recheck =
+      sinceIso === undefined
+        ? ""
+        : `OR (EXISTS (SELECT 1 FROM sessions x WHERE x.session_id = s.session_id AND x.last_event_time >= ?)
+             AND (json_extract(c.body_json, '$.usageQuality') IS NOT 'complete'
+               OR EXISTS (SELECT 1 FROM ledger l WHERE l.recipient_kind = 'segment' AND l.recipient_id = s.id AND l.folded = 0)))`;
+    return this.db
+      .prepare(
+        `SELECT s.* FROM segments s
+         LEFT JOIN last_committed c ON c.target_kind = 'segment' AND c.target_id = s.id
+         WHERE s.server_state IS NULL
+           AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'segment' AND t.target_id = s.id)
+           AND (s.final = 0 OR c.target_id IS NULL OR json_extract(c.body_json, '$.final') IS NOT 1 ${recheck})
+         ORDER BY s.started_at, s.id`,
+      )
+      .all(...(sinceIso === undefined ? [] : [sinceIso]))
+      .map((r) => toSegment(r as Row));
   }
 
   setSegmentRevision(id: string, revision: number): void {
@@ -787,7 +801,8 @@ export class Store {
    * their delegated row is gone, events already segmented, sessions left without events nor
    * segments (then their ledger rows and totals, unless their recipient has a pending revision,
    * their delegated entries without a pending revision, transcript offsets, subagents and Agent
-   * launches), unused mapping versions, terminal items and shown notices.
+   * launches), usage snapshots of targets gone, unused mapping versions, terminal items and shown
+   * notices.
    * Returns the rows deleted.
    */
   deleteRetired(cutoffIso: string): number {
@@ -829,6 +844,11 @@ export class Store {
     n += this.run(
       `DELETE FROM delegated WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = delegated.session_id)
          AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = 'delegated' AND o.target_id = delegated.entry_id)`,
+    );
+    n += this.run(
+      `DELETE FROM usage_snapshots WHERE
+         (target_kind = 'segment' AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = usage_snapshots.target_id))
+         OR (target_kind = 'delegated' AND NOT EXISTS (SELECT 1 FROM delegated d WHERE d.entry_id = usage_snapshots.target_id))`,
     );
     for (const table of ["transcript_offsets", "subagents", "agent_launches"]) {
       n += this.run(`DELETE FROM ${table} WHERE session_id IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = ${table}.session_id)`);

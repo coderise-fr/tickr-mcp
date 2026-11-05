@@ -84,9 +84,10 @@ describe("desiredSegmentBody", () => {
     expect(desiredSegmentBody(segment({ final: true }), MAPPING, at(observed)).working).toBe(false);
   });
 
-  it("usageQuality is pending until final, then the final quality (incomplete in Part B)", () => {
-    expect(desiredSegmentBody(segment(), MAPPING, at("2026-11-05T10:06:00.000Z")).usageQuality).toBe("pending");
+  it("usageQuality is pending until final, then the final quality given (incomplete by default)", () => {
+    expect(desiredSegmentBody(segment(), MAPPING, at("2026-11-05T10:06:00.000Z"), undefined, "complete").usageQuality).toBe("pending");
     expect(desiredSegmentBody(segment({ final: true, working: false }), MAPPING, at("2026-11-05T10:06:00.000Z")).usageQuality).toBe("incomplete");
+    expect(desiredSegmentBody(segment({ final: true, working: false }), MAPPING, at("2026-11-05T10:06:00.000Z"), undefined, "complete").usageQuality).toBe("complete");
   });
 });
 
