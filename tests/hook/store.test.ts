@@ -56,7 +56,25 @@ describe("schema and journal mode", () => {
     const tables = (store.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[])
       .map((t) => t.name)
       .filter((n) => !n.startsWith("sqlite_"));
-    expect(tables).toEqual(["events", "last_committed", "mapping_versions", "meta", "notices", "outbox", "owner", "segments", "sessions", "terminal"]);
+    expect(tables).toEqual([
+      "agent_launches",
+      "delegated",
+      "events",
+      "last_committed",
+      "ledger",
+      "ledger_totals",
+      "mapping_versions",
+      "meta",
+      "notices",
+      "outbox",
+      "owner",
+      "segments",
+      "sessions",
+      "subagents",
+      "terminal",
+      "transcript_offsets",
+      "usage_snapshots",
+    ]);
     store.close();
     const again = flusherStore(path);
     expect(again.schemaVersion()).toBe(SCHEMA_VERSION);
@@ -95,9 +113,34 @@ describe("schema and journal mode", () => {
     migrate(a, steps);
     migrate(b, steps);
     expect(applied).toBe(1);
-    expect(userVersion(a)).toBe(2);
+    expect(userVersion(a)).toBe(MIGRATIONS.length + 1);
     a.close();
     b.close();
+  });
+});
+
+describe("schema v2", () => {
+  it("migrates a v1 store in place: events keep their rows and gain agent_id, agent_transcript_path", () => {
+    const path = join(tempDir(), DB_FILE);
+    const v1 = rawDb(path);
+    migrate(v1, MIGRATIONS.slice(0, 1));
+    v1.exec(
+      "INSERT INTO events (event_id, session_id, type, local_time, uptime_s) VALUES ('E1', 's-1', 'UserPromptSubmit', '2026-11-05T10:00:00.000Z', 1)",
+    );
+    v1.close();
+    const store = flusherStore(path);
+    expect(store.schemaVersion()).toBe(2);
+    expect(store.eventsAfter(0)).toEqual([expect.objectContaining({ eventId: "E1", agentId: null, agentTranscriptPath: null })]);
+    store.close();
+  });
+
+  it("a hook facing a v1 store (not migrated yet by the flusher) writes a fallback file", () => {
+    const { cwd, dir, dbPath, cfg } = linked();
+    const db = rawDb(dbPath);
+    db.exec("PRAGMA user_version = 1");
+    db.close();
+    recordEvent(hookInput("UserPromptSubmit", cwd), cfg, Date.now() + 1000);
+    expect(listJson(join(dir, "fallback"))).toHaveLength(1);
   });
 });
 
@@ -203,6 +246,27 @@ describe("Store", () => {
     expect(s.maxEventSeq()).toBe(second!.seq);
     expect(s.eventsAfter(first!.seq).map((e) => e.eventId)).toEqual(["E2"]);
     expect(s.sessionEventsAfter("other", 0)).toEqual([]);
+    s.close();
+  });
+
+  it("journals the subagent fields of an event", () => {
+    const s = store();
+    s.journal(journalEvent("E1", { type: "SubagentStop", agentId: "a-1", agentTranscriptPath: "/t/s-1/subagents/agent-a-1.jsonl" }));
+    expect(s.eventsAfter(0)[0]).toMatchObject({ type: "SubagentStop", agentId: "a-1", agentTranscriptPath: "/t/s-1/subagents/agent-a-1.jsonl" });
+    s.close();
+  });
+
+  it("keeps transcript offsets and the session's agent version", () => {
+    const s = store();
+    expect(s.getTranscriptOffset("/t/a.jsonl")).toBeNull();
+    const row = { path: "/t/a.jsonl", offset: 10, size: 12, headHash: "h", sessionId: "s-1", status: "partial", readAt: "2026-11-05T10:00:00.000Z" };
+    s.putTranscriptOffset(row);
+    s.putTranscriptOffset({ ...row, offset: 12, sessionId: null, status: "complete" });
+    expect(s.getTranscriptOffset("/t/a.jsonl")).toEqual({ ...row, offset: 12, status: "complete" });
+
+    s.upsertSession({ sessionId: "s-1", lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, state: "active", agentVersion: null, provider: null, lateEvents: 0 });
+    s.setSessionAgentVersion("s-1", "2.1.300");
+    expect(s.getSession("s-1")!.agentVersion).toBe("2.1.300");
     s.close();
   });
 

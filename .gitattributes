@@ -1,1 +1,2 @@
 plugins/tickr/hooks/dist/*.cjs -text
+tests/hook/fixtures/transcripts/** -text

@@ -41,6 +41,10 @@ export interface EventRow {
   toolName: string | null;
   toolUseId: string | null;
   entryId: string | null;
+  /** Set when the event comes from a subagent (hook input agent_id). */
+  agentId: string | null;
+  /** The subagent's own transcript (hook input agent_transcript_path). */
+  agentTranscriptPath: string | null;
 }
 
 export type NewEventRow = Omit<EventRow, "seq">;
@@ -62,6 +66,8 @@ export interface JournalEvent {
   toolName?: string;
   toolUseId?: string;
   entryId?: string;
+  agentId?: string;
+  agentTranscriptPath?: string;
 }
 
 export interface SessionRow {
@@ -136,6 +142,20 @@ export interface NoticeRow {
   shownAt: string | null;
 }
 
+/** How far one transcript file was read (transcript/reader.ts). */
+export interface TranscriptOffsetRow {
+  path: string;
+  /** Byte offset past the last complete line read. */
+  offset: number;
+  /** File size at that read. */
+  size: number;
+  /** SHA-256 hex of the first min(HEAD_BYTES, offset) bytes. */
+  headHash: string;
+  sessionId: string | null;
+  status: string | null;
+  readAt: string | null;
+}
+
 export interface OwnerRow {
   generation: number;
   pid: number;
@@ -176,6 +196,8 @@ function toEvent(r: Row): EventRow {
     toolName: optStr(r.tool_name),
     toolUseId: optStr(r.tool_use_id),
     entryId: optStr(r.entry_id),
+    agentId: optStr(r.agent_id),
+    agentTranscriptPath: optStr(r.agent_transcript_path),
   };
 }
 
@@ -381,8 +403,8 @@ export class Store {
     return (
       this.run(
         `INSERT INTO events (event_id, session_id, type, local_time, uptime_s, mapping_version_id, transcript_path, provider,
-           prompt_id, tool_name, tool_use_id, entry_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING`,
+           prompt_id, tool_name, tool_use_id, entry_id, agent_id, agent_transcript_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING`,
         ev.eventId,
         ev.sessionId,
         ev.type,
@@ -395,6 +417,8 @@ export class Store {
         ev.toolName,
         ev.toolUseId,
         ev.entryId,
+        ev.agentId,
+        ev.agentTranscriptPath,
       ) === 1
     );
   }
@@ -422,6 +446,8 @@ export class Store {
       toolName: ev.toolName ?? null,
       toolUseId: ev.toolUseId ?? null,
       entryId: ev.entryId ?? null,
+      agentId: ev.agentId ?? null,
+      agentTranscriptPath: ev.agentTranscriptPath ?? null,
     });
   }
 
@@ -754,6 +780,42 @@ export class Store {
 
   listNotices(): NoticeRow[] {
     return this.all("SELECT * FROM notices ORDER BY id").map(toNotice);
+  }
+
+  // transcript offsets (see transcript/reader.ts)
+
+  getTranscriptOffset(path: string): TranscriptOffsetRow | null {
+    const r = this.get("SELECT * FROM transcript_offsets WHERE path = ?", path);
+    if (!r) return null;
+    return {
+      path: str(r.path),
+      offset: num(r.offset),
+      size: num(r.size),
+      headHash: str(r.head_hash),
+      sessionId: optStr(r.session_id),
+      status: optStr(r.status),
+      readAt: optStr(r.read_at),
+    };
+  }
+
+  putTranscriptOffset(row: TranscriptOffsetRow): void {
+    this.run(
+      `INSERT INTO transcript_offsets (path, offset, size, head_hash, session_id, status, read_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (path) DO UPDATE SET offset = excluded.offset, size = excluded.size, head_hash = excluded.head_hash,
+         session_id = COALESCE(excluded.session_id, transcript_offsets.session_id), status = excluded.status, read_at = excluded.read_at`,
+      row.path,
+      row.offset,
+      row.size,
+      row.headHash,
+      row.sessionId,
+      row.status,
+      row.readAt,
+    );
+  }
+
+  /** The agent version read from the session's transcript (sent in Tickr-Agent). */
+  setSessionAgentVersion(sessionId: string, version: string): void {
+    this.run("UPDATE sessions SET agent_version = ? WHERE session_id = ? AND agent_version IS NOT ?", version, sessionId, version);
   }
 
   // owner (flusher ownership, see flusher/owner.ts)

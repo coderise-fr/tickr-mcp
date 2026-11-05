@@ -77,6 +77,8 @@ export function buildEvent(
   if (input.prompt_id !== undefined) ev.promptId = input.prompt_id;
   if (input.tool_name !== undefined) ev.toolName = input.tool_name;
   if (input.tool_use_id !== undefined) ev.toolUseId = input.tool_use_id;
+  if (input.agent_id !== undefined) ev.agentId = input.agent_id;
+  if (input.agent_transcript_path !== undefined) ev.agentTranscriptPath = input.agent_transcript_path;
   return ev;
 }
 

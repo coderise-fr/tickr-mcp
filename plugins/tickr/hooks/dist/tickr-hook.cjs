@@ -264,7 +264,7 @@ var import_node_fs = require("node:fs");
 var import_node_path = require("node:path");
 
 // hook-src/store/schema.ts
-var SCHEMA_VERSION = 1;
+var SCHEMA_VERSION = 2;
 var V1 = `
 CREATE TABLE meta (
   key TEXT PRIMARY KEY,
@@ -359,7 +359,81 @@ CREATE TABLE owner (
   heartbeat TEXT NOT NULL
 );
 `;
-var MIGRATIONS = [(db) => db.exec(V1)];
+var V2 = `
+ALTER TABLE events ADD COLUMN agent_id TEXT NULL;
+ALTER TABLE events ADD COLUMN agent_transcript_path TEXT NULL;
+CREATE TABLE transcript_offsets (
+  path TEXT PRIMARY KEY,
+  offset INTEGER NOT NULL,
+  size INTEGER NOT NULL,
+  head_hash TEXT NOT NULL,
+  session_id TEXT NULL,
+  status TEXT NULL,
+  read_at TEXT NULL
+);
+CREATE TABLE ledger (
+  message_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  agent_id TEXT NULL,
+  recipient_kind TEXT NOT NULL,
+  recipient_id TEXT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input INTEGER NOT NULL DEFAULT 0,
+  output INTEGER NOT NULL DEFAULT 0,
+  cache_creation INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  at TEXT NOT NULL,
+  folded INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX ledger_by_recipient ON ledger (recipient_kind, recipient_id);
+CREATE INDEX ledger_by_session ON ledger (session_id, recipient_kind);
+CREATE TABLE ledger_totals (
+  session_id TEXT NOT NULL,
+  recipient_kind TEXT NOT NULL,
+  recipient_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input INTEGER NOT NULL DEFAULT 0,
+  output INTEGER NOT NULL DEFAULT 0,
+  cache_creation INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, recipient_kind, recipient_id, provider, model)
+);
+CREATE TABLE subagents (
+  agent_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  launched_at TEXT NULL,
+  source TEXT NULL,
+  tool_use_id TEXT NULL,
+  transcript_path TEXT NULL,
+  stopped_at TEXT NULL,
+  recipient_kind TEXT NULL,
+  recipient_id TEXT NULL
+);
+CREATE INDEX subagents_by_session ON subagents (session_id);
+CREATE TABLE agent_launches (
+  tool_use_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE delegated (
+  entry_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  prompt_id TEXT NULL,
+  created_at TEXT NOT NULL,
+  event_seq INTEGER NULL
+);
+CREATE TABLE usage_snapshots (
+  target_kind TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  usage_json TEXT NOT NULL,
+  quality TEXT NOT NULL,
+  at TEXT NOT NULL,
+  PRIMARY KEY (target_kind, target_id)
+);
+`;
+var MIGRATIONS = [(db) => db.exec(V1), (db) => db.exec(V2)];
 function userVersion(db) {
   const row = db.prepare("PRAGMA user_version").get();
   return Number(row?.user_version ?? 0);
@@ -453,7 +527,7 @@ function writeFallback(dir, ev) {
     return false;
   }
 }
-var OPTIONAL = ["transcriptPath", "provider", "promptId", "toolName", "toolUseId", "entryId"];
+var OPTIONAL = ["transcriptPath", "provider", "promptId", "toolName", "toolUseId", "entryId", "agentId", "agentTranscriptPath"];
 function parseFallback(text) {
   let raw;
   try {
@@ -615,7 +689,9 @@ function toEvent(r) {
     promptId: optStr(r.prompt_id),
     toolName: optStr(r.tool_name),
     toolUseId: optStr(r.tool_use_id),
-    entryId: optStr(r.entry_id)
+    entryId: optStr(r.entry_id),
+    agentId: optStr(r.agent_id),
+    agentTranscriptPath: optStr(r.agent_transcript_path)
   };
 }
 function toSession(r) {
@@ -795,8 +871,8 @@ var Store = class {
   insertEvent(ev) {
     return this.run(
       `INSERT INTO events (event_id, session_id, type, local_time, uptime_s, mapping_version_id, transcript_path, provider,
-           prompt_id, tool_name, tool_use_id, entry_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING`,
+           prompt_id, tool_name, tool_use_id, entry_id, agent_id, agent_transcript_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING`,
       ev.eventId,
       ev.sessionId,
       ev.type,
@@ -808,7 +884,9 @@ var Store = class {
       ev.promptId,
       ev.toolName,
       ev.toolUseId,
-      ev.entryId
+      ev.entryId,
+      ev.agentId,
+      ev.agentTranscriptPath
     ) === 1;
   }
   /**
@@ -833,7 +911,9 @@ var Store = class {
       promptId: ev.promptId ?? null,
       toolName: ev.toolName ?? null,
       toolUseId: ev.toolUseId ?? null,
-      entryId: ev.entryId ?? null
+      entryId: ev.entryId ?? null,
+      agentId: ev.agentId ?? null,
+      agentTranscriptPath: ev.agentTranscriptPath ?? null
     });
   }
   /** Events with seq > afterSeq, in journal order. */
@@ -1121,6 +1201,38 @@ var Store = class {
   }
   listNotices() {
     return this.all("SELECT * FROM notices ORDER BY id").map(toNotice);
+  }
+  // transcript offsets (see transcript/reader.ts)
+  getTranscriptOffset(path) {
+    const r = this.get("SELECT * FROM transcript_offsets WHERE path = ?", path);
+    if (!r) return null;
+    return {
+      path: str(r.path),
+      offset: num(r.offset),
+      size: num(r.size),
+      headHash: str(r.head_hash),
+      sessionId: optStr(r.session_id),
+      status: optStr(r.status),
+      readAt: optStr(r.read_at)
+    };
+  }
+  putTranscriptOffset(row) {
+    this.run(
+      `INSERT INTO transcript_offsets (path, offset, size, head_hash, session_id, status, read_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (path) DO UPDATE SET offset = excluded.offset, size = excluded.size, head_hash = excluded.head_hash,
+         session_id = COALESCE(excluded.session_id, transcript_offsets.session_id), status = excluded.status, read_at = excluded.read_at`,
+      row.path,
+      row.offset,
+      row.size,
+      row.headHash,
+      row.sessionId,
+      row.status,
+      row.readAt
+    );
+  }
+  /** The agent version read from the session's transcript (sent in Tickr-Agent). */
+  setSessionAgentVersion(sessionId, version) {
+    this.run("UPDATE sessions SET agent_version = ? WHERE session_id = ? AND agent_version IS NOT ?", version, sessionId, version);
   }
   // owner (flusher ownership, see flusher/owner.ts)
   readOwner() {
@@ -1459,6 +1571,8 @@ function buildEvent(input, mapping, now, uptimeS, env) {
   if (input.prompt_id !== void 0) ev.promptId = input.prompt_id;
   if (input.tool_name !== void 0) ev.toolName = input.tool_name;
   if (input.tool_use_id !== void 0) ev.toolUseId = input.tool_use_id;
+  if (input.agent_id !== void 0) ev.agentId = input.agent_id;
+  if (input.agent_transcript_path !== void 0) ev.agentTranscriptPath = input.agent_transcript_path;
   return ev;
 }
 function journalInStore(dbPath, ev, now) {

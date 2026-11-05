@@ -79,6 +79,20 @@ describe("recordEvent", () => {
     store.close();
   });
 
+  it("records the subagent id and transcript of SubagentStart / SubagentStop and of a subagent's tool calls", () => {
+    const { cwd, dbPath, cfg } = linked();
+    recordEvent(hookInput("SubagentStart", cwd, { agent_id: "a-1" }), cfg, soon());
+    recordEvent(hookInput("PostToolUse", cwd, { agent_id: "a-1", tool_name: "Read" }), cfg, soon());
+    recordEvent(hookInput("SubagentStop", cwd, { agent_id: "a-1", agent_transcript_path: "/t/s-1/subagents/agent-a-1.jsonl" }), cfg, soon());
+    const store = flusherStore(dbPath);
+    expect(store.eventsAfter(0).map((e) => [e.type, e.agentId, e.agentTranscriptPath])).toEqual([
+      ["SubagentStart", "a-1", null],
+      ["PostToolUse", "a-1", null],
+      ["SubagentStop", "a-1", "/t/s-1/subagents/agent-a-1.jsonl"],
+    ]);
+    store.close();
+  });
+
   it(".tickr.json changed between two events ⇒ two mapping versions, each event keeps its own", () => {
     const { cwd, dbPath, cfg } = linked();
     recordEvent(hookInput("UserPromptSubmit", cwd), cfg, soon());

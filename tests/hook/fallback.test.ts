@@ -47,6 +47,17 @@ describe("writeFallback", () => {
     expect(JSON.parse(doc.event.mapping.json)).toMatchObject({ workspaceId: WS, projectId: "p-1" });
   });
 
+  it("a fallback file carries the subagent fields to the store", () => {
+    const dir = tempDir();
+    const ev = event({ type: "SubagentStop", agentId: "a-1", agentTranscriptPath: "/t/agent-a-1.jsonl" });
+    writeFallback(join(dir, FALLBACK_DIR), ev);
+    const store = flusherStore(join(dir, DB_FILE));
+    const gen = claimOwnership(store, 1, new Date().toISOString())!;
+    expect(importFallback(store, gen, join(dir, FALLBACK_DIR))).toBe(1);
+    expect(store.eventsAfter(0)[0]).toMatchObject({ eventId: ev.eventId, agentId: "a-1", agentTranscriptPath: "/t/agent-a-1.jsonl" });
+    store.close();
+  });
+
   it("a hook's fallback file holds no key and no prompt text", () => {
     const root = tempDir();
     const cwd = writeMapping(join(root, "repo"));
