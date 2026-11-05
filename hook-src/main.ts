@@ -2,7 +2,7 @@
 //
 //   tickr-hook.cjs <HookEvent>            a Claude Code hook: no network, always exit 0
 //   tickr-hook.cjs flush <instanceDir>    the detached flusher
-//   tickr-hook.cjs status <dataDir>       /tickr:status
+//   tickr-hook.cjs status <dataDir>       /tickr:status (plain text)
 import { uptime } from "node:os";
 import { resolve, sep } from "node:path";
 import { readPluginConfig } from "./config.js";
@@ -12,6 +12,7 @@ import { recordEvent } from "./intake.js";
 import { type HookInput, readHookInput, type Write, writeHookOutput, writeStdout } from "./io.js";
 import { loadSqlite, unsupportedRuntimeMessage } from "./runtime.js";
 import { spawnFlusher } from "./spawn.js";
+import { renderStatus } from "./status.js";
 
 /** Global budget of a hook, counted from process start (below the 1.5 s of SessionEnd). */
 export const HOOK_BUDGET_MS = 1000;
@@ -82,12 +83,30 @@ async function runFlush(dir: string | undefined, env: NodeJS.ProcessEnv): Promis
   await runFlusher(instanceDir, { now: () => new Date(), uptime, api, config, wakeBudgetMs: WAKE_BUDGET_MS });
 }
 
+/**
+ * /tickr:status: plain text on stdout. When the environment carries the plugin options, they
+ * tell which instances are current; otherwise the most recent one of each workspace is.
+ */
+function runStatus(dir: string | undefined, env: NodeJS.ProcessEnv, write: Write): void {
+  if (loadSqlite() === null) {
+    write(`${unsupportedRuntimeMessage()}\n`);
+    return;
+  }
+  const dataDir = dir?.trim() || env.CLAUDE_PLUGIN_DATA?.trim();
+  if (!dataDir) {
+    write("Tickr: no plugin data directory was given.\n");
+    return;
+  }
+  const config = readPluginConfig({ ...env, CLAUDE_PLUGIN_DATA: dataDir });
+  write(renderStatus(resolve(dataDir), "problem" in config ? undefined : { baseUrl: config.baseUrl, apiKey: config.apiKey }));
+}
+
 export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = processIo()): Promise<number> {
   const [mode] = argv;
   try {
     if (isHookEvent(mode)) await runHook(mode, env, io);
     else if (mode === "flush") await runFlush(argv[1], env);
-    // "status" is added with /tickr:status.
+    else if (mode === "status") runStatus(argv[1], env, io.write);
   } catch {
     // A hook never fails the user's session; a failed flusher is started again by the next hook.
   }

@@ -20,6 +20,17 @@ export type { JournalEvent } from "./store/db.js";
 export const HOOK_BUSY_TIMEOUT_MS = 250;
 /** meta key set by the flusher when a local bound is reached: hooks then journal nothing. */
 export const INTAKE_PAUSED_KEY = "intake_paused";
+/** Shown when a session starts in a checkout without .tickr.json. */
+export const UNTRACKED_MESSAGE = "Tickr: this session is not tracked. Run /tickr:link to link this repository to a Tickr project.";
+
+/**
+ * The untracked message is shown once per session: at its SessionStart, but not again when the
+ * same session resumes or is compacted (/clear starts a new session, which is told again).
+ */
+function untracked(input: HookInput): { systemMessage?: string } {
+  if (input.hook_event_name !== "SessionStart" || input.source === "resume" || input.source === "compact") return {};
+  return { systemMessage: UNTRACKED_MESSAGE };
+}
 
 export type Provider = "anthropic" | "bedrock" | "vertex" | "foundry";
 
@@ -102,7 +113,7 @@ function journalInStore(dbPath: string, ev: JournalEvent, now: Date): Journalled
 export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: number, opts: RecordOptions = {}): { systemMessage?: string } {
   const env = opts.env ?? process.env;
   const found = findMapping(input.cwd);
-  if (found === null) return {};
+  if (found === null) return untracked(input);
   if ("invalid" in found) {
     return input.hook_event_name === "SessionStart" ? { systemMessage: `Tickr: ${found.invalid} This session is not tracked.` } : {};
   }

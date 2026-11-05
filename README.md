@@ -115,6 +115,15 @@ example `claude-code/2.1.296`). Only the client's name and version are sent,
 never your prompts. This needs a Tickr release with agent provenance; an older
 Tickr ignores the marking and works as before.
 
+## Claude Code plugin: linking a repository
+
+The `tickr` Claude Code plugin of this repository (in development) records
+Claude Code sessions as Tickr time. `/tickr:link` links a checkout to a Tickr
+project by writing a `.tickr.json` file (workspace, project and optional task,
+tags and description ids) at the repository root. That file is personal: the
+command adds it to the checkout's `.git/info/exclude`, never to `.gitignore`,
+and never commits it. Each developer links their own checkout.
+
 ## Security notes
 
 - Keep the key out of version control and restrict the config file to your

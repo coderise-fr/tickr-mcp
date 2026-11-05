@@ -28,7 +28,7 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_node_os2 = require("node:os");
-var import_node_path8 = require("node:path");
+var import_node_path9 = require("node:path");
 
 // src/config.ts
 var DEFAULT_BASE_URL = "https://tickr.coderise.cloud";
@@ -1210,6 +1210,17 @@ function writeInstanceInfo(dir, who, now) {
     if (error.code !== "EEXIST") throw error;
   }
 }
+function readInstanceInfo(dir) {
+  try {
+    const raw = JSON.parse((0, import_node_fs3.readFileSync)((0, import_node_path3.join)(dir, INSTANCE_FILE), "utf8"));
+    if (!raw || typeof raw.base_url !== "string" || typeof raw.workspace_id !== "string" || typeof raw.created_at !== "string") {
+      return null;
+    }
+    return { base_url: raw.base_url, workspace_id: raw.workspace_id, created_at: raw.created_at };
+  } catch {
+    return null;
+  }
+}
 
 // hook-src/ids.ts
 var import_node_crypto3 = require("node:crypto");
@@ -1418,6 +1429,11 @@ function takeNoticeMessages(store, now) {
 // hook-src/intake.ts
 var HOOK_BUSY_TIMEOUT_MS = 250;
 var INTAKE_PAUSED_KEY = "intake_paused";
+var UNTRACKED_MESSAGE = "Tickr: this session is not tracked. Run /tickr:link to link this repository to a Tickr project.";
+function untracked(input) {
+  if (input.hook_event_name !== "SessionStart" || input.source === "resume" || input.source === "compact") return {};
+  return { systemMessage: UNTRACKED_MESSAGE };
+}
 function enabled(value) {
   if (value === void 0) return false;
   const v = value.trim().toLowerCase();
@@ -1466,7 +1482,7 @@ function journalInStore(dbPath, ev, now) {
 function recordEvent(input, cfg, deadlineMs, opts = {}) {
   const env = opts.env ?? process.env;
   const found = findMapping(input.cwd);
-  if (found === null) return {};
+  if (found === null) return untracked(input);
   if ("invalid" in found) {
     return input.hook_event_name === "SessionStart" ? { systemMessage: `Tickr: ${found.invalid} This session is not tracked.` } : {};
   }
@@ -2297,6 +2313,122 @@ function spawnFlusher(bundlePath, instanceDir2, env) {
   child.unref();
 }
 
+// hook-src/status.ts
+var import_node_fs7 = require("node:fs");
+var import_node_path8 = require("node:path");
+var MAX_TERMINAL_LISTED = 20;
+var PAUSE_TEXT = {
+  unauthorized: "the API key was refused",
+  forbidden_role: "the API key cannot record time",
+  segments_disabled: "this Tickr does not accept agent sessions yet",
+  clock_skew: "this computer's clock is ahead of Tickr"
+};
+function host(baseUrl) {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return "unknown host";
+  }
+}
+function safeLine(text, max) {
+  return text.replace(/[\r\n\t]+/g, " ").replace(/[0-9a-fA-F]{64}/g, "[redacted]").slice(0, max);
+}
+function safeText(text, max = MAX_DIAGNOSTIC) {
+  return safeLine(text.replace(/(?:[A-Za-z]:)?[\\/]\S*/g, "[path]"), max);
+}
+function mtimeMs(path) {
+  try {
+    return (0, import_node_fs7.statSync)(path).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+function fallbackCount(dir) {
+  try {
+    return (0, import_node_fs7.readdirSync)((0, import_node_path8.join)(dir, FALLBACK_DIR)).filter((n) => n.endsWith(".json") && !n.startsWith(".")).length;
+  } catch {
+    return 0;
+  }
+}
+function terminalLine(t) {
+  const kind = t.targetKind === "delegated" ? "delegated entry" : t.targetKind;
+  const day = t.at.slice(0, 10);
+  const diagnostic = t.diagnostic ? ` (${safeText(t.diagnostic)})` : "";
+  return `    - ${safeText(t.code, 64)}, ${kind}, ${day}${diagnostic}`;
+}
+function describeStore(store, view) {
+  const ws = readWorkspace(store);
+  if (ws !== null && ws.workspaceName !== "") view.workspace = `workspace ${safeLine(ws.workspaceName, 80)}`;
+  const pause2 = readPause(store);
+  if (pause2 !== null) view.state = `paused: ${PAUSE_TEXT[pause2.reason] ?? pause2.reason} (since ${pause2.since.slice(0, 10)})`;
+  else if (ws === null) view.state = "active, waiting for the first contact with Tickr";
+  if (store.getMeta(INTAKE_PAUSED_KEY) !== null) view.lines.push("  intake paused: the local queue reached its size limit");
+  view.lines.push(`  pending revisions: ${store.pendingOutboxCount()}`);
+  const terminal = store.listTerminal();
+  if (terminal.length === 0) {
+    view.lines.push("  terminal items: none");
+    return;
+  }
+  const shown = terminal.slice(-MAX_TERMINAL_LISTED);
+  view.lines.push(`  terminal items (never sent again): ${terminal.length}`);
+  if (shown.length < terminal.length) view.lines.push(`    (the ${shown.length} most recent)`);
+  for (const t of shown) view.lines.push(terminalLine(t));
+}
+function viewInstance(dir, name, current) {
+  const info = readInstanceInfo(dir);
+  if (info === null) return null;
+  const view = {
+    host: host(info.base_url),
+    workspace: "workspace not checked yet",
+    lastActivityMs: Math.max(mtimeMs((0, import_node_path8.join)(dir, DB_FILE)), mtimeMs((0, import_node_path8.join)(dir, FALLBACK_DIR)), Date.parse(info.created_at) || 0),
+    workspaceId: info.workspace_id,
+    current: current ? instanceId(current.baseUrl, info.workspace_id, current.apiKey) === name : null,
+    lines: [],
+    state: "active"
+  };
+  let opened;
+  try {
+    opened = openStore((0, import_node_path8.join)(dir, DB_FILE), { role: "hook", busyTimeoutMs: 1e3 });
+    if (opened === "not_migrated") view.lines.push("  nothing sent yet");
+    else if (opened === "newer_schema") view.lines.push("  written by a newer version of the plugin");
+    else describeStore(opened, view);
+  } catch {
+    view.lines.push("  busy, try again in a moment");
+  } finally {
+    if (opened !== void 0 && typeof opened !== "string") opened.close();
+  }
+  const waiting = fallbackCount(dir);
+  if (waiting > 0) view.lines.push(`  events waiting to be journalled: ${waiting}`);
+  return view;
+}
+function renderStatus(dataDir, current) {
+  let names = [];
+  try {
+    names = (0, import_node_fs7.readdirSync)(dataDir).filter((n) => {
+      try {
+        return (0, import_node_fs7.statSync)((0, import_node_path8.join)(dataDir, n, INSTANCE_FILE)).isFile();
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+  }
+  const views = names.map((n) => viewInstance((0, import_node_path8.join)(dataDir, n), n, current)).filter((v) => v !== null);
+  if (views.length === 0) return "Tickr: nothing tracked yet. Link a repository with /tickr:link, then work in it.\n";
+  for (const v of views) {
+    if (v.current !== null) continue;
+    v.current = !views.some((o) => o !== v && o.workspaceId === v.workspaceId && o.lastActivityMs > v.lastActivityMs);
+  }
+  views.sort((a, b) => Number(b.current) - Number(a.current) || a.host.localeCompare(b.host) || a.workspace.localeCompare(b.workspace));
+  const out = ["Tickr plugin status"];
+  for (const v of views) {
+    const state = v.current ? v.state : "previous key or URL (kept for reference, never sent again under the current options)";
+    out.push("", `${v.host}, ${v.workspace}: ${state}`, ...v.lines);
+  }
+  return `${out.join("\n")}
+`;
+}
+
 // hook-src/main.ts
 var HOOK_BUDGET_MS = 1e3;
 var HOOK_EVENTS = [
@@ -2337,16 +2469,31 @@ async function runFlush(dir, env) {
   if (!dir || loadSqlite() === null) return;
   const config = readPluginConfig(env);
   if ("problem" in config) return;
-  const instanceDir2 = (0, import_node_path8.resolve)(dir);
-  if (!instanceDir2.startsWith((0, import_node_path8.resolve)(config.dataDir) + import_node_path8.sep)) return;
+  const instanceDir2 = (0, import_node_path9.resolve)(dir);
+  if (!instanceDir2.startsWith((0, import_node_path9.resolve)(config.dataDir) + import_node_path9.sep)) return;
   const api = createAgentApi({ baseUrl: config.baseUrl, apiKey: config.apiKey, timeoutMs: REQUEST_TIMEOUT_MS });
   await runFlusher(instanceDir2, { now: () => /* @__PURE__ */ new Date(), uptime: import_node_os2.uptime, api, config, wakeBudgetMs: WAKE_BUDGET_MS });
+}
+function runStatus(dir, env, write) {
+  if (loadSqlite() === null) {
+    write(`${unsupportedRuntimeMessage()}
+`);
+    return;
+  }
+  const dataDir = dir?.trim() || env.CLAUDE_PLUGIN_DATA?.trim();
+  if (!dataDir) {
+    write("Tickr: no plugin data directory was given.\n");
+    return;
+  }
+  const config = readPluginConfig({ ...env, CLAUDE_PLUGIN_DATA: dataDir });
+  write(renderStatus((0, import_node_path9.resolve)(dataDir), "problem" in config ? void 0 : { baseUrl: config.baseUrl, apiKey: config.apiKey }));
 }
 async function main(argv, env, io = processIo()) {
   const [mode] = argv;
   try {
     if (isHookEvent(mode)) await runHook(mode, env, io);
     else if (mode === "flush") await runFlush(argv[1], env);
+    else if (mode === "status") runStatus(argv[1], env, io.write);
   } catch {
   }
   return 0;
