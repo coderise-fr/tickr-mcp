@@ -23,6 +23,8 @@ jobs:
   publish:
     needs: check
     runs-on: ubuntu-latest
+    # A required reviewer of this environment approves every publication to npm.
+    environment: npm-publish
     permissions:
       contents: read
       id-token: write
