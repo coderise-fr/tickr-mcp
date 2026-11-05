@@ -1,12 +1,14 @@
 // .tickr.json: which Tickr workspace / project / task / tags a checkout's sessions go to.
 // snake_case on disk, converted explicitly; looked up from cwd upwards, first file wins.
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 export const MAPPING_FILE = ".tickr.json";
 export const DEFAULT_DESCRIPTION = "Claude Code session";
 export const MAX_DESCRIPTION = 2000;
+/** A .tickr.json larger than this is refused (it holds a handful of ids). */
+export const MAX_MAPPING_BYTES = 64 * 1024;
 
 export interface NormalizedMapping {
   workspaceId: string;
@@ -16,7 +18,8 @@ export interface NormalizedMapping {
   description: string;
 }
 
-export type FoundMapping = { mapping: NormalizedMapping; json: string; hash: string };
+/** `dir` is the directory that holds the .tickr.json (the checkout the mapping links). */
+export type FoundMapping = { mapping: NormalizedMapping; json: string; hash: string; dir: string };
 
 /** JSON with object keys sorted at every depth: equal values give equal text. */
 export function canonicalJson(value: unknown): string {
@@ -118,13 +121,21 @@ export function findMapping(cwd: string): FoundMapping | { invalid: string } | n
   for (;;) {
     let text: string | undefined;
     try {
-      text = readFileSync(join(dir, MAPPING_FILE), "utf8");
+      const file = join(dir, MAPPING_FILE);
+      // Only a small regular file is read: a device, a pipe or a huge file would stall every hook.
+      const info = statSync(file);
+      if (!info.isFile()) return { invalid: `${MAPPING_FILE} is not a regular file.` };
+      if (info.size > MAX_MAPPING_BYTES) return { invalid: `${MAPPING_FILE} is larger than ${MAX_MAPPING_BYTES / 1024} KB.` };
+      text = readFileSync(file, "utf8");
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      // Present but unreadable (a directory, no permission ...): the first file still wins.
+      // Present but unreadable (no permission ...): the first file still wins.
       if (code !== "ENOENT" && code !== "ENOTDIR") return { invalid: `${MAPPING_FILE} could not be read.` };
     }
-    if (text !== undefined) return parseMapping(text);
+    if (text !== undefined) {
+      const parsed = parseMapping(text);
+      return "invalid" in parsed ? parsed : { ...parsed, dir };
+    }
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;

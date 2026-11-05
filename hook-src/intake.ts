@@ -21,6 +21,9 @@ export type { JournalEvent } from "./store/db.js";
 export const HOOK_BUSY_TIMEOUT_MS = 250;
 /** meta key set by the flusher when a local bound is reached: hooks then journal nothing. */
 export const INTAKE_PAUSED_KEY = "intake_paused";
+/** Shown when a session starts in a checkout whose .tickr.json was not linked on this machine. */
+export const NOT_LINKED_MESSAGE =
+  "Tickr: this repository's .tickr.json has not been linked on this machine, so this session is not tracked. Run /tickr:link to confirm it.";
 /** Shown when a session starts in a checkout without .tickr.json. */
 export const UNTRACKED_MESSAGE = "Tickr: this session is not tracked. Run /tickr:link to link this repository to a Tickr project.";
 
@@ -42,6 +45,11 @@ export interface RecordOptions {
   uptime?: () => number;
   /** Starts a flusher for the instance; called when no flusher is known to be alive. */
   startFlusher?: (instanceDir: string) => void;
+  /**
+   * Whether the checkout's .tickr.json was linked on this machine (consent.ts). The plugin always
+   * passes it; when absent, no check is made (tests of the journal itself).
+   */
+  linked?: (mappingDir: string, mappingHash: string) => boolean;
 }
 
 function enabled(value: string | undefined): boolean {
@@ -122,6 +130,12 @@ export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: num
   if (found === null) return untracked(input);
   if ("invalid" in found) {
     return input.hook_event_name === "SessionStart" ? { systemMessage: `Tickr: ${found.invalid} This session is not tracked.` } : {};
+  }
+
+  if (opts.linked && !opts.linked(found.dir, found.hash)) {
+    return input.hook_event_name === "SessionStart" && input.source !== "resume" && input.source !== "compact"
+      ? { systemMessage: NOT_LINKED_MESSAGE }
+      : {};
   }
 
   const now = (opts.now ?? (() => new Date()))();

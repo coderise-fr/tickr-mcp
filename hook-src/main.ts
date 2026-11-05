@@ -6,9 +6,11 @@
 import { uptime } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { readPluginConfig } from "./config.js";
+import { isLinked, recordLink } from "./consent.js";
 import { createAgentApi, REQUEST_TIMEOUT_MS } from "./flusher/api.js";
 import { DEBUG_ENV, DEBUG_FILE, debugLogger, runFlusher, WAKE_BUDGET_MS } from "./flusher/run.js";
 import { recordEvent } from "./intake.js";
+import { findMapping } from "./mapping.js";
 import { type HookInput, readHookInput, type Write, writeHookOutput, writeStdout } from "./io.js";
 import { loadSqlite, unsupportedRuntimeMessage } from "./runtime.js";
 import { spawnFlusher, spawnSuccessor, successorStartDelay } from "./spawn.js";
@@ -68,7 +70,11 @@ async function runHook(event: HookEvent, env: NodeJS.ProcessEnv, io: HookIo): Pr
   // The argv event is the wiring of hooks.json: it wins over the event name in the input.
   const bundlePath = io.bundlePath;
   const startFlusher = bundlePath ? (dir: string) => spawnFlusher(bundlePath, dir, env) : undefined;
-  writeHookOutput(recordEvent({ ...input, hook_event_name: event }, config, io.deadlineMs, { env, startFlusher }), io.write);
+  writeHookOutput(recordEvent({ ...input, hook_event_name: event }, config, io.deadlineMs, {
+      env,
+      startFlusher,
+      linked: (mappingDir, hash) => isLinked(config.dataDir, mappingDir, hash),
+    }), io.write);
 }
 
 /**
@@ -116,12 +122,34 @@ function runStatus(dir: string | undefined, env: NodeJS.ProcessEnv, write: Write
   write(renderStatus(resolve(dataDir), "problem" in config ? undefined : { baseUrl: config.baseUrl, apiKey: config.apiKey }));
 }
 
+/**
+ * `accept <dataDir> <checkoutDir>`, run by /tickr:link once the user chose the project: records on
+ * this machine that the checkout's .tickr.json is linked (consent.ts). Plain text on stdout.
+ */
+function runAccept(dataDir: string | undefined, checkoutDir: string | undefined, write: Write): void {
+  if (!dataDir?.trim() || !checkoutDir?.trim()) {
+    write("Tickr: usage: accept <plugin data directory> <repository directory>
+");
+    return;
+  }
+  const found = findMapping(resolve(checkoutDir));
+  if (found === null) write("Tickr: no .tickr.json found; nothing was linked.
+");
+  else if ("invalid" in found) write(`Tickr: ${found.invalid} Nothing was linked.
+`);
+  else if (recordLink(resolve(dataDir), found.dir, found.hash)) write("Tickr: this checkout is linked on this machine. Tracking starts with the next session.
+");
+  else write("Tickr: the link could not be saved (is the plugin data directory writable?).
+");
+}
+
 export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = processIo()): Promise<number> {
   const [mode] = argv;
   try {
     if (isHookEvent(mode)) await runHook(mode, env, io);
     else if (mode === "flush") await runFlush(argv[1], env, io.bundlePath);
     else if (mode === "status") runStatus(argv[1], env, io.write);
+    else if (mode === "accept") runAccept(argv[1], argv[2], io.write);
   } catch {
     // A hook never fails the user's session; a failed flusher is started again by the next hook.
   }
