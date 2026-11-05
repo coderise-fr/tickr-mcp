@@ -1,8 +1,60 @@
 // Entry point of the plugin bundle (plugins/tickr/hooks/dist/tickr-hook.cjs).
-// argv: <HookEvent> | flush <instanceDir> | status <dataDir>
-export async function main(argv: string[], env: NodeJS.ProcessEnv): Promise<number> {
-  void argv;
+//
+//   tickr-hook.cjs <HookEvent>            a Claude Code hook: no network, always exit 0
+//   tickr-hook.cjs flush <instanceDir>    the detached flusher
+//   tickr-hook.cjs status <dataDir>       /tickr:status
+import { type HookInput, readHookInput, type Write, writeHookOutput, writeStdout } from "./io.js";
+import { loadSqlite, unsupportedRuntimeMessage } from "./runtime.js";
+
+/** Global budget of a hook, counted from process start (below the 1.5 s of SessionEnd). */
+export const HOOK_BUDGET_MS = 1000;
+
+export const HOOK_EVENTS = [
+  "SessionStart",
+  "UserPromptSubmit",
+  "PostToolUse",
+  "Stop",
+  "SessionEnd",
+  "SubagentStart",
+  "SubagentStop",
+] as const;
+export type HookEvent = (typeof HOOK_EVENTS)[number];
+
+export function isHookEvent(value: string | undefined): value is HookEvent {
+  return (HOOK_EVENTS as readonly (string | undefined)[]).includes(value);
+}
+
+export interface HookIo {
+  stdin: NodeJS.ReadableStream;
+  /** Absolute time (ms since the epoch) by which the hook must be done. */
+  deadlineMs: number;
+  write: Write;
+}
+
+function processIo(): HookIo {
+  return { stdin: process.stdin, deadlineMs: performance.timeOrigin + HOOK_BUDGET_MS, write: writeStdout };
+}
+
+async function runHook(event: HookEvent, env: NodeJS.ProcessEnv, io: HookIo): Promise<void> {
   void env;
+  if (loadSqlite() === null) {
+    // Hooks become no-ops; say it once, when the session starts.
+    if (event === "SessionStart") writeHookOutput({ systemMessage: unsupportedRuntimeMessage() }, io.write);
+    return;
+  }
+  const input: HookInput | null = await readHookInput(io.stdin, io.deadlineMs);
+  if (input === null) return;
+  // The event is journalled by the store intake (added with the SQLite store).
+}
+
+export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = processIo()): Promise<number> {
+  const [mode] = argv;
+  try {
+    if (isHookEvent(mode)) await runHook(mode, env, io);
+    // "flush" and "status" are added with the flusher and /tickr:status.
+  } catch {
+    // A hook never fails the user's session.
+  }
   return 0;
 }
 

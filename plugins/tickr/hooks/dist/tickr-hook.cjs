@@ -21,12 +21,125 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // hook-src/main.ts
 var main_exports = {};
 __export(main_exports, {
+  HOOK_BUDGET_MS: () => HOOK_BUDGET_MS,
+  HOOK_EVENTS: () => HOOK_EVENTS,
+  isHookEvent: () => isHookEvent,
   main: () => main
 });
 module.exports = __toCommonJS(main_exports);
-async function main(argv, env) {
-  void argv;
+
+// hook-src/io.ts
+var import_node_fs = require("node:fs");
+var OPTIONAL_STRINGS = [
+  "transcript_path",
+  "prompt_id",
+  "tool_name",
+  "tool_use_id",
+  "source",
+  "reason",
+  "agent_id",
+  "agent_transcript_path"
+];
+function toHookInput(raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const record = raw;
+  const { session_id, cwd, hook_event_name } = record;
+  if (typeof session_id !== "string" || session_id === "") return null;
+  if (typeof cwd !== "string" || typeof hook_event_name !== "string" || hook_event_name === "") return null;
+  const input = { session_id, cwd, hook_event_name };
+  for (const key of OPTIONAL_STRINGS) {
+    const value = record[key];
+    if (typeof value === "string") input[key] = value;
+  }
+  if ("tool_response" in record) input.tool_response = record.tool_response;
+  return input;
+}
+function readHookInput(stdin, deadlineMs) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stdin.removeListener("data", onData);
+      stdin.removeListener("end", onEnd);
+      stdin.removeListener("error", onError);
+      resolve(value);
+    };
+    const onData = (chunk) => {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk);
+    };
+    const onEnd = () => {
+      try {
+        finish(toHookInput(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
+      } catch {
+        finish(null);
+      }
+    };
+    const onError = () => finish(null);
+    const timer = setTimeout(() => finish(null), Math.max(0, deadlineMs - Date.now()));
+    timer.unref?.();
+    stdin.on("data", onData);
+    stdin.on("end", onEnd);
+    stdin.on("error", onError);
+  });
+}
+var writeStdout = (text) => {
+  (0, import_node_fs.writeSync)(1, text);
+};
+function writeHookOutput(out, write = writeStdout) {
+  if (!out.systemMessage) return;
+  write(JSON.stringify({ systemMessage: out.systemMessage }));
+}
+
+// hook-src/runtime.ts
+function loadSqlite() {
+  try {
+    const lookup = process.getBuiltinModule;
+    if (typeof lookup !== "function") return null;
+    const sqlite = lookup.call(process, "node:sqlite");
+    return sqlite && typeof sqlite.DatabaseSync === "function" ? sqlite : null;
+  } catch {
+    return null;
+  }
+}
+function unsupportedRuntimeMessage() {
+  return `Tickr: time tracking is off because this Node.js (${process.version}) cannot load node:sqlite without a flag. Put Node.js 22.13 or later on PATH to enable it.`;
+}
+
+// hook-src/main.ts
+var HOOK_BUDGET_MS = 1e3;
+var HOOK_EVENTS = [
+  "SessionStart",
+  "UserPromptSubmit",
+  "PostToolUse",
+  "Stop",
+  "SessionEnd",
+  "SubagentStart",
+  "SubagentStop"
+];
+function isHookEvent(value) {
+  return HOOK_EVENTS.includes(value);
+}
+function processIo() {
+  return { stdin: process.stdin, deadlineMs: performance.timeOrigin + HOOK_BUDGET_MS, write: writeStdout };
+}
+async function runHook(event, env, io) {
   void env;
+  if (loadSqlite() === null) {
+    if (event === "SessionStart") writeHookOutput({ systemMessage: unsupportedRuntimeMessage() }, io.write);
+    return;
+  }
+  const input = await readHookInput(io.stdin, io.deadlineMs);
+  if (input === null) return;
+}
+async function main(argv, env, io = processIo()) {
+  const [mode] = argv;
+  try {
+    if (isHookEvent(mode)) await runHook(mode, env, io);
+  } catch {
+  }
   return 0;
 }
 if (true) {
@@ -37,5 +150,8 @@ if (true) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  HOOK_BUDGET_MS,
+  HOOK_EVENTS,
+  isHookEvent,
   main
 });
