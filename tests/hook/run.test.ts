@@ -2,7 +2,7 @@ import { uptime as osUptime } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { FALLBACK_DIR, writeFallback } from "../../hook-src/fallback.js";
-import { OFFLINE_API } from "../../hook-src/flusher/api.js";
+import { createAgentApi, OFFLINE_API } from "../../hook-src/flusher/api.js";
 import { claimOwnership, guarded, OWNER_STALE_MS, RELEASED_HEARTBEAT } from "../../hook-src/flusher/owner.js";
 import { type FlusherDeps, runFlusher } from "../../hook-src/flusher/run.js";
 import { type FlusherBoundary, STAGE_NAMES, type StageName, type StageRun } from "../../hook-src/flusher/stages.js";
@@ -10,8 +10,9 @@ import { ulid } from "../../hook-src/ids.js";
 import { recordEvent } from "../../hook-src/intake.js";
 import { DB_FILE, type JournalEvent, openStore, type Store } from "../../hook-src/store/db.js";
 import { SCHEMA_VERSION } from "../../hook-src/store/schema.js";
+import { json, type RecordedRequest, startServer } from "../helpers/httpServer.js";
 import { buildChild, startChild } from "./helpers/children.js";
-import { cleanTempDirs, count, hookInput, instanceFor, listJson, pluginConfig, rawDb, tempDir, writeMapping } from "./helpers/env.js";
+import { cleanTempDirs, count, hookInput, instanceFor, listJson, pluginConfig, rawDb, tempDir, WS, writeMapping } from "./helpers/env.js";
 import { journalMapping } from "./helpers/stage.js";
 
 afterEach(() => cleanTempDirs());
@@ -20,13 +21,13 @@ function flusherStore(path: string): Store {
   return openStore(path, { role: "flusher", busyTimeoutMs: 5000 }) as Store;
 }
 
-/** An event as a hook journals it now, with the mapping of writeMapping()'s default .tickr.json. */
-function event(sessionId = "s-1"): JournalEvent {
+/** An event as a hook journals it (agoMs before now), with the mapping of writeMapping()'s default .tickr.json. */
+function event(sessionId = "s-1", agoMs = 0): JournalEvent {
   return {
     eventId: ulid(Date.now()),
     sessionId,
     type: "PostToolUse",
-    localTime: new Date().toISOString(),
+    localTime: new Date(Date.now() - agoMs).toISOString(),
     uptimeS: osUptime(),
     mapping: journalMapping(),
   };
@@ -256,65 +257,104 @@ describe("flusher processes", () => {
     "stage:segmentation",
     "revision_committed",
     "stage:revisions",
+    "sent",
+    "acknowledged",
     "stage:send",
     "stage:bounds",
   ];
 
+  /** A local Tickr: /me names the workspace, every segment PUT is applied (201 the first time). */
+  async function tickr() {
+    const seen = new Set<string>();
+    return startServer((req: RecordedRequest) => {
+      if (req.url === "/api/v1/me") {
+        return json(200, { user: { id: "u", displayName: "D", email: "d@example.test", timezone: "UTC" }, workspace: { id: WS, name: "Acme", timezone: "UTC" }, role: "workspace_user", serverTime: new Date().toISOString() });
+      }
+      const created = !seen.has(req.url);
+      seen.add(req.url);
+      return json(created ? 201 : 200, { id: "e", agentFinalized: false, agentDetached: false });
+    });
+  }
+
   it.each(["event insert", ...BOUNDARIES])(
     "crash at each boundary (event insert, revision commit, send, ack) ⇒ one segment, nothing lost: killed at %s",
     async (point) => {
-      const root = tempDir();
-      const cwd = writeMapping(join(root, "repo"));
-      const data = join(root, "data");
-      const cfg = pluginConfig(data);
-      const dir = instanceFor(data);
-      const path = join(dir, DB_FILE);
-      const store = flusherStore(path);
-      store.journal(event());
-      store.journal(event());
-      store.close();
-      for (let i = 0; i < 3; i++) writeFallback(join(dir, FALLBACK_DIR), event("s-fallback"));
+      const server = await tickr();
+      try {
+        const root = tempDir();
+        const cwd = writeMapping(join(root, "repo"));
+        const data = join(root, "data");
+        const cfg = pluginConfig(data);
+        const dir = instanceFor(data);
+        const path = join(dir, DB_FILE);
+        // Events 10 minutes old: the segments are open and not working, so their desired bodies
+        // do not change between the killed flusher and the one that takes over 3 minutes later.
+        const store = flusherStore(path);
+        store.journal(event("s-1", 10 * 60_000));
+        store.journal(event("s-1", 10 * 60_000));
+        store.close();
+        for (let i = 0; i < 3; i++) writeFallback(join(dir, FALLBACK_DIR), event("s-fallback", 10 * 60_000));
 
-      if (point === "event insert") {
-        const hook = startChild(bundle, ["hold-insert", path]);
-        await hook.waitFor(/^holding$/);
-        await hook.kill();
-      } else {
-        const flusher = startChild(bundle, ["flush", dir, JSON.stringify({ crashAt: point })]);
-        expect(await flusher.waitFor(new RegExp(`^at ${point}$`))).toBe(`at ${point}`);
-        expect(await flusher.exited).not.toBe(0);
-        expect(flusher.lines.some((l) => l.startsWith("outcome"))).toBe(false);
+        if (point === "event insert") {
+          const hook = startChild(bundle, ["hold-insert", path]);
+          await hook.waitFor(/^holding$/);
+          await hook.kill();
+        } else {
+          const flusher = startChild(bundle, ["flush", dir, JSON.stringify({ crashAt: point, baseUrl: server.baseUrl })]);
+          expect(await flusher.waitFor(new RegExp(`^at ${point}$`))).toBe(`at ${point}`);
+          expect(await flusher.exited).not.toBe(0);
+          expect(flusher.lines.some((l) => l.startsWith("outcome"))).toBe(false);
+        }
+        const sentBeforeTakeover = server.requests.filter((r) => r.method === "PUT").length;
+
+        // The next hook is not blocked and journals in the store.
+        const started = performance.now();
+        recordEvent(hookInput("PostToolUse", cwd, { session_id: "s-hook" }), cfg, Date.now() + 1000);
+        expect(performance.now() - started).toBeLessThan(800);
+
+        // A new flusher takes the dead one's instance over once its heartbeat is stale.
+        const api = createAgentApi({ baseUrl: server.baseUrl, apiKey: cfg.apiKey, timeoutMs: 3000 });
+        const later = deps(dir, { api, now: () => new Date(Date.now() + OWNER_STALE_MS + 60_000) });
+        expect(await runFlusher(dir, later.deps)).toBe("done");
+
+        const after = flusherStore(path);
+        try {
+          const ids = after.eventsAfter(0).map((e) => e.eventId);
+          expect(ids).toHaveLength(2 + 3 + 1);
+          expect(new Set(ids).size).toBe(ids.length);
+          expect(after.eventsAfter(0).some((e) => e.sessionId === "s-killed")).toBe(false);
+          expect(listJson(join(dir, FALLBACK_DIR))).toEqual([]);
+          expect(after.readOwner()!.heartbeat).toBe(RELEASED_HEARTBEAT);
+          expect(after.pendingEventSessions()).toEqual([]);
+          expect(after.pendingOutboxCount()).toBe(0);
+
+          // One segment per session, its last committed revision delivered; a revision sent twice
+          // (killed between the answer and its acknowledgement) is the same bytes both times.
+          const puts = server.requests.filter((r) => r.method === "PUT");
+          const bodies = new Map<string, Set<string>>();
+          for (const r of puts) {
+            const key = `${r.url}#${String(JSON.parse(r.body).revision)}`;
+            bodies.set(key, (bodies.get(key) ?? new Set()).add(r.body));
+          }
+          for (const variants of bodies.values()) expect(variants.size).toBe(1);
+          for (const session of ["s-1", "s-fallback", "s-hook"]) {
+            const segments = after.segmentsForSession(session);
+            expect(segments).toHaveLength(1);
+            const last = after.getLastCommitted("segment", segments[0]!.id)!;
+            expect(segments[0]!.lastRevision).toBe(last.revision);
+            expect(segments[0]!.createdOnServer).toBe(true);
+            expect(puts.some((r) => r.url === `/api/v1/agent-segments/${segments[0]!.id}` && r.body === last.bodyJson)).toBe(true);
+          }
+          if (point === "sent") {
+            expect(sentBeforeTakeover).toBe(1);
+            expect(puts.length).toBeGreaterThan(bodies.size); // the unacknowledged revision was replayed
+          }
+        } finally {
+          after.close();
+        }
+      } finally {
+        await server.close();
       }
-
-      // The next hook is not blocked and journals in the store.
-      const started = performance.now();
-      recordEvent(hookInput("PostToolUse", cwd), cfg, Date.now() + 1000);
-      expect(performance.now() - started).toBeLessThan(800);
-
-      // A new flusher takes the dead one's instance over once its heartbeat is stale.
-      const later = deps(dir, { now: () => new Date(Date.now() + OWNER_STALE_MS + 60_000) });
-      expect(await runFlusher(dir, later.deps)).toBe("done");
-
-      const after = flusherStore(path);
-      const ids = after.eventsAfter(0).map((e) => e.eventId);
-      expect(ids).toHaveLength(2 + 3 + 1);
-      expect(new Set(ids).size).toBe(ids.length);
-      expect(after.eventsAfter(0).some((e) => e.sessionId === "s-killed")).toBe(false);
-      expect(listJson(join(dir, FALLBACK_DIR))).toEqual([]);
-      expect(after.readOwner()!.heartbeat).toBe(RELEASED_HEARTBEAT);
-
-      // One segment per session, whatever the crash point, and gap-free revisions 1..N for each.
-      for (const session of ["s-1", "s-fallback"]) {
-        const segments = after.segmentsForSession(session);
-        expect(segments).toHaveLength(1);
-        const revisions = after.outboxFor("segment", segments[0]!.id).map((r) => r.revision);
-        expect(revisions.length).toBeGreaterThan(0);
-        expect(revisions).toEqual(revisions.map((_, i) => i + 1));
-        expect(after.getLastCommitted("segment", segments[0]!.id)!.revision).toBe(revisions.at(-1));
-        expect(segments[0]!.lastRevision).toBe(revisions.at(-1));
-      }
-      expect(after.pendingEventSessions()).toEqual([]);
-      after.close();
     },
   );
 

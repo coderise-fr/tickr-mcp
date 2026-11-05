@@ -10,8 +10,11 @@
 import type { PluginConfig } from "../config.js";
 import type { Store } from "../store/db.js";
 import type { AgentApi } from "./api.js";
+import { boundsStage } from "./bounds.js";
 import { revisionsStage } from "./revisions.js";
 import { segmentationStage } from "./segmentation.js";
+import { sendStage } from "./sender.js";
+import { workspaceStage } from "./workspace.js";
 
 export const STAGE_NAMES = ["workspace", "segmentation", "revisions", "send", "bounds"] as const;
 export type StageName = (typeof STAGE_NAMES)[number];
@@ -19,7 +22,8 @@ export type StageName = (typeof STAGE_NAMES)[number];
 /**
  * Points where the flusher reports its progress (FlusherDeps.onBoundary); crash tests kill the
  * process there. run.ts reports "claimed", "fallback_committed", "stage:<name>" (after each
- * stage) and "released"; the revision and send stages report the other three.
+ * stage) and "released"; the revisions stage reports "revision_committed", the send stage "sent"
+ * (an answer came back, before it is applied) and "acknowledged" (its acknowledgement committed).
  */
 export type FlusherBoundary =
   | "claimed"
@@ -61,9 +65,9 @@ export const idleStage: StageRun = () => ({});
 
 /** The stage behind each name. */
 export const PIPELINE: Record<StageName, StageRun> = {
-  workspace: idleStage,
+  workspace: workspaceStage(),
   segmentation: segmentationStage,
   revisions: revisionsStage(),
-  send: idleStage,
-  bounds: idleStage,
+  send: sendStage(),
+  bounds: boundsStage(),
 };

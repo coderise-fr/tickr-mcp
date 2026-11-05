@@ -6,7 +6,7 @@
 import { uptime } from "node:os";
 import { resolve, sep } from "node:path";
 import { readPluginConfig } from "./config.js";
-import { OFFLINE_API } from "./flusher/api.js";
+import { createAgentApi, REQUEST_TIMEOUT_MS } from "./flusher/api.js";
 import { runFlusher, WAKE_BUDGET_MS } from "./flusher/run.js";
 import { recordEvent } from "./intake.js";
 import { type HookInput, readHookInput, type Write, writeHookOutput, writeStdout } from "./io.js";
@@ -77,7 +77,9 @@ async function runFlush(dir: string | undefined, env: NodeJS.ProcessEnv): Promis
   if ("problem" in config) return;
   const instanceDir = resolve(dir);
   if (!instanceDir.startsWith(resolve(config.dataDir) + sep)) return;
-  await runFlusher(instanceDir, { now: () => new Date(), uptime, api: OFFLINE_API, config, wakeBudgetMs: WAKE_BUDGET_MS });
+  // The key comes from the inherited environment (PD-18), never from argv.
+  const api = createAgentApi({ baseUrl: config.baseUrl, apiKey: config.apiKey, timeoutMs: REQUEST_TIMEOUT_MS });
+  await runFlusher(instanceDir, { now: () => new Date(), uptime, api, config, wakeBudgetMs: WAKE_BUDGET_MS });
 }
 
 export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = processIo()): Promise<number> {

@@ -8,7 +8,7 @@
 import { writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { writeFallback } from "../../../hook-src/fallback.js";
-import { OFFLINE_API } from "../../../hook-src/flusher/api.js";
+import { createAgentApi, OFFLINE_API } from "../../../hook-src/flusher/api.js";
 import { runFlusher } from "../../../hook-src/flusher/run.js";
 import type { FlusherBoundary, StageName, StageResult } from "../../../hook-src/flusher/stages.js";
 import { ulid } from "../../../hook-src/ids.js";
@@ -27,6 +27,8 @@ export interface FlushOptions {
   holdMs?: number;
   /** Added to the wall clock (to look past another flusher's heartbeat). */
   clockOffsetMs?: number;
+  /** A local Tickr to send to (default: OFFLINE_API, nothing is sent). */
+  baseUrl?: string;
 }
 
 function event(sessionId: string, now: Date): JournalEvent {
@@ -77,7 +79,7 @@ if (mode === "hold-insert") {
   runFlusher(dir, {
     now: () => new Date(Date.now() + offset),
     uptime: () => 1000,
-    api: OFFLINE_API,
+    api: opts.baseUrl ? createAgentApi({ baseUrl: opts.baseUrl, apiKey: "tkr_test_child_flusher_key", timeoutMs: 3000 }) : OFFLINE_API,
     config: { apiKey: "tkr_test_child_flusher_key", baseUrl: "https://tickr.example.test", idleMinutes: 15, dataDir: dirname(dir) },
     wakeBudgetMs: 30_000,
     stages,

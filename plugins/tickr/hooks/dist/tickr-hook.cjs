@@ -28,7 +28,7 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_node_os2 = require("node:os");
-var import_node_path7 = require("node:path");
+var import_node_path8 = require("node:path");
 
 // src/config.ts
 var DEFAULT_BASE_URL = "https://tickr.coderise.cloud";
@@ -98,16 +98,166 @@ function readPluginConfig(env) {
   return { apiKey: config.apiKey, baseUrl: config.baseUrl, idleMinutes: idleMinutes(env.CLAUDE_PLUGIN_OPTION_IDLE_MINUTES), dataDir };
 }
 
+// src/api/agent.ts
+var AGENT_HEADER = "Tickr-Agent";
+var AGENT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+var AGENT_VERSION = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,31}$/;
+var FALLBACK_NAME = "mcp-client";
+var FALLBACK_VERSION = "unknown";
+function clean(raw, unwanted, leading, max) {
+  if (typeof raw !== "string") return void 0;
+  const text = raw.replace(unwanted, "-").replace(/-{2,}/g, "-").replace(leading, "").slice(0, max);
+  return text === "" ? void 0 : text;
+}
+function sanitizeAgentName(raw) {
+  const text = clean(typeof raw === "string" ? raw.toLowerCase() : raw, /[^a-z0-9._-]/g, /^[^a-z0-9]+/, 64);
+  return text !== void 0 && AGENT_NAME.test(text) ? text : void 0;
+}
+function sanitizeAgentVersion(raw) {
+  const text = clean(raw, /[^A-Za-z0-9.+_-]/g, /^[^A-Za-z0-9]+/, 32);
+  return text !== void 0 && AGENT_VERSION.test(text) ? text : void 0;
+}
+function agentHeaderValue(info) {
+  const name = sanitizeAgentName(info?.name) ?? FALLBACK_NAME;
+  const version = sanitizeAgentVersion(info?.version) ?? FALLBACK_VERSION;
+  return `${name}/${version}`;
+}
+
+// hook-src/version.ts
+var PLUGIN_VERSION = "0.1.0";
+
 // hook-src/flusher/api.ts
-var LATER = { kind: "retry", afterMs: 6e4 };
-var OFFLINE_API = {
-  me: () => Promise.resolve(LATER),
-  putSegment: () => Promise.resolve(LATER),
-  putUsage: () => Promise.resolve(LATER)
-};
+var REQUEST_TIMEOUT_MS = 3e3;
+var USER_AGENT = `tickr-plugin/${PLUGIN_VERSION}`;
+var ROUTE_NOT_FOUND = "Route not found";
+var CLOSING_CONFLICTS = /* @__PURE__ */ new Set(["segment_detached", "segment_finalized"]);
+function parseRetryAfter(value, nowMs) {
+  if (value === null || value.trim() === "") return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.round(seconds * 1e3) : null;
+  if (!/[A-Za-z]/.test(value)) return null;
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? null : Math.max(0, date - nowMs);
+}
+async function readProblem(res) {
+  const type = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (type !== "application/problem+json") {
+    await res.body?.cancel().catch(() => void 0);
+    return null;
+  }
+  try {
+    const body = await res.json();
+    if (typeof body !== "object" || body === null) return null;
+    const codes = Array.isArray(body.errors) ? body.errors.map((e) => e?.code).filter((c) => typeof c === "string") : [];
+    return { detail: typeof body.detail === "string" ? body.detail : null, codes };
+  } catch {
+    return null;
+  }
+}
+function code(raw, fallback) {
+  if (typeof raw !== "string") return fallback;
+  const parts = raw.toLowerCase().split(/[^a-z0-9]/).filter((part) => part !== "");
+  const clean2 = parts.join("_").slice(0, 64);
+  return clean2 === "" ? fallback : clean2;
+}
+function classify(route, status, problem, retryAfterMs) {
+  const detail = problem?.detail ?? null;
+  if (status === 401) return { kind: "pause", reason: "unauthorized" };
+  if (status === 403) {
+    if (detail === "not_project_member") return { kind: "terminal", code: "not_project_member", closesSegment: false };
+    return { kind: "pause", reason: "forbidden_role" };
+  }
+  if (route === "me") return { kind: "retry", afterMs: retryAfterMs };
+  if (status === 404) {
+    if (route !== "usage" && (detail === ROUTE_NOT_FOUND || problem === null)) return { kind: "pause", reason: "segments_disabled" };
+    return { kind: "terminal", code: "not_found", closesSegment: false };
+  }
+  if (status === 409) {
+    const c = code(detail, "conflict");
+    return { kind: "terminal", code: c, closesSegment: route === "segment" && CLOSING_CONFLICTS.has(c) };
+  }
+  if (status === 422) return { kind: "terminal", code: code(problem?.codes[0], "validation"), closesSegment: false };
+  if (status === 429 || status >= 500) return { kind: "retry", afterMs: retryAfterMs };
+  if (status < 400) return { kind: "retry", afterMs: retryAfterMs };
+  return { kind: "terminal", code: `http_${status}`, closesSegment: false };
+}
+async function applied(res) {
+  const entry = await res.json().catch(() => null);
+  return {
+    kind: "applied",
+    created: res.status === 201,
+    finalized: entry?.agentFinalized === true,
+    detached: entry?.agentDetached === true
+  };
+}
+function createAgentApi(o) {
+  const timeoutMs = o.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const now = o.now ?? Date.now;
+  const doFetch = o.fetch ?? fetch;
+  const base = o.baseUrl;
+  async function send(route, method, path, body, extra) {
+    const headers = {
+      Authorization: `Bearer ${o.apiKey}`,
+      Accept: "application/json",
+      "User-Agent": USER_AGENT,
+      ...extra
+    };
+    if (body !== void 0) headers["Content-Type"] = "application/json";
+    const startedMs = now();
+    let res;
+    try {
+      res = await doFetch(base + path, {
+        method,
+        headers,
+        body: body === void 0 ? void 0 : JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+        redirect: "manual"
+      });
+    } catch {
+      return { kind: "retry", afterMs: null };
+    }
+    if (res.status >= 200 && res.status < 300) return { res, startedMs };
+    const retryAfter = parseRetryAfter(res.headers.get("retry-after"), now());
+    const problem = await readProblem(res);
+    return classify(route, res.status, problem, retryAfter);
+  }
+  const id = (value) => encodeURIComponent(value);
+  return {
+    async me() {
+      const out = await send("me", "GET", "/api/v1/me", void 0, {});
+      if (!("res" in out)) return out;
+      const endedMs = now();
+      try {
+        const body = await out.res.json();
+        const workspaceId = body?.workspace?.id;
+        const serverTime = body?.serverTime;
+        if (typeof workspaceId !== "string" || typeof serverTime !== "string" || Number.isNaN(Date.parse(serverTime))) {
+          return { kind: "retry", afterMs: null };
+        }
+        const name = body?.workspace?.name;
+        return {
+          workspaceId,
+          workspaceName: typeof name === "string" ? name : "",
+          serverTime,
+          localTime: new Date((out.startedMs + endedMs) / 2).toISOString()
+        };
+      } catch {
+        return { kind: "retry", afterMs: null };
+      }
+    },
+    async putSegment(segmentId, body, agent) {
+      const out = await send("segment", "PUT", `/api/v1/agent-segments/${id(segmentId)}`, body, { [AGENT_HEADER]: agent });
+      return "res" in out ? applied(out.res) : out;
+    },
+    async putUsage(entryId, body) {
+      const out = await send("usage", "PUT", `/api/v1/entries/${id(entryId)}/agent-usage`, body, {});
+      return "res" in out ? applied(out.res) : out;
+    }
+  };
+}
 
 // hook-src/flusher/run.ts
-var import_node_path4 = require("node:path");
+var import_node_path7 = require("node:path");
 
 // hook-src/fallback.ts
 var import_node_fs = require("node:fs");
@@ -439,8 +589,8 @@ function unsupportedRuntimeMessage() {
 var DB_FILE = "tickr.db";
 var MAX_DIAGNOSTIC = 200;
 function isBusy(error) {
-  const code = error?.errcode;
-  return typeof code === "number" && ((code & 255) === 5 || (code & 255) === 6);
+  const code2 = error?.errcode;
+  return typeof code2 === "number" && ((code2 & 255) === 5 || (code2 & 255) === 6);
 }
 var pause = new Int32Array(new SharedArrayBuffer(4));
 function sleepSync(ms2) {
@@ -853,6 +1003,90 @@ var Store = class {
   pendingOutboxCount() {
     return num(this.get("SELECT COUNT(*) AS c FROM outbox")?.c);
   }
+  /** The latest pending revision of every target, due or not. */
+  latestOutbox() {
+    return this.all(
+      `SELECT o.* FROM outbox o
+       WHERE o.revision = (SELECT MAX(i.revision) FROM outbox i WHERE i.target_kind = o.target_kind AND i.target_id = o.target_id)
+       ORDER BY o.target_kind, o.target_id`
+    ).map(toOutbox);
+  }
+  /** The earliest next attempt among the latest pending revisions, or null when none is pending. */
+  nextOutboxDue() {
+    return optStr(
+      this.get(
+        `SELECT MIN(o.next_attempt_at) AS m FROM outbox o
+         WHERE o.revision = (SELECT MAX(i.revision) FROM outbox i WHERE i.target_kind = o.target_kind AND i.target_id = o.target_id)`
+      )?.m
+    );
+  }
+  /** Removes every pending revision of one target; returns how many. */
+  deleteOutboxFor(kind, id) {
+    return this.run("DELETE FROM outbox WHERE target_kind = ? AND target_id = ?", kind, id);
+  }
+  /**
+   * Removes the pending revisions older than their target's latest one. Only the latest is ever
+   * sent and its acknowledgement removes the older ones anyway; returns how many.
+   */
+  pruneSupersededOutbox() {
+    return this.run(
+      `DELETE FROM outbox WHERE revision < (SELECT MAX(i.revision) FROM outbox i
+         WHERE i.target_kind = outbox.target_kind AND i.target_id = outbox.target_id)`
+    );
+  }
+  /** The server holds the segment (any revision was applied). */
+  markSegmentCreated(id) {
+    this.run("UPDATE segments SET created_on_server = 1 WHERE id = ? AND created_on_server = 0", id);
+  }
+  /** Sessions with an event after `afterSeq` journalled with one of these mapping versions. */
+  sessionsWithMappingsAfter(afterSeq, mappingVersionIds) {
+    if (mappingVersionIds.length === 0) return [];
+    const marks = mappingVersionIds.map(() => "?").join(", ");
+    return this.db.prepare(`SELECT DISTINCT session_id FROM events WHERE seq > ? AND mapping_version_id IN (${marks}) ORDER BY session_id`).all(afterSeq, ...mappingVersionIds).map((r) => str(r.session_id));
+  }
+  /**
+   * Retention: deletes what is settled and older than cutoffIso — final segments without a
+   * pending revision (and their last committed body), other targets' last committed bodies,
+   * events already segmented, sessions left without events nor segments, unused mapping
+   * versions, terminal items and shown notices. Returns the rows deleted.
+   */
+  deleteRetired(cutoffIso) {
+    let n = 0;
+    n += this.run(
+      `DELETE FROM segments WHERE final = 1 AND stopped_at < ?
+         AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = 'segment' AND o.target_id = segments.id)`,
+      cutoffIso
+    );
+    n += this.run(
+      `DELETE FROM last_committed WHERE
+         (target_kind = 'segment' AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = last_committed.target_id))
+         OR (target_kind <> 'segment' AND committed_at < ?
+             AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = last_committed.target_kind AND o.target_id = last_committed.target_id))`,
+      cutoffIso
+    );
+    n += this.run(
+      `DELETE FROM events WHERE local_time < ?
+         AND seq <= COALESCE((SELECT s.last_event_seq FROM sessions s WHERE s.session_id = events.session_id), 0)`,
+      cutoffIso
+    );
+    n += this.run(
+      `DELETE FROM sessions WHERE (last_event_time IS NULL OR last_event_time < ?)
+         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = sessions.session_id)
+         AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.session_id = sessions.session_id)`,
+      cutoffIso
+    );
+    n += this.run(
+      `DELETE FROM mapping_versions WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.mapping_version_id = mapping_versions.id)
+         AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.mapping_version_id = mapping_versions.id)`
+    );
+    n += this.run("DELETE FROM terminal WHERE at < ?", cutoffIso);
+    n += this.run("DELETE FROM notices WHERE shown_at IS NOT NULL AND created_at < ?", cutoffIso);
+    return n;
+  }
+  /** Free pages of the database file (space a VACUUM would give back). */
+  freePages() {
+    return num(this.db.prepare("PRAGMA freelist_count").get()?.freelist_count);
+  }
   // terminal items (never re-queued, listed by /tickr:status)
   addTerminal(t) {
     this.run(
@@ -947,10 +1181,117 @@ function openStore(path, opts) {
   }
 }
 
-// hook-src/mapping.ts
+// hook-src/flusher/bounds.ts
+var import_node_fs5 = require("node:fs");
+var import_node_path6 = require("node:path");
+
+// hook-src/intake.ts
+var import_node_os = require("node:os");
+var import_node_path5 = require("node:path");
+
+// hook-src/identity.ts
 var import_node_crypto2 = require("node:crypto");
 var import_node_fs3 = require("node:fs");
 var import_node_path3 = require("node:path");
+var INSTANCE_FILE = "instance.json";
+function instanceId(baseUrl, workspaceId, apiKey) {
+  return (0, import_node_crypto2.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
+}
+function instanceDir(dataDir, id) {
+  return (0, import_node_path3.join)(dataDir, id);
+}
+function writeInstanceInfo(dir, who, now) {
+  (0, import_node_fs3.mkdirSync)(dir, { recursive: true });
+  const info = { base_url: who.baseUrl, workspace_id: who.workspaceId, created_at: now.toISOString() };
+  try {
+    (0, import_node_fs3.writeFileSync)((0, import_node_path3.join)(dir, INSTANCE_FILE), `${JSON.stringify(info)}
+`, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+}
+
+// hook-src/ids.ts
+var import_node_crypto3 = require("node:crypto");
+var CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+var MAX_TIME = 2 ** 48 - 1;
+function timeBytes(nowMs) {
+  let ms2 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
+  const bytes = new Array(6);
+  for (let i = 5; i >= 0; i--) {
+    bytes[i] = ms2 % 256;
+    ms2 = Math.floor(ms2 / 256);
+  }
+  return bytes;
+}
+function hex(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+function uuidv7(nowMs, rand = import_node_crypto3.randomBytes) {
+  const bytes = new Uint8Array(16);
+  bytes.set(timeBytes(nowMs), 0);
+  bytes.set(rand(10).subarray(0, 10), 6);
+  bytes[6] = 112 | bytes[6] & 15;
+  bytes[8] = 128 | bytes[8] & 63;
+  const h = hex(bytes);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+function encodeTime(ms2) {
+  let rest = ms2;
+  let text = "";
+  for (let i = 0; i < 10; i++) {
+    text = CROCKFORD[rest % 32] + text;
+    rest = Math.floor(rest / 32);
+  }
+  return text;
+}
+function randomDigits(rand) {
+  const bytes = rand(10);
+  const digits = [];
+  let buffer = 0;
+  let bits = 0;
+  for (let i = 0; i < 10; i++) {
+    buffer = buffer << 8 | bytes[i];
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      digits.push(buffer >> bits & 31);
+    }
+    buffer &= (1 << bits) - 1;
+  }
+  return digits;
+}
+function increment(digits) {
+  for (let i = digits.length - 1; i >= 0; i--) {
+    if (digits[i] < 31) {
+      digits[i] += 1;
+      return true;
+    }
+    digits[i] = 0;
+  }
+  return false;
+}
+var lastMs = -1;
+var lastDigits = [];
+function ulid(nowMs, rand = import_node_crypto3.randomBytes) {
+  let ms2 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
+  if (ms2 <= lastMs) {
+    ms2 = lastMs;
+    if (!increment(lastDigits)) {
+      ms2 = Math.min(lastMs + 1, MAX_TIME);
+      lastDigits = randomDigits(rand);
+    }
+  } else {
+    lastDigits = randomDigits(rand);
+  }
+  lastMs = ms2;
+  return encodeTime(ms2) + lastDigits.map((d) => CROCKFORD[d]).join("");
+}
+
+// hook-src/mapping.ts
+var import_node_crypto4 = require("node:crypto");
+var import_node_fs4 = require("node:fs");
+var import_node_path4 = require("node:path");
 var MAPPING_FILE = ".tickr.json";
 var DEFAULT_DESCRIPTION = "Claude Code session";
 var MAX_DESCRIPTION = 2e3;
@@ -1031,23 +1372,203 @@ function parseMapping(text) {
   const mapping = normalizeMapping(raw);
   if ("invalid" in mapping) return mapping;
   const json = canonicalJson(mapping);
-  return { mapping, json, hash: (0, import_node_crypto2.createHash)("sha256").update(json, "utf8").digest("hex") };
+  return { mapping, json, hash: (0, import_node_crypto4.createHash)("sha256").update(json, "utf8").digest("hex") };
 }
 function findMapping(cwd) {
-  let dir = (0, import_node_path3.resolve)(cwd);
+  let dir = (0, import_node_path4.resolve)(cwd);
   for (; ; ) {
     let text;
     try {
-      text = (0, import_node_fs3.readFileSync)((0, import_node_path3.join)(dir, MAPPING_FILE), "utf8");
+      text = (0, import_node_fs4.readFileSync)((0, import_node_path4.join)(dir, MAPPING_FILE), "utf8");
     } catch (error) {
-      const code = error.code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") return { invalid: `${MAPPING_FILE} could not be read.` };
+      const code2 = error.code;
+      if (code2 !== "ENOENT" && code2 !== "ENOTDIR") return { invalid: `${MAPPING_FILE} could not be read.` };
     }
     if (text !== void 0) return parseMapping(text);
-    const parent = (0, import_node_path3.dirname)(dir);
+    const parent = (0, import_node_path4.dirname)(dir);
     if (parent === dir) return null;
     dir = parent;
   }
+}
+
+// hook-src/notices.ts
+var MESSAGES = {
+  intake_paused: "Tickr: time tracking is paused because the local queue reached its size limit. Run /tickr:status for details.",
+  unauthorized: "Tickr: the API key was refused. Check the Tickr plugin option api_key; sending is paused until then.",
+  forbidden_role: "Tickr: this API key cannot record time (read-only role). Sending is paused.",
+  segments_disabled: "Tickr: this Tickr instance does not accept agent sessions yet. Sending is paused and retried later.",
+  clock_skew: "Tickr: this computer's clock is ahead of Tickr. Sending is paused until the clocks agree.",
+  workspace_mismatch: "Tickr: .tickr.json names another workspace than the API key's. This session is not tracked; run /tickr:link.",
+  not_project_member: "Tickr: you are not a member of the project named in .tickr.json. Run /tickr:link to pick another one."
+};
+function noticeMessage(kind) {
+  return MESSAGES[kind] ?? "Tickr: something needs your attention. Run /tickr:status for details.";
+}
+function collectionInterruptedMessage(gaps) {
+  const events = gaps === 1 ? "1 event" : `${gaps} events`;
+  return `Tickr: collection interrupted: ${events} could not be recorded (the plugin data directory was not writable).`;
+}
+function addNotice(store, kind, now) {
+  return store.addNotice(kind, now.toISOString());
+}
+function takeNoticeMessages(store, now) {
+  return store.takeUnshownNotices(now.toISOString()).map((notice) => noticeMessage(notice.kind));
+}
+
+// hook-src/intake.ts
+var HOOK_BUSY_TIMEOUT_MS = 250;
+var INTAKE_PAUSED_KEY = "intake_paused";
+function enabled(value) {
+  if (value === void 0) return false;
+  const v = value.trim().toLowerCase();
+  return v !== "" && v !== "0" && v !== "false";
+}
+function providerFrom(env) {
+  if (enabled(env.CLAUDE_CODE_USE_BEDROCK)) return "bedrock";
+  if (enabled(env.CLAUDE_CODE_USE_VERTEX)) return "vertex";
+  if (enabled(env.CLAUDE_CODE_USE_FOUNDRY)) return "foundry";
+  return "anthropic";
+}
+function buildEvent(input, mapping, now, uptimeS, env) {
+  const ev = {
+    eventId: ulid(now.getTime()),
+    sessionId: input.session_id,
+    type: input.hook_event_name,
+    localTime: now.toISOString(),
+    uptimeS,
+    mapping,
+    provider: providerFrom(env)
+  };
+  if (input.transcript_path !== void 0) ev.transcriptPath = input.transcript_path;
+  if (input.prompt_id !== void 0) ev.promptId = input.prompt_id;
+  if (input.tool_name !== void 0) ev.toolName = input.tool_name;
+  if (input.tool_use_id !== void 0) ev.toolUseId = input.tool_use_id;
+  return ev;
+}
+function journalInStore(dbPath, ev, now) {
+  let opened;
+  try {
+    opened = openStore(dbPath, { role: "hook", busyTimeoutMs: HOOK_BUSY_TIMEOUT_MS });
+    if (typeof opened === "string") return null;
+    const store = opened;
+    return store.transaction(() => {
+      if (store.schemaVersion() !== SCHEMA_VERSION) return null;
+      const paused = store.getMeta(INTAKE_PAUSED_KEY) !== null;
+      if (!paused) store.journal(ev);
+      return { paused, messages: takeNoticeMessages(store, now), ownerFresh: isOwnerFresh(store.readOwner(), now) };
+    });
+  } catch {
+    return null;
+  } finally {
+    if (opened !== void 0 && typeof opened !== "string") opened.close();
+  }
+}
+function recordEvent(input, cfg, deadlineMs, opts = {}) {
+  const env = opts.env ?? process.env;
+  const found = findMapping(input.cwd);
+  if (found === null) return {};
+  if ("invalid" in found) {
+    return input.hook_event_name === "SessionStart" ? { systemMessage: `Tickr: ${found.invalid} This session is not tracked.` } : {};
+  }
+  const now = (opts.now ?? (() => /* @__PURE__ */ new Date()))();
+  const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
+  const ev = buildEvent(input, { hash: found.hash, json: found.json }, now, (opts.uptime ?? import_node_os.uptime)(), env);
+  let dirReady = true;
+  try {
+    writeInstanceInfo(dir, { baseUrl: cfg.baseUrl, workspaceId: found.mapping.workspaceId }, now);
+  } catch {
+    dirReady = false;
+  }
+  const room = deadlineMs - Date.now() > 2 * HOOK_BUSY_TIMEOUT_MS + 100;
+  const journalled = dirReady && room ? journalInStore((0, import_node_path5.join)(dir, DB_FILE), ev, now) : null;
+  if (journalled === null && !writeFallback((0, import_node_path5.join)(dir, FALLBACK_DIR), ev)) {
+    recordGap(dir);
+    return {};
+  }
+  const messages = [];
+  const gaps = takeGaps(dir);
+  if (gaps > 0) messages.push(collectionInterruptedMessage(gaps));
+  if (journalled) messages.push(...journalled.messages);
+  if (!journalled?.ownerFresh) {
+    try {
+      opts.startFlusher?.(dir);
+    } catch {
+    }
+  }
+  return messages.length > 0 ? { systemMessage: messages.join("\n") } : {};
+}
+
+// hook-src/flusher/bounds.ts
+var MAX_PENDING_ROWS = 500;
+var MAX_INSTANCE_BYTES = 50 * 1024 * 1024;
+var RETENTION_MS = 90 * 24 * 60 * 6e4;
+var RETENTION_INTERVAL_MS = 24 * 60 * 6e4;
+var RETENTION_KEY = "retention_at";
+function fileSize(path) {
+  try {
+    const st = (0, import_node_fs5.statSync)(path);
+    return st.isFile() ? st.size : 0;
+  } catch {
+    return 0;
+  }
+}
+function dirSize(dir) {
+  let total = 0;
+  let names;
+  try {
+    names = (0, import_node_fs5.readdirSync)(dir);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    const path = (0, import_node_path6.join)(dir, name);
+    try {
+      const st = (0, import_node_fs5.statSync)(path);
+      total += st.isDirectory() ? dirSize(path) : st.size;
+    } catch {
+    }
+  }
+  return total;
+}
+function instanceBytes(dir) {
+  return fileSize((0, import_node_path6.join)(dir, DB_FILE)) + fileSize((0, import_node_path6.join)(dir, `${DB_FILE}-journal`)) + dirSize((0, import_node_path6.join)(dir, FALLBACK_DIR));
+}
+function vacuum(store) {
+  try {
+    store.db.exec("VACUUM");
+  } catch {
+  }
+}
+function boundsStage(opts = {}) {
+  const maxRows = opts.maxPendingRows ?? MAX_PENDING_ROWS;
+  const maxBytes = opts.maxBytes ?? MAX_INSTANCE_BYTES;
+  return (ctx) => {
+    const { store } = ctx;
+    ctx.guarded(() => store.pruneSupersededOutbox());
+    const now = ctx.now();
+    const last = Date.parse(store.getMeta(RETENTION_KEY) ?? "");
+    if (!Number.isFinite(last) || now.getTime() - last >= RETENTION_INTERVAL_MS || last > now.getTime()) {
+      const cutoff = new Date(now.getTime() - RETENTION_MS).toISOString();
+      const deleted = ctx.guarded(() => {
+        store.setMeta(RETENTION_KEY, now.toISOString());
+        return store.deleteRetired(cutoff);
+      });
+      if (deleted > 0) vacuum(store);
+    }
+    const over = () => store.pendingOutboxCount() >= maxRows || instanceBytes(ctx.instanceDir) >= maxBytes;
+    if (over() && store.freePages() > 0) vacuum(store);
+    const reached = over();
+    ctx.guarded(() => {
+      const paused = store.getMeta(INTAKE_PAUSED_KEY) !== null;
+      if (reached && !paused) {
+        store.setMeta(INTAKE_PAUSED_KEY, now.toISOString());
+        addNotice(store, "intake_paused", now);
+      } else if (!reached && paused) {
+        store.deleteMeta(INTAKE_PAUSED_KEY);
+      }
+    });
+    return {};
+  };
 }
 
 // hook-src/flusher/revisions.ts
@@ -1149,83 +1670,6 @@ function revisionsStage(sources = REVISION_SOURCES) {
     }
     return due === null ? {} : { dueInMs: Math.max(0, due) };
   };
-}
-
-// hook-src/ids.ts
-var import_node_crypto3 = require("node:crypto");
-var CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-var MAX_TIME = 2 ** 48 - 1;
-function timeBytes(nowMs) {
-  let ms2 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
-  const bytes = new Array(6);
-  for (let i = 5; i >= 0; i--) {
-    bytes[i] = ms2 % 256;
-    ms2 = Math.floor(ms2 / 256);
-  }
-  return bytes;
-}
-function hex(bytes) {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-function uuidv7(nowMs, rand = import_node_crypto3.randomBytes) {
-  const bytes = new Uint8Array(16);
-  bytes.set(timeBytes(nowMs), 0);
-  bytes.set(rand(10).subarray(0, 10), 6);
-  bytes[6] = 112 | bytes[6] & 15;
-  bytes[8] = 128 | bytes[8] & 63;
-  const h = hex(bytes);
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
-}
-function encodeTime(ms2) {
-  let rest = ms2;
-  let text = "";
-  for (let i = 0; i < 10; i++) {
-    text = CROCKFORD[rest % 32] + text;
-    rest = Math.floor(rest / 32);
-  }
-  return text;
-}
-function randomDigits(rand) {
-  const bytes = rand(10);
-  const digits = [];
-  let buffer = 0;
-  let bits = 0;
-  for (let i = 0; i < 10; i++) {
-    buffer = buffer << 8 | bytes[i];
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      digits.push(buffer >> bits & 31);
-    }
-    buffer &= (1 << bits) - 1;
-  }
-  return digits;
-}
-function increment(digits) {
-  for (let i = digits.length - 1; i >= 0; i--) {
-    if (digits[i] < 31) {
-      digits[i] += 1;
-      return true;
-    }
-    digits[i] = 0;
-  }
-  return false;
-}
-var lastMs = -1;
-var lastDigits = [];
-function ulid(nowMs, rand = import_node_crypto3.randomBytes) {
-  let ms2 = Math.min(Math.max(Math.floor(nowMs), 0), MAX_TIME);
-  if (ms2 <= lastMs) {
-    ms2 = lastMs;
-    if (!increment(lastDigits)) {
-      ms2 = Math.min(lastMs + 1, MAX_TIME);
-      lastDigits = randomDigits(rand);
-    }
-  } else {
-    lastDigits = randomDigits(rand);
-  }
-  lastMs = ms2;
-  return encodeTime(ms2) + lastDigits.map((d) => CROCKFORD[d]).join("");
 }
 
 // hook-src/flusher/segmenter.ts
@@ -1424,6 +1868,11 @@ function finalizeIdle(store, now, idleMs) {
   }
   return due;
 }
+function markClosedByServer(store, segmentId, serverState) {
+  const row = store.getSegment(segmentId);
+  if (row === null) return;
+  store.upsertSegment({ ...row, working: false, final: true, finalReason: row.final ? row.finalReason : "server_closed", serverState });
+}
 var segmentationStage = (ctx) => {
   const idleMs = ctx.config.idleMinutes * 6e4;
   const cfg = { idleMs, newId: () => uuidv7(ctx.now().getTime()) };
@@ -1438,15 +1887,275 @@ var segmentationStage = (ctx) => {
   return due === null ? {} : { dueInMs: due };
 };
 
+// hook-src/flusher/sender.ts
+var MAX_BACKOFF_MS = 5 * 6e4;
+var MAX_RETRY_AFTER_MS = 60 * 6e4;
+var PROBE_INTERVAL_MS = 60 * 6e4;
+var INGESTION_WINDOW_MS = 30 * 24 * 60 * 6e4;
+var SEND_BATCH = 50;
+var STOPPED_MISMATCH = "stopped_mismatch";
+var PAUSE_KEY = "send_pause";
+var WORKSPACE_KEY = "workspace";
+function readJson(store, key) {
+  const raw = store.getMeta(key);
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+function readPause(store) {
+  return readJson(store, PAUSE_KEY);
+}
+function readWorkspace(store) {
+  return readJson(store, WORKSPACE_KEY);
+}
+function writeWorkspace(store, ws) {
+  store.setMeta(WORKSPACE_KEY, JSON.stringify(ws));
+}
+function pauseSending(store, reason, now) {
+  const current = readPause(store);
+  const probeAt = new Date(now.getTime() + PROBE_INTERVAL_MS).toISOString();
+  const pause2 = { reason, since: current?.reason === reason ? current.since : now.toISOString(), probeAt };
+  store.setMeta(PAUSE_KEY, JSON.stringify(pause2));
+  if (current?.reason !== reason) addNotice(store, reason, now);
+}
+function allowProbeSend(store) {
+  const current = readPause(store);
+  if (current !== null) store.setMeta(PAUSE_KEY, JSON.stringify({ ...current, probing: true }));
+}
+function canSend(store) {
+  const pause2 = readPause(store);
+  return readWorkspace(store) !== null && (pause2 === null || pause2.probing === true);
+}
+function resumeSending(store) {
+  store.deleteMeta(PAUSE_KEY);
+}
+function backoffMs(attempts, random = Math.random) {
+  const base = Math.min(2 ** Math.max(1, attempts) * 1e3, MAX_BACKOFF_MS);
+  const r = Math.min(1, Math.max(0, random()));
+  return Math.round(base / 2 + r * base / 2);
+}
+function retryDelayMs(afterMs, attempts, random) {
+  return afterMs === null ? backoffMs(attempts, random) : Math.min(Math.max(0, afterMs), MAX_RETRY_AFTER_MS);
+}
+function stopMismatchedSession(store, sessionId, now) {
+  const row = store.getSession(sessionId);
+  if (row?.state === STOPPED_MISMATCH) return;
+  store.upsertSession({
+    ...row ?? { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, agentVersion: null, provider: null, lateEvents: 0 },
+    state: STOPPED_MISMATCH
+  });
+  for (const seg of store.segmentsForSession(sessionId)) {
+    store.deleteOutboxFor("segment", seg.id);
+    if (store.isTerminal("segment", seg.id)) continue;
+    store.addTerminal({
+      targetKind: "segment",
+      targetId: seg.id,
+      revision: seg.lastRevision > 0 ? seg.lastRevision : null,
+      code: "workspace_mismatch",
+      at: now.toISOString(),
+      diagnostic: "The mapping names another workspace than the API key's."
+    });
+  }
+  addNotice(store, "workspace_mismatch", now);
+}
+function recordTerminal(store, row, code2, diagnostic, now) {
+  store.deleteOutboxFor(row.targetKind, row.targetId);
+  if (store.isTerminal(row.targetKind, row.targetId)) return;
+  store.addTerminal({ targetKind: row.targetKind, targetId: row.targetId, revision: row.revision, code: code2, at: now.toISOString(), diagnostic });
+}
+function segmentMismatch(store, segmentId, workspaceId) {
+  const seg = store.getSegment(segmentId);
+  if (seg === null) return null;
+  const version = store.getMapping(seg.mappingVersionId);
+  const mapping = version ? parseStoredMapping(version.normalizedJson) : null;
+  return mapping !== null && mapping.workspaceId !== workspaceId ? seg.sessionId : null;
+}
+function expireBeforeSend(store, workspaceId, now) {
+  const oldest = now.getTime() - INGESTION_WINDOW_MS;
+  for (const row of store.latestOutbox()) {
+    if (row.targetKind !== "segment") continue;
+    const mismatched = segmentMismatch(store, row.targetId, workspaceId);
+    if (mismatched !== null) {
+      stopMismatchedSession(store, mismatched, now);
+      continue;
+    }
+    const seg = store.getSegment(row.targetId);
+    if (seg?.createdOnServer) continue;
+    const startedAt = Date.parse(JSON.parse(row.bodyJson).startedAt ?? "");
+    if (Number.isFinite(startedAt) && startedAt < oldest) {
+      recordTerminal(store, row, "ingestion_window", "Started more than 30 days ago: Tickr no longer accepts it.", now);
+    }
+  }
+}
+async function sendRow(store, api, row) {
+  const body = JSON.parse(row.bodyJson);
+  if (row.targetKind === "segment") {
+    const seg = store.getSegment(row.targetId);
+    const session = seg ? store.getSession(seg.sessionId) : null;
+    const agent = agentHeaderValue({ name: "claude-code", version: session?.agentVersion ?? "unknown" });
+    return api.putSegment(row.targetId, body, agent);
+  }
+  return api.putUsage(row.targetId, body);
+}
+function applyOutcome(store, row, outcome, now, random) {
+  const kind = row.targetKind;
+  if ((outcome.kind === "applied" || outcome.kind === "terminal") && readPause(store) !== null) resumeSending(store);
+  switch (outcome.kind) {
+    case "applied": {
+      store.deleteOutboxThrough(kind, row.targetId, row.revision);
+      if (kind === "segment") {
+        store.markSegmentCreated(row.targetId);
+        const sent = JSON.parse(row.bodyJson);
+        if (outcome.detached || outcome.finalized && sent.final !== true) {
+          markClosedByServer(store, row.targetId, outcome.detached ? "detached" : "finalized");
+          store.deleteOutboxFor(kind, row.targetId);
+        }
+      }
+      return null;
+    }
+    case "retry": {
+      const attempts = row.attempts + 1;
+      const delay = retryDelayMs(outcome.afterMs, attempts, random);
+      store.setOutboxAttempt(kind, row.targetId, row.revision, attempts, new Date(now.getTime() + delay).toISOString());
+      return delay;
+    }
+    case "pause":
+      pauseSending(store, outcome.reason, now);
+      return null;
+    case "terminal": {
+      recordTerminal(store, row, outcome.code, `Refused by Tickr (${outcome.code}).`, now);
+      if (kind === "segment" && outcome.closesSegment) {
+        markClosedByServer(store, row.targetId, outcome.code === "segment_detached" ? "detached" : "finalized");
+      }
+      if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
+      return null;
+    }
+  }
+}
+async function sendDue(store, gen, api, now, budgetMs, opts = {}) {
+  const endAt = performance.now() + budgetMs;
+  const remaining = opts.remainingMs ?? (() => endAt - performance.now());
+  const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const inTx = (fn) => guarded(store, gen, now().toISOString(), fn);
+  const workspace = readWorkspace(store);
+  if (workspace === null || !canSend(store)) return { dueInMs: null };
+  inTx(() => expireBeforeSend(store, workspace.workspaceId, now()));
+  for (; ; ) {
+    const rows = store.dueOutbox(now().toISOString(), SEND_BATCH);
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      if (remaining() < timeoutMs) return { dueInMs: null };
+      if (store.isTerminal(row.targetKind, row.targetId)) {
+        inTx(() => store.deleteOutboxFor(row.targetKind, row.targetId));
+        continue;
+      }
+      const outcome = await sendRow(store, api, row);
+      opts.boundary?.("sent");
+      const delay = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));
+      if (outcome.kind === "applied") opts.boundary?.("acknowledged");
+      if (outcome.kind === "retry") return { dueInMs: delay };
+      if (outcome.kind === "pause") return { dueInMs: null };
+    }
+  }
+  const next = store.nextOutboxDue();
+  return { dueInMs: next === null ? null : Math.max(0, Date.parse(next) - now().getTime()) };
+}
+function sendStage(opts = {}) {
+  return async (ctx) => {
+    const { dueInMs } = await sendDue(ctx.store, ctx.generation, ctx.api, ctx.now, ctx.remainingMs(), {
+      ...opts,
+      boundary: ctx.boundary,
+      remainingMs: ctx.remainingMs
+    });
+    return dueInMs === null ? {} : { dueInMs };
+  };
+}
+
+// hook-src/flusher/workspace.ts
+var CLOCK_SKEW_LIMIT_MS = 4 * 6e4;
+var PROBE_RETRY_KEY = "workspace_probe_retry";
+var MISMATCH_CURSOR_KEY = "workspace_checked_seq";
+function readRetry(store) {
+  const raw = store.getMeta(PROBE_RETRY_KEY);
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+function probeDue(store, now) {
+  const pause2 = readPause(store);
+  if (pause2 !== null) return pause2.probing !== true && now.getTime() >= Date.parse(pause2.probeAt);
+  if (readWorkspace(store) !== null) return false;
+  const retry = readRetry(store);
+  return retry === null || now.getTime() >= Date.parse(retry.at);
+}
+function checkMismatch(store, workspaceId, now) {
+  const after = Number(store.getMeta(MISMATCH_CURSOR_KEY) ?? "0");
+  const last = store.maxEventSeq();
+  if (last <= after) return;
+  const foreign = store.listMappings().filter((m) => {
+    const mapping = parseStoredMapping(m.normalizedJson);
+    return mapping !== null && mapping.workspaceId !== workspaceId;
+  }).map((m) => m.id);
+  if (foreign.length > 0) {
+    for (const sessionId of store.sessionsWithMappingsAfter(after, foreign)) stopMismatchedSession(store, sessionId, now);
+  }
+  store.setMeta(MISMATCH_CURSOR_KEY, String(last));
+}
+function workspaceStage(opts = {}) {
+  return async (ctx) => {
+    const { store } = ctx;
+    if (probeDue(store, ctx.now())) {
+      const answer = await ctx.api.me();
+      const now = ctx.now();
+      ctx.guarded(() => {
+        if ("workspaceId" in answer) {
+          applyMe(store, answer, now);
+        } else if (answer.kind === "pause") {
+          pauseSending(store, answer.reason, now);
+        } else {
+          const pause2 = readPause(store);
+          if (pause2 !== null) {
+            store.setMeta(PAUSE_KEY, JSON.stringify({ ...pause2, probeAt: new Date(now.getTime() + PROBE_INTERVAL_MS).toISOString() }));
+          } else {
+            const attempts = (readRetry(store)?.attempts ?? 0) + 1;
+            const delay = retryDelayMs(answer.kind === "retry" ? answer.afterMs : null, attempts, opts.random);
+            store.setMeta(PROBE_RETRY_KEY, JSON.stringify({ attempts, at: new Date(now.getTime() + delay).toISOString() }));
+          }
+        }
+      });
+    }
+    const known = readWorkspace(store);
+    if (known !== null) ctx.guarded(() => checkMismatch(store, known.workspaceId, ctx.now()));
+    return {};
+  };
+}
+function applyMe(store, me, now) {
+  store.deleteMeta(PROBE_RETRY_KEY);
+  const skewMs = Date.parse(me.localTime) - Date.parse(me.serverTime);
+  if (skewMs > CLOCK_SKEW_LIMIT_MS) {
+    pauseSending(store, "clock_skew", now);
+    return;
+  }
+  writeWorkspace(store, { workspaceId: me.workspaceId, workspaceName: me.workspaceName, checkedAt: now.toISOString(), skewMs });
+  const pause2 = readPause(store);
+  if (pause2?.reason === "clock_skew") resumeSending(store);
+  else if (pause2 !== null) allowProbeSend(store);
+}
+
 // hook-src/flusher/stages.ts
 var STAGE_NAMES = ["workspace", "segmentation", "revisions", "send", "bounds"];
-var idleStage = () => ({});
 var PIPELINE = {
-  workspace: idleStage,
+  workspace: workspaceStage(),
   segmentation: segmentationStage,
   revisions: revisionsStage(),
-  send: idleStage,
-  bounds: idleStage
+  send: sendStage(),
+  bounds: boundsStage()
 };
 
 // hook-src/flusher/run.ts
@@ -1459,7 +2168,7 @@ async function runFlusher(instanceDir2, deps) {
   const boundary = (point) => deps.onBoundary?.(point);
   const nowIso = () => deps.now().toISOString();
   const endAt = clock() + deps.wakeBudgetMs;
-  const opened = openStore((0, import_node_path4.join)(instanceDir2, DB_FILE), { role: "flusher", busyTimeoutMs: deps.busyTimeoutMs ?? FLUSHER_BUSY_TIMEOUT_MS });
+  const opened = openStore((0, import_node_path7.join)(instanceDir2, DB_FILE), { role: "flusher", busyTimeoutMs: deps.busyTimeoutMs ?? FLUSHER_BUSY_TIMEOUT_MS });
   if (typeof opened === "string") return "newer_schema";
   const store = opened;
   try {
@@ -1479,7 +2188,7 @@ async function runFlusher(instanceDir2, deps) {
       guarded: (fn) => guarded(store, gen, nowIso(), fn),
       boundary
     };
-    const fallback = (0, import_node_path4.join)(instanceDir2, FALLBACK_DIR);
+    const fallback = (0, import_node_path7.join)(instanceDir2, FALLBACK_DIR);
     for (; ; ) {
       ctx.guarded(() => void 0);
       importFallback(store, gen, fallback, { now: deps.now, onCommitted: () => boundary("fallback_committed") });
@@ -1510,138 +2219,8 @@ async function runFlusher(instanceDir2, deps) {
   }
 }
 
-// hook-src/intake.ts
-var import_node_os = require("node:os");
-var import_node_path6 = require("node:path");
-
-// hook-src/identity.ts
-var import_node_crypto4 = require("node:crypto");
-var import_node_fs4 = require("node:fs");
-var import_node_path5 = require("node:path");
-var INSTANCE_FILE = "instance.json";
-function instanceId(baseUrl, workspaceId, apiKey) {
-  return (0, import_node_crypto4.createHash)("sha256").update(JSON.stringify([baseUrl, workspaceId, apiKey]), "utf8").digest("hex");
-}
-function instanceDir(dataDir, id) {
-  return (0, import_node_path5.join)(dataDir, id);
-}
-function writeInstanceInfo(dir, who, now) {
-  (0, import_node_fs4.mkdirSync)(dir, { recursive: true });
-  const info = { base_url: who.baseUrl, workspace_id: who.workspaceId, created_at: now.toISOString() };
-  try {
-    (0, import_node_fs4.writeFileSync)((0, import_node_path5.join)(dir, INSTANCE_FILE), `${JSON.stringify(info)}
-`, { flag: "wx" });
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-  }
-}
-
-// hook-src/notices.ts
-var MESSAGES = {
-  intake_paused: "Tickr: time tracking is paused because the local queue reached its size limit. Run /tickr:status for details.",
-  unauthorized: "Tickr: the API key was refused. Check the Tickr plugin option api_key; sending is paused until then.",
-  forbidden_role: "Tickr: this API key cannot record time (read-only role). Sending is paused.",
-  segments_disabled: "Tickr: this Tickr instance does not accept agent sessions yet. Sending is paused and retried later.",
-  clock_skew: "Tickr: this computer's clock is ahead of Tickr. Sending is paused until the clocks agree.",
-  workspace_mismatch: "Tickr: .tickr.json names another workspace than the API key's. This session is not tracked; run /tickr:link.",
-  not_project_member: "Tickr: you are not a member of the project named in .tickr.json. Run /tickr:link to pick another one."
-};
-function noticeMessage(kind) {
-  return MESSAGES[kind] ?? "Tickr: something needs your attention. Run /tickr:status for details.";
-}
-function collectionInterruptedMessage(gaps) {
-  const events = gaps === 1 ? "1 event" : `${gaps} events`;
-  return `Tickr: collection interrupted: ${events} could not be recorded (the plugin data directory was not writable).`;
-}
-function takeNoticeMessages(store, now) {
-  return store.takeUnshownNotices(now.toISOString()).map((notice) => noticeMessage(notice.kind));
-}
-
-// hook-src/intake.ts
-var HOOK_BUSY_TIMEOUT_MS = 250;
-var INTAKE_PAUSED_KEY = "intake_paused";
-function enabled(value) {
-  if (value === void 0) return false;
-  const v = value.trim().toLowerCase();
-  return v !== "" && v !== "0" && v !== "false";
-}
-function providerFrom(env) {
-  if (enabled(env.CLAUDE_CODE_USE_BEDROCK)) return "bedrock";
-  if (enabled(env.CLAUDE_CODE_USE_VERTEX)) return "vertex";
-  if (enabled(env.CLAUDE_CODE_USE_FOUNDRY)) return "foundry";
-  return "anthropic";
-}
-function buildEvent(input, mapping, now, uptimeS, env) {
-  const ev = {
-    eventId: ulid(now.getTime()),
-    sessionId: input.session_id,
-    type: input.hook_event_name,
-    localTime: now.toISOString(),
-    uptimeS,
-    mapping,
-    provider: providerFrom(env)
-  };
-  if (input.transcript_path !== void 0) ev.transcriptPath = input.transcript_path;
-  if (input.prompt_id !== void 0) ev.promptId = input.prompt_id;
-  if (input.tool_name !== void 0) ev.toolName = input.tool_name;
-  if (input.tool_use_id !== void 0) ev.toolUseId = input.tool_use_id;
-  return ev;
-}
-function journalInStore(dbPath, ev, now) {
-  let opened;
-  try {
-    opened = openStore(dbPath, { role: "hook", busyTimeoutMs: HOOK_BUSY_TIMEOUT_MS });
-    if (typeof opened === "string") return null;
-    const store = opened;
-    return store.transaction(() => {
-      if (store.schemaVersion() !== SCHEMA_VERSION) return null;
-      const paused = store.getMeta(INTAKE_PAUSED_KEY) !== null;
-      if (!paused) store.journal(ev);
-      return { paused, messages: takeNoticeMessages(store, now), ownerFresh: isOwnerFresh(store.readOwner(), now) };
-    });
-  } catch {
-    return null;
-  } finally {
-    if (opened !== void 0 && typeof opened !== "string") opened.close();
-  }
-}
-function recordEvent(input, cfg, deadlineMs, opts = {}) {
-  const env = opts.env ?? process.env;
-  const found = findMapping(input.cwd);
-  if (found === null) return {};
-  if ("invalid" in found) {
-    return input.hook_event_name === "SessionStart" ? { systemMessage: `Tickr: ${found.invalid} This session is not tracked.` } : {};
-  }
-  const now = (opts.now ?? (() => /* @__PURE__ */ new Date()))();
-  const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
-  const ev = buildEvent(input, { hash: found.hash, json: found.json }, now, (opts.uptime ?? import_node_os.uptime)(), env);
-  let dirReady = true;
-  try {
-    writeInstanceInfo(dir, { baseUrl: cfg.baseUrl, workspaceId: found.mapping.workspaceId }, now);
-  } catch {
-    dirReady = false;
-  }
-  const room = deadlineMs - Date.now() > 2 * HOOK_BUSY_TIMEOUT_MS + 100;
-  const journalled = dirReady && room ? journalInStore((0, import_node_path6.join)(dir, DB_FILE), ev, now) : null;
-  if (journalled === null && !writeFallback((0, import_node_path6.join)(dir, FALLBACK_DIR), ev)) {
-    recordGap(dir);
-    return {};
-  }
-  const messages = [];
-  const gaps = takeGaps(dir);
-  if (gaps > 0) messages.push(collectionInterruptedMessage(gaps));
-  if (journalled) messages.push(...journalled.messages);
-  if (!journalled?.ownerFresh) {
-    try {
-      opts.startFlusher?.(dir);
-    } catch {
-    }
-  }
-  return messages.length > 0 ? { systemMessage: messages.join("\n") } : {};
-}
-
 // hook-src/io.ts
-var import_node_fs5 = require("node:fs");
+var import_node_fs6 = require("node:fs");
 var OPTIONAL_STRINGS = [
   "transcript_path",
   "prompt_id",
@@ -1698,7 +2277,7 @@ function readHookInput(stdin, deadlineMs) {
   });
 }
 var writeStdout = (text) => {
-  (0, import_node_fs5.writeSync)(1, text);
+  (0, import_node_fs6.writeSync)(1, text);
 };
 function writeHookOutput(out, write = writeStdout) {
   if (!out.systemMessage) return;
@@ -1758,9 +2337,10 @@ async function runFlush(dir, env) {
   if (!dir || loadSqlite() === null) return;
   const config = readPluginConfig(env);
   if ("problem" in config) return;
-  const instanceDir2 = (0, import_node_path7.resolve)(dir);
-  if (!instanceDir2.startsWith((0, import_node_path7.resolve)(config.dataDir) + import_node_path7.sep)) return;
-  await runFlusher(instanceDir2, { now: () => /* @__PURE__ */ new Date(), uptime: import_node_os2.uptime, api: OFFLINE_API, config, wakeBudgetMs: WAKE_BUDGET_MS });
+  const instanceDir2 = (0, import_node_path8.resolve)(dir);
+  if (!instanceDir2.startsWith((0, import_node_path8.resolve)(config.dataDir) + import_node_path8.sep)) return;
+  const api = createAgentApi({ baseUrl: config.baseUrl, apiKey: config.apiKey, timeoutMs: REQUEST_TIMEOUT_MS });
+  await runFlusher(instanceDir2, { now: () => /* @__PURE__ */ new Date(), uptime: import_node_os2.uptime, api, config, wakeBudgetMs: WAKE_BUDGET_MS });
 }
 async function main(argv, env, io = processIo()) {
   const [mode] = argv;
@@ -1773,7 +2353,7 @@ async function main(argv, env, io = processIo()) {
 }
 if (IS_BUNDLE) {
   void main(process.argv.slice(2), process.env).then(
-    (code) => process.exit(code),
+    (code2) => process.exit(code2),
     () => process.exit(0)
   );
 }

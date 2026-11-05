@@ -618,6 +618,101 @@ export class Store {
     return num(this.get("SELECT COUNT(*) AS c FROM outbox")?.c);
   }
 
+  /** The latest pending revision of every target, due or not. */
+  latestOutbox(): OutboxRow[] {
+    return this.all(
+      `SELECT o.* FROM outbox o
+       WHERE o.revision = (SELECT MAX(i.revision) FROM outbox i WHERE i.target_kind = o.target_kind AND i.target_id = o.target_id)
+       ORDER BY o.target_kind, o.target_id`,
+    ).map(toOutbox);
+  }
+
+  /** The earliest next attempt among the latest pending revisions, or null when none is pending. */
+  nextOutboxDue(): string | null {
+    return optStr(
+      this.get(
+        `SELECT MIN(o.next_attempt_at) AS m FROM outbox o
+         WHERE o.revision = (SELECT MAX(i.revision) FROM outbox i WHERE i.target_kind = o.target_kind AND i.target_id = o.target_id)`,
+      )?.m,
+    );
+  }
+
+  /** Removes every pending revision of one target; returns how many. */
+  deleteOutboxFor(kind: TargetKind, id: string): number {
+    return this.run("DELETE FROM outbox WHERE target_kind = ? AND target_id = ?", kind, id);
+  }
+
+  /**
+   * Removes the pending revisions older than their target's latest one. Only the latest is ever
+   * sent and its acknowledgement removes the older ones anyway; returns how many.
+   */
+  pruneSupersededOutbox(): number {
+    return this.run(
+      `DELETE FROM outbox WHERE revision < (SELECT MAX(i.revision) FROM outbox i
+         WHERE i.target_kind = outbox.target_kind AND i.target_id = outbox.target_id)`,
+    );
+  }
+
+  /** The server holds the segment (any revision was applied). */
+  markSegmentCreated(id: string): void {
+    this.run("UPDATE segments SET created_on_server = 1 WHERE id = ? AND created_on_server = 0", id);
+  }
+
+  /** Sessions with an event after `afterSeq` journalled with one of these mapping versions. */
+  sessionsWithMappingsAfter(afterSeq: number, mappingVersionIds: readonly number[]): string[] {
+    if (mappingVersionIds.length === 0) return [];
+    const marks = mappingVersionIds.map(() => "?").join(", ");
+    return this.db
+      .prepare(`SELECT DISTINCT session_id FROM events WHERE seq > ? AND mapping_version_id IN (${marks}) ORDER BY session_id`)
+      .all(afterSeq, ...mappingVersionIds)
+      .map((r) => str((r as Row).session_id));
+  }
+
+  /**
+   * Retention: deletes what is settled and older than cutoffIso — final segments without a
+   * pending revision (and their last committed body), other targets' last committed bodies,
+   * events already segmented, sessions left without events nor segments, unused mapping
+   * versions, terminal items and shown notices. Returns the rows deleted.
+   */
+  deleteRetired(cutoffIso: string): number {
+    let n = 0;
+    n += this.run(
+      `DELETE FROM segments WHERE final = 1 AND stopped_at < ?
+         AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = 'segment' AND o.target_id = segments.id)`,
+      cutoffIso,
+    );
+    n += this.run(
+      `DELETE FROM last_committed WHERE
+         (target_kind = 'segment' AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = last_committed.target_id))
+         OR (target_kind <> 'segment' AND committed_at < ?
+             AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.target_kind = last_committed.target_kind AND o.target_id = last_committed.target_id))`,
+      cutoffIso,
+    );
+    n += this.run(
+      `DELETE FROM events WHERE local_time < ?
+         AND seq <= COALESCE((SELECT s.last_event_seq FROM sessions s WHERE s.session_id = events.session_id), 0)`,
+      cutoffIso,
+    );
+    n += this.run(
+      `DELETE FROM sessions WHERE (last_event_time IS NULL OR last_event_time < ?)
+         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = sessions.session_id)
+         AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.session_id = sessions.session_id)`,
+      cutoffIso,
+    );
+    n += this.run(
+      `DELETE FROM mapping_versions WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.mapping_version_id = mapping_versions.id)
+         AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.mapping_version_id = mapping_versions.id)`,
+    );
+    n += this.run("DELETE FROM terminal WHERE at < ?", cutoffIso);
+    n += this.run("DELETE FROM notices WHERE shown_at IS NOT NULL AND created_at < ?", cutoffIso);
+    return n;
+  }
+
+  /** Free pages of the database file (space a VACUUM would give back). */
+  freePages(): number {
+    return num((this.db.prepare("PRAGMA freelist_count").get() as Row | undefined)?.freelist_count);
+  }
+
   // terminal items (never re-queued, listed by /tickr:status)
 
   addTerminal(t: Omit<TerminalRow, "id">): number {
