@@ -9,6 +9,9 @@ const read = (relative: string) => readFileSync(`${pluginRoot}${relative}`, "utf
 const FILES = ["commands/link.md", "commands/status.md", "commands/task.md", "commands/describe.md", "skills/tickr/SKILL.md"] as const;
 const CONTEXT_COMMANDS = ["commands/task.md", "commands/describe.md"] as const;
 const SET_CONTEXT = 'tickr-hook.cjs" set-context "${CLAUDE_PLUGIN_DATA}" "${CLAUDE_SESSION_ID}" "<project_id>"';
+/** The only node command /tickr:task and /tickr:describe pre-authorise: the read-only context-info mode. */
+const CONTEXT_INFO_RULE = 'Bash(node --no-warnings "${CLAUDE_PLUGIN_ROOT}/hooks/dist/tickr-hook.cjs" context-info:*)';
+const CONTEXT_INFO = '!`node --no-warnings "${CLAUDE_PLUGIN_ROOT}/hooks/dist/tickr-hook.cjs" context-info "${CLAUDE_PLUGIN_DATA}" "${CLAUDE_SESSION_ID}" .`';
 
 /** The frontmatter (simple `key: value` lines between the first two `---`) and the body. */
 function parse(text: string): { meta: Record<string, string>; body: string } {
@@ -53,7 +56,7 @@ describe("commands and skill", () => {
       expect(TOOL_NAMES.has(tool.slice(PREFIX.length)), tool).toBe(true);
     }
     for (const entry of (meta["allowed-tools"] ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
-      const ok = BUILT_IN.has(entry) || /^Bash\((git rev-parse|node --no-warnings "\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/dist\/tickr-hook\.cjs" status):\*\)$/.test(entry) || (entry.startsWith(PREFIX) && TOOL_NAMES.has(entry.slice(PREFIX.length)));
+      const ok = BUILT_IN.has(entry) || /^Bash\((git rev-parse|node --no-warnings "\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/dist\/tickr-hook\.cjs" (status|context-info)):\*\)$/.test(entry) || (entry.startsWith(PREFIX) && TOOL_NAMES.has(entry.slice(PREFIX.length)));
       expect(ok, entry).toBe(true);
     }
     for (const path of text.match(/\$\{CLAUDE_PLUGIN_ROOT\}\/[^"`\s)]+/g) ?? []) {
@@ -126,11 +129,14 @@ describe("commands and skill", () => {
     expect(allowed).not.toMatch(/set-context|clear-context/);
   });
 
-  it.each(CONTEXT_COMMANDS)("%s pre-authorises no file access nor node command and sets the context of this very session", (file) => {
+  it.each(CONTEXT_COMMANDS)("%s pre-authorises no file access and no node command but context-info, and sets the context of this very session", (file) => {
     const { meta, body } = parse(read(file));
     const allowed = meta["allowed-tools"] ?? "";
     expect(allowed).not.toMatch(/\b(Read|Write|Edit)\b/);
-    expect(allowed).not.toContain("Bash(node");
+    expect(allowed).not.toContain("Bash(git");
+    const entries = allowed.split(",").map((s) => s.trim());
+    expect(entries).toContain(CONTEXT_INFO_RULE);
+    expect(entries.filter((e) => e.startsWith("Bash("))).toEqual([CONTEXT_INFO_RULE]);
     expect(body).toContain(SET_CONTEXT);
     expect(body).toMatch(/NOT pre-authorised/);
     expect(body).toMatch(/at most 10 words and 100 characters/);
@@ -138,6 +144,23 @@ describe("commands and skill", () => {
     expect(body).toContain("Implementation of the mobile app UI");
     expect(body).toMatch(/Mode: automatic/);
     expect(body).toContain("In manual mode (the default), ask the user to confirm");
+  });
+
+  it.each(CONTEXT_COMMANDS)("%s reads the project with context-info (the .tickr.json of the hooks), never the git root, and stops when not linked", (file) => {
+    const { body } = parse(read(file));
+    // Run before the model sees the command, in the session's directory.
+    expect(body).toContain(CONTEXT_INFO);
+    expect(body.indexOf(CONTEXT_INFO)).toBeLessThan(body.indexOf("## Steps"));
+    expect(body).not.toContain("git rev-parse");
+    expect(body).not.toMatch(/read `<root>\/\.tickr\.json`/);
+    expect(body).toContain("Do not read `.tickr.json` yourself.");
+    expect(body).toContain("the `project_id` printed above");
+    const steps = numberedSteps(body.slice(body.indexOf("## Steps")));
+    expect(steps[0]!.text).toMatch(/^1\. \*\*Linked\?\*\* If the JSON line above is `\{"linked":false\}`/);
+    expect(steps[0]!.text).toContain("`/tickr:link` first, and do nothing else");
+    // context-info is the only command run before the user is asked; set-context comes last.
+    const apply = steps.findIndex((s) => s.text.includes(SET_CONTEXT));
+    expect(apply).toBe(steps.length - 2);
   });
 
   it("task.md chooses only among the existing tasks read with list_tasks, and clears with clear-context", () => {

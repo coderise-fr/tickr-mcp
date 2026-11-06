@@ -210,6 +210,7 @@ var SHELL_SPECIAL = /["`$\\]/;
 var LETTER = new RegExp("\\p{L}", "u");
 var isUuid = (value) => UUID.test(value);
 var isSessionId = (value) => SESSION_ID.test(value);
+var sameId = (a, b) => a.toLowerCase() === b.toLowerCase();
 function normalizeDescription(text) {
   if (FORBIDDEN.test(text)) return { invalid: "the description may not contain control characters." };
   if (SHELL_SPECIAL.test(text)) return { invalid: 'the description may not contain ", `, $ or \\.' };
@@ -228,10 +229,10 @@ function parseContext(raw) {
   const r = raw;
   if (typeof r.project_id !== "string" || !isUuid(r.project_id)) return null;
   if (typeof r.set_at !== "string" || !Number.isFinite(Date.parse(r.set_at))) return null;
-  const ctx = { projectId: r.project_id, setAt: r.set_at };
+  const ctx = { projectId: r.project_id.toLowerCase(), setAt: r.set_at };
   if (r.task_id !== void 0) {
     if (r.task_id !== null && (typeof r.task_id !== "string" || !isUuid(r.task_id))) return null;
-    ctx.taskId = r.task_id;
+    ctx.taskId = r.task_id === null ? null : r.task_id.toLowerCase();
   }
   if (r.description !== void 0) {
     if (typeof r.description !== "string" || normalizeDescription(r.description) !== r.description) return null;
@@ -297,7 +298,7 @@ function clearContext(dataDir, sessionId) {
   }
 }
 function effectiveMapping(mapping, ctx) {
-  if (ctx === null || ctx.projectId !== mapping.projectId) return mapping;
+  if (ctx === null || !sameId(ctx.projectId, mapping.projectId)) return mapping;
   return {
     ...mapping,
     taskId: ctx.taskId === void 0 ? mapping.taskId : ctx.taskId,
@@ -3082,7 +3083,7 @@ function recordEvent(input, cfg, deadlineMs, opts = {}) {
   const now = (opts.now ?? (() => /* @__PURE__ */ new Date()))();
   const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
   const sessionCtx = readContext(cfg.dataDir, input.session_id);
-  const applied2 = sessionCtx?.projectId === found.mapping.projectId ? sessionCtx : null;
+  const applied2 = sessionCtx !== null && sameId(sessionCtx.projectId, found.mapping.projectId) ? sessionCtx : null;
   const ev = buildEvent(input, mappingVersion(effectiveMapping(found.mapping, applied2)), now, (opts.uptime ?? import_node_os.uptime)(), env, linkKey(found.dir, found.hash));
   const note = input.hook_event_name === "SessionStart" ? { additionalContext: contextNote(cfg.autoContext, applied2) } : {};
   let dirReady = true;
@@ -4117,6 +4118,29 @@ function runClearContext(dataDir, sessionId, write) {
     )
   );
 }
+var printedId = (id) => isUuid(id) ? id.toLowerCase() : id;
+function runContextInfo(dataDir, sessionId, cwd, write) {
+  if (!dataDir?.trim() || !sessionId || !cwd?.trim()) {
+    return write(line("Tickr: usage: context-info <plugin data directory> <session id> <directory>"));
+  }
+  const dir = (0, import_node_path12.resolve)(dataDir);
+  const found = findMapping((0, import_node_path12.resolve)(cwd));
+  if (found === null || "invalid" in found || !isLinked(dir, found.dir, found.hash)) return write(line(JSON.stringify({ linked: false })));
+  const ctx = isSessionId(sessionId) ? readContext(dir, sessionId) : null;
+  const applied2 = ctx !== null && sameId(ctx.projectId, found.mapping.projectId) ? ctx : null;
+  const mapping = effectiveMapping(found.mapping, applied2);
+  write(
+    line(
+      JSON.stringify({
+        linked: true,
+        project_id: printedId(mapping.projectId),
+        task_id: mapping.taskId === null ? null : printedId(mapping.taskId),
+        description: mapping.description,
+        session_context: applied2 !== null
+      })
+    )
+  );
+}
 async function main(argv, env, io = processIo()) {
   const [mode] = argv;
   try {
@@ -4126,6 +4150,7 @@ async function main(argv, env, io = processIo()) {
     else if (mode === "accept") runAccept(argv[1], argv[2], io.write);
     else if (mode === "set-context") runSetContext(argv.slice(1), io.write);
     else if (mode === "clear-context") runClearContext(argv[1], argv[2], io.write);
+    else if (mode === "context-info") runContextInfo(argv[1], argv[2], argv[3], io.write);
   } catch {
   }
   return 0;

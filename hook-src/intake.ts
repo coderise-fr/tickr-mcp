@@ -6,7 +6,7 @@ import { uptime as osUptime } from "node:os";
 import { join } from "node:path";
 import type { PluginConfig } from "./config.js";
 import { linkKey } from "./consent.js";
-import { effectiveMapping, readContext, type SessionContext } from "./context.js";
+import { effectiveMapping, readContext, sameId, type SessionContext } from "./context.js";
 import { entryIdForEvent } from "./delegated.js";
 import { FALLBACK_DIR, recordGap, takeGaps, writeFallback } from "./fallback.js";
 import { isOwnerFresh } from "./flusher/owner.js";
@@ -177,9 +177,9 @@ export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: num
   const now = (opts.now ?? (() => new Date()))();
   const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
   // The session context overrides the task and/or description of .tickr.json (context.ts); the
-  // link stays the one of .tickr.json itself.
+  // link stays the one of .tickr.json itself. Ids are compared ignoring case (context.ts sameId).
   const sessionCtx = readContext(cfg.dataDir, input.session_id);
-  const applied = sessionCtx?.projectId === found.mapping.projectId ? sessionCtx : null;
+  const applied = sessionCtx !== null && sameId(sessionCtx.projectId, found.mapping.projectId) ? sessionCtx : null;
   // The link the event is journalled under: the flusher stops the session once it is revoked.
   const ev = buildEvent(input, mappingVersion(effectiveMapping(found.mapping, applied)), now, (opts.uptime ?? osUptime)(), env, linkKey(found.dir, found.hash));
   const note: HookOutput = input.hook_event_name === "SessionStart" ? { additionalContext: contextNote(cfg.autoContext, applied) } : {};

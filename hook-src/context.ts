@@ -45,6 +45,13 @@ export const isUuid = (value: string): boolean => UUID.test(value);
 export const isSessionId = (value: string): boolean => SESSION_ID.test(value);
 
 /**
+ * Two ids name the same thing when they are equal ignoring case: .tickr.json may hold a UUID in
+ * upper or mixed case (kept as written, since its content is what the link is computed from),
+ * while the session context holds ids in lower case.
+ */
+export const sameId = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+/**
  * A description as the user may set it: whitespace collapsed to single spaces and trimmed, no
  * control character nor any of " ` $ \, at most MAX_CONTEXT_WORDS words and MAX_CONTEXT_CHARS
  * characters. A word holds at least one letter: numbers such as ticket numbers ("Fix tickets
@@ -74,10 +81,11 @@ export function parseContext(raw: unknown): SessionContext | null {
   const r = raw as Record<string, unknown>;
   if (typeof r.project_id !== "string" || !isUuid(r.project_id)) return null;
   if (typeof r.set_at !== "string" || !Number.isFinite(Date.parse(r.set_at))) return null;
-  const ctx: SessionContext = { projectId: r.project_id, setAt: r.set_at };
+  // Ids in lower case: the task id sent to Tickr is a UUID in one case, whoever wrote the file.
+  const ctx: SessionContext = { projectId: r.project_id.toLowerCase(), setAt: r.set_at };
   if (r.task_id !== undefined) {
     if (r.task_id !== null && (typeof r.task_id !== "string" || !isUuid(r.task_id))) return null;
-    ctx.taskId = r.task_id;
+    ctx.taskId = r.task_id === null ? null : r.task_id.toLowerCase();
   }
   if (r.description !== undefined) {
     if (typeof r.description !== "string" || normalizeDescription(r.description) !== r.description) return null;
@@ -159,10 +167,11 @@ export function clearContext(dataDir: string, sessionId: string): boolean {
 
 /**
  * The mapping the session's events are recorded under: .tickr.json with the task and/or the
- * description of the session context, when the context names the same project.
+ * description of the session context, when the context names the same project (ignoring case).
+ * The workspace, project and tags stay as .tickr.json writes them.
  */
 export function effectiveMapping(mapping: NormalizedMapping, ctx: SessionContext | null): NormalizedMapping {
-  if (ctx === null || ctx.projectId !== mapping.projectId) return mapping;
+  if (ctx === null || !sameId(ctx.projectId, mapping.projectId)) return mapping;
   return {
     ...mapping,
     taskId: ctx.taskId === undefined ? mapping.taskId : ctx.taskId,

@@ -6,11 +6,22 @@
 //   tickr-hook.cjs accept <dataDir> <checkoutDir>                       /tickr:link
 //   tickr-hook.cjs set-context <dataDir> <sessionId> <projectId> [...]  /tickr:task, /tickr:describe
 //   tickr-hook.cjs clear-context <dataDir> <sessionId>                  /tickr:task clear
+//   tickr-hook.cjs context-info <dataDir> <sessionId> <cwd>             /tickr:task, /tickr:describe (read-only)
 import { uptime } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { readPluginConfig } from "./config.js";
 import { isLinked, recordLink, revokeStaleLinks } from "./consent.js";
-import { clearContext, isSessionId, isUuid, normalizeDescription, readContext, type SessionContext, writeContext } from "./context.js";
+import {
+  clearContext,
+  effectiveMapping,
+  isSessionId,
+  isUuid,
+  normalizeDescription,
+  readContext,
+  sameId,
+  type SessionContext,
+  writeContext,
+} from "./context.js";
 import { createAgentApi, REQUEST_TIMEOUT_MS } from "./flusher/api.js";
 import { DEBUG_ENV, DEBUG_FILE, debugLogger, runFlusher, WAKE_BUDGET_MS } from "./flusher/run.js";
 import { recordEvent } from "./intake.js";
@@ -219,6 +230,40 @@ function runClearContext(dataDir: string | undefined, sessionId: string | undefi
   );
 }
 
+/** An id as context-info prints it: a UUID in lower case, any other id as written. */
+const printedId = (id: string): string => (isUuid(id) ? id.toLowerCase() : id);
+
+/**
+ * `context-info <dataDir> <sessionId> <cwd>`, run first by /tickr:task and /tickr:describe: the
+ * mapping the hooks of this session use, found the same way (the nearest .tickr.json from cwd
+ * upwards, linked on this machine) with the session context applied. Read-only, no network. One
+ * JSON line on stdout: {"linked":false} when there is no usable, linked .tickr.json (nothing of an
+ * unlinked file is printed), otherwise {"linked":true,"project_id","task_id","description",
+ * "session_context"}; never a path, a key or a hash.
+ */
+function runContextInfo(dataDir: string | undefined, sessionId: string | undefined, cwd: string | undefined, write: Write): void {
+  if (!dataDir?.trim() || !sessionId || !cwd?.trim()) {
+    return write(line("Tickr: usage: context-info <plugin data directory> <session id> <directory>"));
+  }
+  const dir = resolve(dataDir);
+  const found = findMapping(resolve(cwd));
+  if (found === null || "invalid" in found || !isLinked(dir, found.dir, found.hash)) return write(line(JSON.stringify({ linked: false })));
+  const ctx = isSessionId(sessionId) ? readContext(dir, sessionId) : null;
+  const applied = ctx !== null && sameId(ctx.projectId, found.mapping.projectId) ? ctx : null;
+  const mapping = effectiveMapping(found.mapping, applied);
+  write(
+    line(
+      JSON.stringify({
+        linked: true,
+        project_id: printedId(mapping.projectId),
+        task_id: mapping.taskId === null ? null : printedId(mapping.taskId),
+        description: mapping.description,
+        session_context: applied !== null,
+      }),
+    ),
+  );
+}
+
 export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = processIo()): Promise<number> {
   const [mode] = argv;
   try {
@@ -228,6 +273,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = 
     else if (mode === "accept") runAccept(argv[1], argv[2], io.write);
     else if (mode === "set-context") runSetContext(argv.slice(1), io.write);
     else if (mode === "clear-context") runClearContext(argv[1], argv[2], io.write);
+    else if (mode === "context-info") runContextInfo(argv[1], argv[2], argv[3], io.write);
   } catch {
     // A hook never fails the user's session; a failed flusher is started again by the next hook.
   }

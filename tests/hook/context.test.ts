@@ -282,6 +282,185 @@ describe("effective mapping of the hook events", () => {
   });
 });
 
+describe("ids written in upper or mixed case in .tickr.json", () => {
+  const upper = { workspace_id: WS, project_id: PROJECT.toUpperCase(), task_id: FILE_TASK.toUpperCase() };
+  const mixed = PROJECT.slice(0, 18).toUpperCase() + PROJECT.slice(18);
+
+  it.each([
+    ["upper", upper],
+    ["mixed", { ...upper, project_id: mixed }],
+  ])("a context set with the %s-case project id applies; the link and the consent stay those of the file", async (_case, mapping) => {
+    const { cwd, data, dir, cfg } = linked(mapping);
+    const found = findMapping(cwd) as FoundMapping;
+    expect(found.mapping.projectId).toBe(mapping.project_id); // kept as written
+    const before = { hash: found.hash, key: linkKey(found.dir, found.hash) };
+    const linkedCheck = { linked: (d: string, h: string) => isLinked(data, d, h) };
+
+    // /tickr:task passes the project id as context-info prints it; any case is accepted.
+    await setContext(data, "s-1", mapping.project_id, "--task", TASK.toUpperCase(), "--description", DESCRIPTION);
+    expect(readContext(data, "s-1")).toMatchObject({ projectId: PROJECT, taskId: TASK });
+    recordEvent(hookInput("PostToolUse", cwd), cfg, Date.now() + 1000, linkedCheck);
+    await setContext(data, "s-2", PROJECT, "--task", "none");
+    recordEvent(hookInput("PostToolUse", cwd, { session_id: "s-2" }), cfg, Date.now() + 1000, linkedCheck);
+
+    expect(journalledMappings(dir, "s-1")).toEqual([
+      { workspaceId: upper.workspace_id, projectId: mapping.project_id, taskId: TASK, tagIds: [], description: DESCRIPTION },
+    ]);
+    expect(journalledMappings(dir, "s-2").map((m) => m.taskId)).toEqual([null]);
+    // Consent: the hash and the link key are computed from the file as before, and still linked.
+    const after = findMapping(cwd) as FoundMapping;
+    expect({ hash: after.hash, key: linkKey(after.dir, after.hash) }).toEqual(before);
+    expect(isLinked(data, after.dir, after.hash)).toBe(true);
+    const store = flusherStore(dir);
+    expect(store.eventsAfter(0).map((e) => e.linkKey)).toEqual([before.key, before.key]);
+    store.close();
+  });
+
+  it("the SessionStart note shows the context set for an upper-case project id", async () => {
+    const { cwd, data } = linked(upper);
+    await setContext(data, "s-1", PROJECT.toUpperCase(), "--description", DESCRIPTION);
+    const { out } = await run(["SessionStart"], pluginEnv(data), JSON.stringify(hookInput("SessionStart", cwd, { source: "startup" })));
+    expect((JSON.parse(out) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext).toContain(
+      `description "${DESCRIPTION}"`,
+    );
+  });
+
+  it("a hand-written context file in upper case is read in lower case", () => {
+    const data = tempDir();
+    mkdirSync(join(data, CONTEXT_DIR), { recursive: true });
+    writeFileSync(contextFile(data, "s-1"), JSON.stringify({ project_id: PROJECT.toUpperCase(), task_id: TASK.toUpperCase(), set_at: "2026-11-05T10:00:00.000Z" }));
+    expect(readContext(data, "s-1")).toEqual({ projectId: PROJECT, taskId: TASK, setAt: "2026-11-05T10:00:00.000Z" });
+  });
+
+  it("effectiveMapping compares the project ignoring case and keeps the file's ids as written", () => {
+    const file = { workspaceId: WS.toUpperCase(), projectId: PROJECT.toUpperCase(), taskId: FILE_TASK.toUpperCase(), tagIds: [], description: "From the file" };
+    expect(effectiveMapping(file, { projectId: PROJECT, taskId: TASK, setAt: "x" })).toEqual({ ...file, taskId: TASK });
+    expect(effectiveMapping(file, { projectId: OTHER_PROJECT, taskId: TASK, setAt: "x" })).toBe(file);
+  });
+});
+
+describe("context-info (read by /tickr:task and /tickr:describe)", () => {
+  const info = async (data: string, cwd: string, session = "s-1") => {
+    const { code, out } = await run(["context-info", data, session, cwd]);
+    expect(code).toBe(0);
+    expect(out.endsWith("\n")).toBe(true);
+    expect(out.trim().split("\n")).toHaveLength(1);
+    return { out, json: JSON.parse(out) as Record<string, unknown> };
+  };
+  /** No path, no key, no hash, no session id: only the fields listed. */
+  const expectNothingElse = (out: string, data: string, cwd: string, found?: FoundMapping) => {
+    for (const path of [data, cwd, cwd.replace(/\\/g, "/"), JSON.stringify(cwd).slice(1, -1)]) expect(out).not.toContain(path);
+    expect(out).not.toMatch(/[0-9a-f]{64}/);
+    expect(out).not.toMatch(/[0-9a-f]{32}/);
+    expect(out).not.toContain("tkr_");
+    expect(out).not.toContain("s-1");
+    if (found) expect(out).not.toContain(linkKey(found.dir, found.hash));
+  };
+
+  it("a linked checkout without context: the ids and description of .tickr.json", async () => {
+    const { cwd, data } = linked({ workspace_id: WS, project_id: PROJECT, task_id: FILE_TASK, description: "From the file" });
+    const { out, json } = await info(data, cwd);
+    expect(json).toEqual({ linked: true, project_id: PROJECT, task_id: FILE_TASK, description: "From the file", session_context: false });
+    expect(Object.keys(json)).toEqual(["linked", "project_id", "task_id", "description", "session_context"]);
+    expectNothingElse(out, data, cwd, findMapping(cwd) as FoundMapping);
+  });
+
+  it("with the session context of this session only", async () => {
+    const { cwd, data } = linked();
+    await setContext(data, "s-1", PROJECT, "--task", TASK, "--description", DESCRIPTION);
+    expect((await info(data, cwd)).json).toEqual({ linked: true, project_id: PROJECT, task_id: TASK, description: DESCRIPTION, session_context: true });
+    expect((await info(data, cwd, "s-2")).json).toEqual({ linked: true, project_id: PROJECT, task_id: null, description: DEFAULT_DESCRIPTION, session_context: false });
+    await setContext(data, "s-1", PROJECT, "--task", "none");
+    expect((await info(data, cwd)).json).toMatchObject({ task_id: null, description: DESCRIPTION, session_context: true });
+  });
+
+  it("a context of another project is not applied", async () => {
+    const { cwd, data } = linked();
+    await setContext(data, "s-1", OTHER_PROJECT, "--task", TASK);
+    expect((await info(data, cwd)).json).toMatchObject({ project_id: PROJECT, task_id: null, session_context: false });
+  });
+
+  it("upper-case ids in .tickr.json: printed in lower case, the context applies", async () => {
+    const { cwd, data } = linked({ workspace_id: WS, project_id: PROJECT.toUpperCase(), task_id: FILE_TASK.toUpperCase() });
+    expect((await info(data, cwd)).json).toMatchObject({ project_id: PROJECT, task_id: FILE_TASK, session_context: false });
+    await setContext(data, "s-1", PROJECT.toUpperCase(), "--description", DESCRIPTION);
+    expect((await info(data, cwd)).json).toEqual({ linked: true, project_id: PROJECT, task_id: FILE_TASK, description: DESCRIPTION, session_context: true });
+  });
+
+  it("uses the nearest .tickr.json walking up from the directory, as the hooks do, not the git root", async () => {
+    const root = tempDir();
+    const data = join(root, "data");
+    // A git root with its own mapping, and a nested package with another one below it.
+    const repo = writeMapping(join(root, "repo"), { workspace_id: WS, project_id: OTHER_PROJECT });
+    mkdirSync(join(repo, ".git"));
+    const nested = writeMapping(join(repo, "packages", "app"), { workspace_id: WS, project_id: PROJECT });
+    const deep = join(nested, "src", "ui");
+    mkdirSync(deep, { recursive: true });
+    linkCheckout(data, nested);
+    linkCheckout(data, repo);
+    expect((await info(data, deep)).json).toMatchObject({ linked: true, project_id: PROJECT });
+    expect((await info(data, nested)).json).toMatchObject({ linked: true, project_id: PROJECT });
+    expect((await info(data, join(repo, "packages"))).json).toMatchObject({ linked: true, project_id: OTHER_PROJECT });
+    // The hooks of a session in the nested directory journal the same project.
+    const cfg = pluginConfig(data);
+    const dir = instanceFor(data);
+    mkdirSync(dir, { recursive: true });
+    flusherStore(dir).close();
+    recordEvent(hookInput("PostToolUse", deep), cfg, Date.now() + 1000, { linked: (d, h) => isLinked(data, d, h) });
+    expect(journalledMappings(dir).map((m) => m.projectId)).toEqual([PROJECT]);
+  });
+
+  it("a mapping above the git root (a parent directory) is found as the hooks find it", async () => {
+    const root = tempDir();
+    const data = join(root, "data");
+    const parent = writeMapping(join(root, "work"));
+    const repo = join(parent, "repo");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    linkCheckout(data, parent);
+    expect((await info(data, repo)).json).toMatchObject({ linked: true, project_id: PROJECT });
+  });
+
+  it("an unlinked, changed, invalid or missing .tickr.json: {\"linked\":false} and nothing of the file", async () => {
+    const root = tempDir();
+    const data = join(root, "data");
+    const unlinked = writeMapping(join(root, "unlinked"), { workspace_id: WS, project_id: PROJECT, description: "Secret words" });
+    const { out } = await info(data, unlinked);
+    expect(out).toBe('{"linked":false}\n');
+
+    const { cwd, data: linkedData } = linked();
+    writeMapping(cwd, { workspace_id: WS, project_id: OTHER_PROJECT }); // changed after linking
+    expect((await info(linkedData, cwd)).out).toBe('{"linked":false}\n');
+
+    const invalid = join(root, "invalid");
+    mkdirSync(invalid);
+    writeFileSync(join(invalid, ".tickr.json"), "{ not json");
+    expect((await info(data, invalid)).out).toBe('{"linked":false}\n');
+
+    const none = join(root, "none");
+    mkdirSync(none);
+    expect((await info(data, none)).out).toBe('{"linked":false}\n');
+    expect(existsSync(join(data, CONTEXT_DIR))).toBe(false);
+  });
+
+  it("an invalid session id reads no context; missing arguments print the usage", async () => {
+    const { cwd, data } = linked();
+    await setContext(data, "s-1", PROJECT, "--description", DESCRIPTION);
+    expect((await info(data, cwd, "../s 1")).json).toMatchObject({ linked: true, session_context: false });
+    expect((await run(["context-info", data, "s-1"])).out).toMatch(/^Tickr: usage: context-info/);
+  });
+
+  it("writes nothing: no link, no context, no instance", async () => {
+    const root = tempDir();
+    const data = join(root, "data");
+    const cwd = writeMapping(join(root, "repo"));
+    await info(data, cwd);
+    linkCheckout(data, cwd);
+    const before = readdirSync(data, { recursive: true }).sort();
+    await info(data, cwd);
+    expect(readdirSync(data, { recursive: true }).sort()).toEqual(before);
+  });
+});
+
 describe("SessionStart note for the model (additionalContext)", () => {
   async function sessionStart(cwd: string, data: string, extra: Record<string, string> = {}, source = "startup") {
     const { code, out } = await run(["SessionStart"], pluginEnv(data, extra), JSON.stringify(hookInput("SessionStart", cwd, { source })));
