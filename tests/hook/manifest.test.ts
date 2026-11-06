@@ -78,8 +78,10 @@ describe("plugin manifests", () => {
     expect(market.plugins.map((p) => [p.name, p.source])).toEqual([["tickr", "./plugins/tickr"]]);
   });
 
-  it("userConfig keys are exactly api_key, base_url, idle_minutes and api_key is sensitive", () => {
-    expect(Object.keys(plugin.userConfig).sort()).toEqual(["api_key", "base_url", "idle_minutes"]);
+  it("userConfig keys are exactly api_key, base_url, idle_minutes, auto_context and api_key is sensitive", () => {
+    expect(Object.keys(plugin.userConfig).sort()).toEqual(["api_key", "auto_context", "base_url", "idle_minutes"]);
+    expect(plugin.userConfig.auto_context).toMatchObject({ type: "boolean", default: false });
+    expect(plugin.userConfig.auto_context!.sensitive).not.toBe(true);
     expect(plugin.userConfig.api_key).toMatchObject({ type: "string", sensitive: true, required: true });
     expect(plugin.userConfig.base_url).toMatchObject({ type: "string", default: "https://tickr.coderise.cloud" });
     expect(plugin.userConfig.idle_minutes).toMatchObject({ type: "number", default: 15, min: 5, max: 120 });

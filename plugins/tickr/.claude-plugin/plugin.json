@@ -1,6 +1,6 @@
 {
   "name": "tickr",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Tracks your Claude Code sessions as Tickr time entries and lets Claude start, stop and edit your Tickr time entries.",
   "author": {
     "name": "Coderise",
@@ -31,6 +31,12 @@
       "default": 15,
       "min": 5,
       "max": 120
+    },
+    "auto_context": {
+      "type": "boolean",
+      "title": "Automatic session context",
+      "description": "Let Claude change the task and description of the session without asking you first (it still picks only existing tasks of the linked project).",
+      "default": false
     }
   }
 }
