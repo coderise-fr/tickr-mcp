@@ -183,33 +183,40 @@ before changing the task or the description, and Claude Code asks you to allow t
 command that records it. With the plugin option `auto_context` set to `true`, Claude
 applies the change without asking in the chat, still choosing only among the existing
 tasks. Claude Code keeps asking you to allow the command until you allow it for good.
-To do that, add these rules to `permissions.allow` in your Claude Code settings (for
-example `~/.claude/settings.json`):
+To do that, add rules to `permissions.allow` in your Claude Code settings (for example
+`~/.claude/settings.json`). **Each rule must name the plugin's own script by its full
+path**, so that it cannot match a script of the same name found in a cloned repository,
+which would then run without your approval. The script lives in the plugin's cache folder,
+`<your home>/.claude/plugins/cache/tickr-mcp/tickr/<version>/hooks/dist/tickr-hook.cjs`.
+Use the exact command text that Claude Code shows in its permission prompt, from `node`
+up to the script name, and end the rule with the command name and `*`:
 
 ```json
 {
   "permissions": {
     "allow": [
-      "Bash(node --no-warnings *tickr-hook.cjs\" set-context *)",
-      "Bash(node --no-warnings *tickr-hook.cjs\" clear-context *)"
+      "Bash(node --no-warnings \"<full path to the plugin's tickr-hook.cjs>\" set-context *)",
+      "Bash(node --no-warnings \"<full path to the plugin's tickr-hook.cjs>\" clear-context *)"
     ]
   }
 }
 ```
 
-The `*` after `--no-warnings` stands for the plugin's path, which Claude Code fills in
-and which changes with each plugin version. A rule with the full path also works, but
-only until the next update. These rules allow any script named `tickr-hook.cjs` run
-with these two commands; a command chained to them still needs your approval. Both
-rules were checked with Claude Code 2.1.318 (`claude -p --allowedTools '<rule>'`): the
-command ran without a prompt, and without the rule it was refused.
+The path holds the plugin version, so these rules stop matching after a plugin update
+(Claude Code then asks again): replace the version in them. Do not put a `*` in the
+path before the script name, and do not use a rule that matches the script name alone:
+it would also allow a `tickr-hook.cjs` from any repository. A command chained to these
+rules still needs your approval. Rules of this form (with the full path, and a shorter
+wildcard form that is not recommended) were checked with Claude Code 2.1.318
+(`claude -p --allowedTools '<rule>'`): the command ran without a prompt, and without
+the rule it was refused.
 
 Answering "Yes, and don't ask again" at the prompt instead saves a rule in the
 repository's `.claude/settings.local.json`, so it applies to that repository only (as
 the Claude Code permissions documentation describes it). Which command prefix that
 saved rule holds was not checked; if it contains the plugin's path, it stops matching
 after a plugin update. The rules above in `~/.claude/settings.json` apply to every
-repository and survive updates.
+repository, and need their version updated after a plugin update.
 
 **What is sent.** Start and end times, the project, task, tags and description
 from `.tickr.json` (or the task and description you chose for the session), whether

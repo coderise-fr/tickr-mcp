@@ -79,6 +79,20 @@ describe("commands and skill", () => {
     expect(parse(text).meta["allowed-tools"]).not.toMatch(/Bash\(git:\*\)|Bash\(\*\)/);
   });
 
+  it("the README recommends no permission rule that matches a script by its name alone", () => {
+    const readme = readFileSync(`${pluginRoot}../../README.md`, "utf8");
+    // A wildcard before the script name would also match a tickr-hook.cjs of a cloned repository.
+    const rules = readme.match(/"Bash\(node[^\n]*\)"/g) ?? [];
+    expect(rules.length).toBeGreaterThan(0);
+    for (const rule of rules) {
+      // The command text before the script name holds no wildcard.
+      const beforeScript = rule.slice(0, rule.indexOf("tickr-hook.cjs") < 0 ? undefined : rule.indexOf("tickr-hook.cjs"));
+      expect(beforeScript, rule).not.toContain("*");
+      expect(rule, rule).toMatch(/full path/);
+    }
+    expect(readme).toMatch(/full\s+path/);
+  });
+
   it("link.md pre-authorises no file write nor node command, and links the checkout with `accept`", () => {
     const { meta, body } = parse(read("commands/link.md"));
     const allowed = meta["allowed-tools"] ?? "";
