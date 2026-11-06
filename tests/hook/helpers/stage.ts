@@ -27,8 +27,12 @@ export interface StageHarness {
   close(): void;
 }
 
-export function stageHarness(opts: { now: string; idleMinutes?: number; remainingMs?: number }): StageHarness {
-  const dir = tempDir();
+/**
+ * `dir`: the instance directory (default: a new temporary one); `dataDir`: the plugin data
+ * directory of the config (default: `dir`), where the links and session contexts are.
+ */
+export function stageHarness(opts: { now: string; idleMinutes?: number; remainingMs?: number; dir?: string; dataDir?: string }): StageHarness {
+  const dir = opts.dir ?? tempDir();
   const store = openStore(join(dir, DB_FILE), { role: "flusher", busyTimeoutMs: 5000 }) as Store;
   let now = new Date(opts.now);
   const generation = claimOwnership(store, 1, now.toISOString())!;
@@ -37,7 +41,7 @@ export function stageHarness(opts: { now: string; idleMinutes?: number; remainin
     store,
     generation,
     instanceDir: dir,
-    config: { ...pluginConfig(dir), idleMinutes: opts.idleMinutes ?? 15 },
+    config: { ...pluginConfig(opts.dataDir ?? dir), idleMinutes: opts.idleMinutes ?? 15 },
     api: OFFLINE_API,
     now: () => new Date(now.getTime()),
     uptime: () => 1000,

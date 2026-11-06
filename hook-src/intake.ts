@@ -1,17 +1,19 @@
 // Hook intake: one hook event becomes one journalled event, inside the hook's 1 s budget and
 // without any network. Order of preference: the store (one short transaction), else a fallback
 // file, else the gaps counter. The flusher is started afterwards when none is alive.
+import { createHash } from "node:crypto";
 import { uptime as osUptime } from "node:os";
 import { join } from "node:path";
 import type { PluginConfig } from "./config.js";
 import { linkKey } from "./consent.js";
+import { effectiveMapping, readContext, type SessionContext } from "./context.js";
 import { entryIdForEvent } from "./delegated.js";
 import { FALLBACK_DIR, recordGap, takeGaps, writeFallback } from "./fallback.js";
 import { isOwnerFresh } from "./flusher/owner.js";
 import { instanceDir, instanceId, writeInstanceInfo } from "./identity.js";
 import { ulid } from "./ids.js";
-import type { HookInput } from "./io.js";
-import { findMapping } from "./mapping.js";
+import type { HookInput, HookOutput } from "./io.js";
+import { canonicalJson, findMapping, type NormalizedMapping } from "./mapping.js";
 import { collectionInterruptedMessage, takeNoticeMessages } from "./notices.js";
 import { DB_FILE, type JournalEvent, openStore } from "./store/db.js";
 import { SCHEMA_VERSION } from "./store/schema.js";
@@ -35,6 +37,25 @@ export const UNTRACKED_MESSAGE = "Tickr: this session is not tracked. Run /tickr
 function untracked(input: HookInput): { systemMessage?: string } {
   if (input.hook_event_name !== "SessionStart" || input.source === "resume" || input.source === "compact") return {};
   return { systemMessage: UNTRACKED_MESSAGE };
+}
+
+/**
+ * The note for the model at every SessionStart of a linked checkout (hook additionalContext):
+ * the session context mode, the current session context (a task id and a description only) and
+ * the rule to follow. Plain text; the description is quoted as JSON.
+ */
+export function contextNote(autoContext: boolean, ctx: SessionContext | null): string {
+  const parts: string[] = [];
+  if (ctx !== null && ctx.taskId !== undefined) parts.push(ctx.taskId === null ? "no task" : `task ${ctx.taskId}`);
+  if (ctx?.description !== undefined) parts.push(`description ${JSON.stringify(ctx.description)}`);
+  const current =
+    parts.length > 0
+      ? `Current session context: ${parts.join(", ")} (anything not set comes from .tickr.json).`
+      : "Current session context: none (the task and description of .tickr.json apply).";
+  const rule = autoContext
+    ? "Mode: automatic. When the work moves to another existing task of the linked project, or its overall purpose changes, apply /tickr:task (or /tickr:describe) yourself without asking in chat, after reading list_tasks."
+    : "Mode: manual. When the work moves to another existing task of the linked project, or its overall purpose changes, propose /tickr:task (or /tickr:describe) to the user and apply it only once they confirm.";
+  return `Tickr session context: this session is recorded as Tickr time. ${rule} ${current} Follow the tickr skill: never create tasks or tags, descriptions of at most 10 words, never quote prompts or code.`;
 }
 
 export type Provider = "anthropic" | "bedrock" | "vertex" | "foundry";
@@ -134,7 +155,7 @@ function journalInStore(dbPath: string, ev: JournalEvent, now: Date): Journalled
  * Journals one hook event for the instance of the checkout's .tickr.json. Never throws, never
  * waits past `deadlineMs` for the store; returns the message to show, if any.
  */
-export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: number, opts: RecordOptions = {}): { systemMessage?: string } {
+export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: number, opts: RecordOptions = {}): HookOutput {
   const env = opts.env ?? process.env;
   const found = findMapping(input.cwd);
   if (found === null) return untracked(input);
@@ -155,8 +176,13 @@ export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: num
 
   const now = (opts.now ?? (() => new Date()))();
   const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
+  // The session context overrides the task and/or description of .tickr.json (context.ts); the
+  // link stays the one of .tickr.json itself.
+  const sessionCtx = readContext(cfg.dataDir, input.session_id);
+  const applied = sessionCtx?.projectId === found.mapping.projectId ? sessionCtx : null;
   // The link the event is journalled under: the flusher stops the session once it is revoked.
-  const ev = buildEvent(input, { hash: found.hash, json: found.json }, now, (opts.uptime ?? osUptime)(), env, linkKey(found.dir, found.hash));
+  const ev = buildEvent(input, mappingVersion(effectiveMapping(found.mapping, applied)), now, (opts.uptime ?? osUptime)(), env, linkKey(found.dir, found.hash));
+  const note: HookOutput = input.hook_event_name === "SessionStart" ? { additionalContext: contextNote(cfg.autoContext, applied) } : {};
 
   let dirReady = true;
   try {
@@ -170,7 +196,7 @@ export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: num
   const journalled = dirReady && room ? journalInStore(join(dir, DB_FILE), ev, now) : null;
   if (journalled === null && !writeFallback(join(dir, FALLBACK_DIR), ev)) {
     recordGap(dir);
-    return {};
+    return note;
   }
 
   const messages: string[] = [];
@@ -184,5 +210,11 @@ export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: num
       // The next hook tries again.
     }
   }
-  return messages.length > 0 ? { systemMessage: messages.join("\n") } : {};
+  return messages.length > 0 ? { systemMessage: messages.join("\n"), ...note } : note;
+}
+
+/** The journal form of a mapping: its canonical JSON and the SHA-256 of it. */
+function mappingVersion(m: NormalizedMapping): { hash: string; json: string } {
+  const json = canonicalJson(m);
+  return { hash: createHash("sha256").update(json, "utf8").digest("hex"), json };
 }

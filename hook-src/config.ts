@@ -11,6 +11,8 @@ export interface PluginConfig {
   baseUrl: string;
   idleMinutes: number;
   dataDir: string;
+  /** Option auto_context: Claude may change the session's task and description without asking first. */
+  autoContext: boolean;
 }
 
 function optionWording(message: string): string {
@@ -24,6 +26,12 @@ function idleMinutes(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === "") return DEFAULT_IDLE_MINUTES;
   const value = Number(raw);
   return Number.isInteger(value) && value >= MIN_IDLE_MINUTES && value <= MAX_IDLE_MINUTES ? value : DEFAULT_IDLE_MINUTES;
+}
+
+/** A boolean plugin option ("true" or "1"; anything else is false, the default). */
+function flag(raw: string | undefined): boolean {
+  const v = raw?.trim().toLowerCase();
+  return v === "true" || v === "1";
 }
 
 export function readPluginConfig(env: NodeJS.ProcessEnv): PluginConfig | { problem: string } {
@@ -40,5 +48,11 @@ export function readPluginConfig(env: NodeJS.ProcessEnv): PluginConfig | { probl
     if (error instanceof ConfigError) return { problem: optionWording(error.message) };
     throw error;
   }
-  return { apiKey: config.apiKey, baseUrl: config.baseUrl, idleMinutes: idleMinutes(env.CLAUDE_PLUGIN_OPTION_IDLE_MINUTES), dataDir };
+  return {
+    apiKey: config.apiKey,
+    baseUrl: config.baseUrl,
+    idleMinutes: idleMinutes(env.CLAUDE_PLUGIN_OPTION_IDLE_MINUTES),
+    dataDir,
+    autoContext: flag(env.CLAUDE_PLUGIN_OPTION_AUTO_CONTEXT),
+  };
 }

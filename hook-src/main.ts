@@ -3,10 +3,14 @@
 //   tickr-hook.cjs <HookEvent>            a Claude Code hook: no network, always exit 0
 //   tickr-hook.cjs flush <instanceDir>    the detached flusher
 //   tickr-hook.cjs status <dataDir>       /tickr:status (plain text)
+//   tickr-hook.cjs accept <dataDir> <checkoutDir>                       /tickr:link
+//   tickr-hook.cjs set-context <dataDir> <sessionId> <projectId> [...]  /tickr:task, /tickr:describe
+//   tickr-hook.cjs clear-context <dataDir> <sessionId>                  /tickr:task clear
 import { uptime } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { readPluginConfig } from "./config.js";
 import { isLinked, recordLink, revokeStaleLinks } from "./consent.js";
+import { clearContext, isSessionId, isUuid, normalizeDescription, readContext, type SessionContext, writeContext } from "./context.js";
 import { createAgentApi, REQUEST_TIMEOUT_MS } from "./flusher/api.js";
 import { DEBUG_ENV, DEBUG_FILE, debugLogger, runFlusher, WAKE_BUDGET_MS } from "./flusher/run.js";
 import { recordEvent } from "./intake.js";
@@ -75,7 +79,7 @@ async function runHook(event: HookEvent, env: NodeJS.ProcessEnv, io: HookIo): Pr
       startFlusher,
       linked: (mappingDir, hash) => isLinked(config.dataDir, mappingDir, hash),
       revokeStale: (mappingDir, hash) => revokeStaleLinks(config.dataDir, mappingDir, hash),
-    }), io.write);
+    }), io.write, event);
 }
 
 /**
@@ -142,6 +146,79 @@ function runAccept(dataDir: string | undefined, checkoutDir: string | undefined,
 
 const line = (text: string): string => `${text}\n`;
 
+const SET_USAGE =
+  'Tickr: usage: set-context <plugin data directory> <session id> <project id> [--task <task id|none>] [--description "<text>"]';
+
+/** The options of set-context; a string is the problem to print. */
+function parseSetOptions(args: string[]): { task?: string | null; description?: string } | string {
+  const out: { task?: string | null; description?: string } = {};
+  for (let i = 0; i < args.length; i += 2) {
+    const [name, value] = [args[i], args[i + 1]];
+    if (value === undefined) return SET_USAGE;
+    if (name === "--task" && !("task" in out)) {
+      const task = value.trim();
+      if (task.toLowerCase() === "none") out.task = null;
+      else if (isUuid(task)) out.task = task.toLowerCase();
+      else return "Tickr: --task must be a task id or none. Nothing was changed.";
+    } else if (name === "--description" && !("description" in out)) {
+      const description = normalizeDescription(value);
+      if (typeof description !== "string") return `Tickr: ${description.invalid} Nothing was changed.`;
+      out.description = description;
+    } else return SET_USAGE;
+  }
+  if (!("task" in out) && !("description" in out)) return "Tickr: give --task and/or --description. Nothing was changed.";
+  return out;
+}
+
+/**
+ * `set-context <dataDir> <sessionId> <projectId> [--task <uuid|none>] [--description "<text>"]`,
+ * run by /tickr:task and /tickr:describe once the user confirmed: sets the task and/or the
+ * description of this session (context.ts). What is not given is kept from the session's current
+ * context for the same project. Plain text on stdout, without any id; no network.
+ */
+function runSetContext(args: string[], write: Write, now: Date = new Date()): void {
+  const [dataDir, sessionId, projectId, ...rest] = args;
+  if (!dataDir?.trim() || !sessionId || !projectId) return write(line(SET_USAGE));
+  if (!isSessionId(sessionId)) return write(line("Tickr: the session id is not valid. Nothing was changed."));
+  if (!isUuid(projectId.trim())) return write(line("Tickr: the project id is not valid. Nothing was changed."));
+  const options = parseSetOptions(rest);
+  if (typeof options === "string") return write(line(options));
+
+  const dir = resolve(dataDir);
+  const project = projectId.trim().toLowerCase();
+  const current = readContext(dir, sessionId);
+  const ctx: SessionContext = current?.projectId === project ? { ...current, setAt: now.toISOString() } : { projectId: project, setAt: now.toISOString() };
+  if ("task" in options) ctx.taskId = options.task ?? null;
+  if (options.description !== undefined) ctx.description = options.description;
+  try {
+    writeContext(dir, sessionId, ctx);
+  } catch {
+    return write(line("Tickr: the session context could not be saved (is the plugin data directory writable?)."));
+  }
+  const task = ctx.taskId === undefined ? "the task of .tickr.json" : ctx.taskId === null ? "no task" : "the chosen task";
+  const description = ctx.description === undefined ? "the description of .tickr.json" : `the description "${ctx.description}"`;
+  write(line(`Tickr: from now on this session is recorded with ${task} and ${description}.`));
+}
+
+/** `clear-context <dataDir> <sessionId>`: the session goes back to the task and description of .tickr.json. */
+function runClearContext(dataDir: string | undefined, sessionId: string | undefined, write: Write): void {
+  if (!dataDir?.trim() || !sessionId) return write(line("Tickr: usage: clear-context <plugin data directory> <session id>"));
+  if (!isSessionId(sessionId)) return write(line("Tickr: the session id is not valid. Nothing was changed."));
+  let removed: boolean;
+  try {
+    removed = clearContext(resolve(dataDir), sessionId);
+  } catch {
+    return write(line("Tickr: the session context could not be removed (is the plugin data directory writable?)."));
+  }
+  write(
+    line(
+      removed
+        ? "Tickr: the session context is removed: this session is recorded with the task and description of .tickr.json again."
+        : "Tickr: this session has no session context. Nothing was changed.",
+    ),
+  );
+}
+
 export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = processIo()): Promise<number> {
   const [mode] = argv;
   try {
@@ -149,6 +226,8 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv, io: HookIo = 
     else if (mode === "flush") await runFlush(argv[1], env, io.bundlePath);
     else if (mode === "status") runStatus(argv[1], env, io.write);
     else if (mode === "accept") runAccept(argv[1], argv[2], io.write);
+    else if (mode === "set-context") runSetContext(argv.slice(1), io.write);
+    else if (mode === "clear-context") runClearContext(argv[1], argv[2], io.write);
   } catch {
     // A hook never fails the user's session; a failed flusher is started again by the next hook.
   }

@@ -81,10 +81,21 @@ describe("writeHookOutput", () => {
     expect(JSON.parse(out[0]!)).toEqual({ systemMessage: "Tickr: hello" });
   });
 
+  it("writes the note for the model as hookSpecificOutput.additionalContext, in the same JSON object", () => {
+    const out: string[] = [];
+    writeHookOutput({ systemMessage: "Tickr: hello", additionalContext: "Tickr session context: note" }, (text) => void out.push(text), "SessionStart");
+    writeHookOutput({ additionalContext: "Tickr session context: note" }, (text) => void out.push(text));
+    expect(out.map((o) => JSON.parse(o) as unknown)).toEqual([
+      { systemMessage: "Tickr: hello", hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "Tickr session context: note" } },
+      { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "Tickr session context: note" } },
+    ]);
+  });
+
   it("writes nothing without a message", () => {
     const out: string[] = [];
     writeHookOutput({}, (text) => void out.push(text));
     writeHookOutput({ systemMessage: "" }, (text) => void out.push(text));
+    writeHookOutput({ systemMessage: "", additionalContext: "" }, (text) => void out.push(text));
     expect(out).toEqual([]);
   });
 });

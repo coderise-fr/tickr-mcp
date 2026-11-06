@@ -86,8 +86,20 @@ export const writeStdout: Write = (text) => {
   writeSync(1, text);
 };
 
-/** Writes one JSON object with the message, or nothing at all. */
-export function writeHookOutput(out: { systemMessage?: string }, write: Write = writeStdout): void {
-  if (!out.systemMessage) return;
-  write(JSON.stringify({ systemMessage: out.systemMessage }));
+/**
+ * What a hook shows: `systemMessage` to the user, `additionalContext` to the model (a note of the
+ * SessionStart hook; Claude Code adds it to the session's context).
+ */
+export interface HookOutput {
+  systemMessage?: string;
+  additionalContext?: string;
+}
+
+/** Writes one JSON object with the message and/or the note for the model, or nothing at all. */
+export function writeHookOutput(out: HookOutput, write: Write = writeStdout, hookEventName = "SessionStart"): void {
+  const json: Record<string, unknown> = {};
+  if (out.systemMessage) json.systemMessage = out.systemMessage;
+  if (out.additionalContext) json.hookSpecificOutput = { hookEventName, additionalContext: out.additionalContext };
+  if (Object.keys(json).length === 0) return;
+  write(JSON.stringify(json));
 }

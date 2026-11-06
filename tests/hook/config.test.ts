@@ -14,7 +14,13 @@ describe("readPluginConfig", () => {
       baseUrl: "https://tickr.coderise.cloud",
       idleMinutes: 15,
       dataDir: "/data/tickr",
+      autoContext: false,
     });
+  });
+
+  it("reads auto_context as a boolean option: true only for true or 1", () => {
+    for (const raw of ["true", "TRUE", " 1 "]) expect(readPluginConfig(env({ CLAUDE_PLUGIN_OPTION_AUTO_CONTEXT: raw }))).toMatchObject({ autoContext: true });
+    for (const raw of ["false", "0", "", "yes", undefined]) expect(readPluginConfig(env({ CLAUDE_PLUGIN_OPTION_AUTO_CONTEXT: raw }))).toMatchObject({ autoContext: false });
   });
 
   it("validates the URL with the server's rules and normalises it", () => {

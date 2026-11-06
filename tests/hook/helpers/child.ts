@@ -97,7 +97,7 @@ if (mode === "hold-insert") {
     now: () => new Date(Date.now() + offset),
     uptime: () => 1000,
     api: opts.baseUrl ? createAgentApi({ baseUrl: opts.baseUrl, apiKey: "tkr_test_child_flusher_key", timeoutMs: 3000 }) : OFFLINE_API,
-    config: { apiKey: "tkr_test_child_flusher_key", baseUrl: "https://tickr.example.test", idleMinutes: 15, dataDir: dirname(dir) },
+    config: { apiKey: "tkr_test_child_flusher_key", baseUrl: "https://tickr.example.test", idleMinutes: 15, dataDir: dirname(dir), autoContext: false },
     wakeBudgetMs: opts.wakeBudgetMs ?? 30_000,
     startDelayMs: successorStartDelay(process.env),
     stages,
