@@ -7,6 +7,13 @@
   work; Claude proposes them and you confirm or edit them. `/tickr:task clear` goes
   back to `.tickr.json`. It never creates tasks or tags.
 - New `/tickr:describe`: change only the description of the current session.
+- Both commands read the project through the plugin's read-only `context-info`
+  command, the only one they pre-authorise: it uses the same `.tickr.json` as the
+  recording (the nearest one from the session's directory upwards) and its link on
+  this machine; an unlinked checkout is sent to `/tickr:link`.
+- Project and task ids are compared ignoring case, so a `.tickr.json` holding an
+  upper-case id gets the session context too; the chosen task id is stored and sent
+  in lower case.
 - A description is plain text of at most 10 words (only words with a letter count)
   and 100 characters, without `"`, `` ` ``, `$` or `\`. A change starts a new Tickr
   entry with the new task and description.

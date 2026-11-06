@@ -161,6 +161,13 @@ description of `.tickr.json`, unless you choose others for that session only:
 - `/tickr:describe [text]` changes only the description; the task stays.
 - `/tickr:task clear` goes back to the task and description of `.tickr.json`.
 
+Both commands first run the plugin's read-only `context-info` command, which reads the
+same `.tickr.json` as the recording (the nearest one from the session's current directory
+upwards, so a `.tickr.json` in a sub-folder of the repository wins over one at its root),
+checks that it is linked on this machine and prints the project, the current task and
+description, and nothing else. This one command is pre-authorised; when the checkout is
+not linked, the commands ask you to run `/tickr:link` and stop.
+
 Claude also proposes `/tickr:task` when it notices that the work moved to another task
 of the project or that its purpose changed. A description is plain text of at most
 10 words and 100 characters; only words with a letter count, so numbers are free (the
@@ -193,7 +200,16 @@ example `~/.claude/settings.json`):
 The `*` after `--no-warnings` stands for the plugin's path, which Claude Code fills in
 and which changes with each plugin version. A rule with the full path also works, but
 only until the next update. These rules allow any script named `tickr-hook.cjs` run
-with these two commands; a command chained to them still needs your approval.
+with these two commands; a command chained to them still needs your approval. Both
+rules were checked with Claude Code 2.1.318 (`claude -p --allowedTools '<rule>'`): the
+command ran without a prompt, and without the rule it was refused.
+
+Answering "Yes, and don't ask again" at the prompt instead saves a rule in the
+repository's `.claude/settings.local.json`, so it applies to that repository only (as
+the Claude Code permissions documentation describes it). Which command prefix that
+saved rule holds was not checked; if it contains the plugin's path, it stops matching
+after a plugin update. The rules above in `~/.claude/settings.json` apply to every
+repository and survive updates.
 
 **What is sent.** Start and end times, the project, task, tags and description
 from `.tickr.json` (or the task and description you chose for the session), whether
