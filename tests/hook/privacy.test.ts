@@ -13,7 +13,8 @@ import { DEBUG_FILE, debugLine, type DebugRecord } from "../../hook-src/flusher/
 import { instanceDir, instanceId } from "../../hook-src/identity.js";
 import { main } from "../../hook-src/main.js";
 import { json, type RecordedRequest, startServer } from "../helpers/httpServer.js";
-import { cleanTempDirs, linkCheckout, tempDir, WS, writeMapping } from "./helpers/env.js";
+import { DEFAULT_DESCRIPTION } from "../../hook-src/mapping.js";
+import { cleanTempDirs, linkCheckout, PROJECT, tempDir, WS, writeMapping } from "./helpers/env.js";
 
 interface Step {
   hook?: Record<string, unknown>;
@@ -34,6 +35,9 @@ let server: Awaited<ReturnType<typeof startServer>>;
 const messages: string[] = [];
 let status = "";
 let requestsBeforeRevoke = 0;
+const contextOutput: string[] = [];
+const CONTEXT_TASK = "2a9c6e3f-7d4b-4e0a-9c3d-5f7b9d1e3f04";
+const CONTEXT_DESCRIPTION = "Implementation of the mobile app UI";
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -87,7 +91,15 @@ beforeAll(async () => {
 
   const vars = { cwd, transcript, agentTranscript };
   const common = { session_id: FIXTURE.sessionId, transcript_path: transcript, cwd };
-  for (const step of FIXTURE.steps) {
+  for (const [i, step] of FIXTURE.steps.entries()) {
+    // Halfway, the user confirms a session context (/tickr:task): a task and a short description.
+    if (i === Math.floor(FIXTURE.steps.length / 2)) {
+      await main(["set-context", data, FIXTURE.sessionId, PROJECT, "--task", CONTEXT_TASK, "--description", CONTEXT_DESCRIPTION], env, {
+        stdin: Readable.from([]),
+        deadlineMs: Date.now() + 1000,
+        write: (t) => void contextOutput.push(t),
+      });
+    }
     await pause(5); // strictly increasing timestamps
     const now = new Date().toISOString();
     const line = (l: Record<string, unknown>) =>
@@ -130,8 +142,15 @@ describe("privacy allow-list (D14)", () => {
     expect(server.requests[0]!.url).toBe("/api/v1/me");
     expect(puts.some((r) => r.url.startsWith("/api/v1/agent-segments/"))).toBe(true);
     expect(puts.filter((r) => r.url === `/api/v1/entries/${ENTRY}/agent-usage`)).toHaveLength(1);
-    const final = puts.map((r) => JSON.parse(r.body) as { final?: boolean; usage?: UsageRow[] }).find((b) => b.final === true);
-    expect(final?.usage?.map((u) => [u.model, u.outputTokens])).toEqual([
+    // The session context splits the session in two segments: the tokens of their final revisions add up.
+    const finals = new Map<string, UsageRow[]>();
+    for (const r of puts) {
+      const body = JSON.parse(r.body) as { final?: boolean; usage?: UsageRow[] };
+      if (body.final === true) finals.set(r.url, body.usage ?? []);
+    }
+    const output = new Map<string, number>();
+    for (const u of [...finals.values()].flat()) output.set(u.model, (output.get(u.model) ?? 0) + u.outputTokens);
+    expect([...output].sort()).toEqual([
       ["claude-haiku-4-5", 8],
       ["claude-opus-4-7", 42],
     ]);
@@ -154,6 +173,28 @@ describe("privacy allow-list (D14)", () => {
       const keys = Object.keys(JSON.parse(r.body) as object);
       const route = r.url.startsWith("/api/v1/agent-segments/") ? "/api/v1/agent-segments/{segmentId}" : "/api/v1/entries/{id}/agent-usage";
       expect(keys).toEqual([...bodyPropertiesOf("put", route)]);
+    }
+  });
+
+  it("the session context description is the only free text that reaches Tickr from the session context", () => {
+    expect(contextOutput.join("")).toMatch(/^Tickr: from now on this session is recorded with the chosen task/);
+    const segments = server.requests.filter((r) => r.method === "PUT" && r.url.startsWith("/api/v1/agent-segments/")).map((r) => JSON.parse(r.body) as Record<string, unknown>);
+    // Before the context: .tickr.json's own task and description; after it: the confirmed ones.
+    expect(new Set(segments.map((b) => `${String(b.taskId)} ${String(b.description)}`))).toEqual(
+      new Set([`null ${DEFAULT_DESCRIPTION}`, `${CONTEXT_TASK} ${CONTEXT_DESCRIPTION}`]),
+    );
+    // Every other text value of every body is an id, a time, a model or a fixed word: no free text.
+    const leaves = (value: unknown, key = ""): [string, string][] =>
+      typeof value === "string"
+        ? [[key, value]]
+        : value !== null && typeof value === "object"
+          ? Object.entries(value).flatMap(([k, v]) => leaves(v, Array.isArray(value) ? key : k))
+          : [];
+    for (const r of server.requests.filter((q) => q.method === "PUT")) {
+      for (const [key, text] of leaves(JSON.parse(r.body))) {
+        if (key === "description") expect([DEFAULT_DESCRIPTION, CONTEXT_DESCRIPTION]).toContain(text);
+        else expect(text, key).toMatch(/^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/);
+      }
     }
   });
 

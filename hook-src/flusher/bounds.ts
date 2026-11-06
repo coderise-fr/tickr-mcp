@@ -8,9 +8,11 @@
 //   meta intake_paused (hooks then journal nothing) and queues one notice; nothing pending is
 //   deleted. Intake resumes once both are below their bound again.
 // - Retention: acknowledged data older than 90 days is deleted, at most once a day, then the
-//   database is vacuumed.
+//   database is vacuumed. Session context files (context.ts) not written for 90 days, those of
+//   sessions long ended, are removed at the same time.
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { pruneContexts } from "../context.js";
 import { FALLBACK_DIR } from "../fallback.js";
 import { INTAKE_PAUSED_KEY } from "../intake.js";
 import { addNotice } from "../notices.js";
@@ -87,6 +89,7 @@ export function boundsStage(opts: BoundsOptions = {}): StageRun {
         return store.deleteRetired(cutoff);
       });
       if (deleted > 0) vacuum(store);
+      pruneContexts(ctx.config.dataDir, now, RETENTION_MS);
     }
 
     const over = () => store.pendingOutboxCount() >= maxRows || instanceBytes(ctx.instanceDir) >= maxBytes;
