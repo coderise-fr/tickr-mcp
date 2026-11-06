@@ -217,8 +217,8 @@ not remove those: as long as they stay in `permissions.allow`, a `tickr-hook.cjs
 any cloned repository still runs with `set-context` or `clear-context` without your
 approval. Open your Claude Code settings (`~/.claude/settings.json`, and the
 `.claude/settings.local.json` of the repositories where you chose "don't ask again"),
-delete every `Bash(node …)` rule that has a `*` in front of `tickr-hook.cjs`, and keep
-only the full-path rules.
+delete every `node` rule that has a `*` anywhere in front of the script's name, and
+keep only the full-path rules.
 
 Answering "Yes, and don't ask again" at the prompt instead saves a rule in the
 repository's `.claude/settings.local.json`, so it applies to that repository only (as

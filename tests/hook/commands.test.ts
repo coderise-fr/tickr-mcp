@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ALL_TOOLS } from "../../src/tools/index.js";
+import { wildcardBeforeScript } from "./helpers/rules.js";
 
 const pluginRoot = fileURLToPath(new URL("../../plugins/tickr/", import.meta.url));
 const read = (relative: string) => readFileSync(`${pluginRoot}${relative}`, "utf8").replace(/\r\n/g, "\n");
@@ -81,32 +82,48 @@ describe("commands and skill", () => {
 
   it("the README recommends no permission rule that matches a script by its name alone", () => {
     const readme = readFileSync(`${pluginRoot}../../README.md`, "utf8");
-    // A wildcard before the script name would also match a tickr-hook.cjs of a cloned repository.
-    // Each JSON string is matched on its own (escaped quotes respected), so several rules on one
-    // line cannot hide an unsafe one behind a safe one.
+    // The same check for every rule of the README, quoted in JSON or written inline.
+    expect(wildcardBeforeScript(readme)).toEqual([]);
+    // The recommended rules are present, each one naming the script by its full path.
     const rules = readme.match(/"Bash\((?:[^"\\]|\\.)*\)"/g) ?? [];
     expect(rules.length).toBeGreaterThanOrEqual(2);
-    // No rule text of the README carries a wildcard in front of the script name, in a JSON string
-    // or anywhere else (the removal advice describes the old rules without writing them).
-    expect(readme).not.toMatch(/\*\s*tickr-hook\.cjs/);
+    for (const rule of rules) expect(rule, rule).toMatch(/full path/);
     expect(readme).toMatch(/remove them/);
-    for (const rule of rules) {
-      // The command text before the script name holds no wildcard.
-      const beforeScript = rule.slice(0, rule.indexOf("tickr-hook.cjs") < 0 ? undefined : rule.indexOf("tickr-hook.cjs"));
-      expect(beforeScript, rule).not.toContain("*");
-      expect(rule, rule).toMatch(/full path/);
-    }
-    expect(readme).toMatch(/full\s+path/);
   });
 
-  it("the permission-rule check sees every rule of a line holding several, and one with a wildcard", () => {
-    const rule = /"Bash\((?:[^"\\]|\\.)*\)"/g;
-    const line = '["Bash(node --no-warnings \\"C:/p/tickr-hook.cjs\\" set-context *)", "Bash(node --no-warnings *tickr-hook.cjs\\" clear-context *)"]';
-    const found = line.match(rule) ?? [];
-    expect(found).toHaveLength(2);
-    const wildcardBeforeScript = found.filter((r) => r.slice(0, r.indexOf("tickr-hook.cjs")).includes("*"));
-    expect(wildcardBeforeScript).toHaveLength(1);
-    expect(wildcardBeforeScript[0]).toContain("clear-context");
+  describe("wildcardBeforeScript (the README rule check)", () => {
+    const safe = 'Bash(node --no-warnings "C:/Users/me/.claude/plugins/cache/tickr-mcp/tickr/0.2.0/hooks/dist/tickr-hook.cjs" set-context *)';
+
+    it("accepts a full-path rule, quoted or inline", () => {
+      expect(wildcardBeforeScript(`"${safe.replaceAll('"', '\\"')}"`)).toEqual([]);
+      expect(wildcardBeforeScript(`use ${safe} here`)).toEqual([]);
+    });
+
+    it("accepts a safe rule next to a rule that has a wildcard but no script, in either order", () => {
+      expect(wildcardBeforeScript(`Bash(git status:*) and ${safe}`)).toEqual([]);
+      expect(wildcardBeforeScript(`${safe} and Bash(git diff:*) and the tickr-hook.cjs script`)).toEqual([]);
+    });
+
+    it("rejects an inline rule with a directory between the wildcard and the script name", () => {
+      expect(wildcardBeforeScript("Bash(node --no-warnings */hooks/dist/tickr-hook.cjs set-context *)")).toHaveLength(1);
+    });
+
+    it("rejects an inline rule with a long path, whatever its length", () => {
+      const long = `Bash(node --no-warnings */${"directory/".repeat(60)}hooks/dist/tickr-hook.cjs set-context *)`;
+      expect(long.length).toBeGreaterThan(400);
+      expect(wildcardBeforeScript(long)).toHaveLength(1);
+    });
+
+    it("rejects the old form, a wildcard right before the script name, in a JSON string", () => {
+      expect(wildcardBeforeScript('"Bash(node --no-warnings *tickr-hook.cjs\\" clear-context *)"')).toHaveLength(1);
+    });
+
+    it("finds the unsafe rule among several on one line", () => {
+      const line = `["${safe.replaceAll('"', '\\"')}", "Bash(node --no-warnings *tickr-hook.cjs\\" clear-context *)"]`;
+      const unsafe = wildcardBeforeScript(line);
+      expect(unsafe).toHaveLength(1);
+      expect(unsafe[0]).toContain("*tickr-hook.cjs");
+    });
   });
 
   it("link.md pre-authorises no file write nor node command, and links the checkout with `accept`", () => {
