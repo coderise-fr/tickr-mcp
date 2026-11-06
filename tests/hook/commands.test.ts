@@ -82,8 +82,14 @@ describe("commands and skill", () => {
   it("the README recommends no permission rule that matches a script by its name alone", () => {
     const readme = readFileSync(`${pluginRoot}../../README.md`, "utf8");
     // A wildcard before the script name would also match a tickr-hook.cjs of a cloned repository.
-    const rules = readme.match(/"Bash\(node[^\n]*\)"/g) ?? [];
-    expect(rules.length).toBeGreaterThan(0);
+    // Each JSON string is matched on its own (escaped quotes respected), so several rules on one
+    // line cannot hide an unsafe one behind a safe one.
+    const rules = readme.match(/"Bash\((?:[^"\\]|\\.)*\)"/g) ?? [];
+    expect(rules.length).toBeGreaterThanOrEqual(2);
+    // No rule text of the README carries a wildcard in front of the script name, in a JSON string
+    // or anywhere else (the removal advice describes the old rules without writing them).
+    expect(readme).not.toMatch(/\*\s*tickr-hook\.cjs/);
+    expect(readme).toMatch(/remove them/);
     for (const rule of rules) {
       // The command text before the script name holds no wildcard.
       const beforeScript = rule.slice(0, rule.indexOf("tickr-hook.cjs") < 0 ? undefined : rule.indexOf("tickr-hook.cjs"));
@@ -91,6 +97,16 @@ describe("commands and skill", () => {
       expect(rule, rule).toMatch(/full path/);
     }
     expect(readme).toMatch(/full\s+path/);
+  });
+
+  it("the permission-rule check sees every rule of a line holding several, and one with a wildcard", () => {
+    const rule = /"Bash\((?:[^"\\]|\\.)*\)"/g;
+    const line = '["Bash(node --no-warnings \\"C:/p/tickr-hook.cjs\\" set-context *)", "Bash(node --no-warnings *tickr-hook.cjs\\" clear-context *)"]';
+    const found = line.match(rule) ?? [];
+    expect(found).toHaveLength(2);
+    const wildcardBeforeScript = found.filter((r) => r.slice(0, r.indexOf("tickr-hook.cjs")).includes("*"));
+    expect(wildcardBeforeScript).toHaveLength(1);
+    expect(wildcardBeforeScript[0]).toContain("clear-context");
   });
 
   it("link.md pre-authorises no file write nor node command, and links the checkout with `accept`", () => {

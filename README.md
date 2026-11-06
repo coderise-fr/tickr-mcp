@@ -211,6 +211,15 @@ wildcard form that is not recommended) were checked with Claude Code 2.1.318
 (`claude -p --allowedTools '<rule>'`): the command ran without a prompt, and without
 the rule it was refused.
 
+**If you added rules from an earlier version of this README, remove them.** That version
+recommended rules with a `*` in front of `tickr-hook.cjs`. Adding the rules above does
+not remove those: as long as they stay in `permissions.allow`, a `tickr-hook.cjs` from
+any cloned repository still runs with `set-context` or `clear-context` without your
+approval. Open your Claude Code settings (`~/.claude/settings.json`, and the
+`.claude/settings.local.json` of the repositories where you chose "don't ask again"),
+delete every `Bash(node …)` rule that has a `*` in front of `tickr-hook.cjs`, and keep
+only the full-path rules.
+
 Answering "Yes, and don't ask again" at the prompt instead saves a rule in the
 repository's `.claude/settings.local.json`, so it applies to that repository only (as
 the Claude Code permissions documentation describes it). Which command prefix that
