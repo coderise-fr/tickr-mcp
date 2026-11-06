@@ -131,8 +131,9 @@ tokens it used. The plugin needs a Tickr version that accepts agent sessions.
 
 Claude Code then asks for the plugin options: `api_key` (a key with the
 **Workspace user** role, see section 1), `base_url` (default
-`https://tickr.coderise.cloud`) and `idle_minutes` (default 15: a segment ends
-after that long without activity).
+`https://tickr.coderise.cloud`), `idle_minutes` (default 15: a segment ends
+after that long without activity) and `auto_context` (default false: see "Manual or
+automatic" below).
 
 **Link a repository.** Run `/tickr:link` in the repository: it asks for the
 project (and optionally the task, tags and description), writes a
@@ -151,9 +152,53 @@ file and to record the link. A session already recorded stops being tracked once
 `.tickr.json` changes or its link is removed from the plugin data: nothing more of it
 is read or sent.
 
+**Task and description of a session.** A session is recorded under the task and
+description of `.tickr.json`, unless you choose others for that session only:
+
+- `/tickr:task [what the session is about]` lists the tasks of the linked project,
+  proposes one of them (or no task) and a short description of the work, and asks you
+  to confirm or edit them. It only picks existing tasks: it never creates a task or a tag.
+- `/tickr:describe [text]` changes only the description; the task stays.
+- `/tickr:task clear` goes back to the task and description of `.tickr.json`.
+
+Claude also proposes `/tickr:task` when it notices that the work moved to another task
+of the project or that its purpose changed. A description is plain text of at most
+10 words and 100 characters; only words with a letter count, so numbers are free (the
+100 characters still apply), and `"`, `` ` ``, `$` and `\` are refused. Examples:
+`Implementation of the mobile app UI`, `Fix tickets 1 2 3 4 5 6 7 110 210`. From the
+moment you change it, a new Tickr entry starts with the new task and description. The
+choice is kept on your machine, in one small file per session in the plugin data
+directory (removed after 90 days); different sessions in the same repository keep
+their own choice.
+
+**Manual or automatic.** In manual mode (the default) Claude asks you in the chat
+before changing the task or the description, and Claude Code asks you to allow the
+command that records it. With the plugin option `auto_context` set to `true`, Claude
+applies the change without asking in the chat, still choosing only among the existing
+tasks. Claude Code keeps asking you to allow the command until you allow it for good.
+To do that, add these rules to `permissions.allow` in your Claude Code settings (for
+example `~/.claude/settings.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --no-warnings *tickr-hook.cjs\" set-context *)",
+      "Bash(node --no-warnings *tickr-hook.cjs\" clear-context *)"
+    ]
+  }
+}
+```
+
+The `*` after `--no-warnings` stands for the plugin's path, which Claude Code fills in
+and which changes with each plugin version. A rule with the full path also works, but
+only until the next update. These rules allow any script named `tickr-hook.cjs` run
+with these two commands; a command chained to them still needs your approval.
+
 **What is sent.** Start and end times, the project, task, tags and description
-from `.tickr.json`, whether the session is still working, and token counts per
-model. **Never sent:** your prompts, Claude's answers, file names, branch names,
+from `.tickr.json` (or the task and description you chose for the session), whether
+the session is still working, and token counts per model. The description you confirm
+is the only text of your choosing that is sent. **Never sent:** your prompts, Claude's answers, file names, branch names,
 directory paths, the API key. Everything is first written to a local queue and
 sent in the background; if Tickr is unreachable the queue is sent later.
 

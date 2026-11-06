@@ -1,5 +1,25 @@
 # Changelog
 
+## Plugin `tickr` 0.2.0 — unreleased
+
+- New `/tickr:task`: choose, for the current session only, a task among the
+  existing tasks of the linked project (or no task) and a short description of the
+  work; Claude proposes them and you confirm or edit them. `/tickr:task clear` goes
+  back to `.tickr.json`. It never creates tasks or tags.
+- New `/tickr:describe`: change only the description of the current session.
+- A description is plain text of at most 10 words (only words with a letter count)
+  and 100 characters, without `"`, `` ` ``, `$` or `\`. A change starts a new Tickr
+  entry with the new task and description.
+- Claude proposes `/tickr:task` when the work moves to another task or purpose. New
+  option `auto_context` (default false): Claude applies the change without asking in
+  the chat. The README gives the permission rules that also let the command run
+  without a prompt.
+- The session context stays on this machine (one small file per session in the
+  plugin data directory, removed after 90 days); only the chosen task id and the
+  confirmed description are sent, as part of the session's entries. Nothing else
+  about the session is sent.
+- Bundles MCP server 0.2.1 (unchanged).
+
 ## 0.2.1 — 2026-11-05
 
 - Security: zod 4.6.7 (an advisory on memory exhaustion while validating very large
