@@ -86,9 +86,16 @@ describe("commands and skill", () => {
     // line cannot hide an unsafe one behind a safe one.
     const rules = readme.match(/"Bash\((?:[^"\\]|\\.)*\)"/g) ?? [];
     expect(rules.length).toBeGreaterThanOrEqual(2);
-    // No rule text of the README carries a wildcard in front of the script name, in a JSON string
-    // or anywhere else (the removal advice describes the old rules without writing them).
-    expect(readme).not.toMatch(/\*\s*tickr-hook\.cjs/);
+    // No rule of the README carries a wildcard anywhere in front of the script name, whether it is
+    // a JSON string or written inline: from every `Bash(` to the next script name (the removal
+    // advice describes the old rules without writing one).
+    const starts = [...readme.matchAll(/Bash\(/g)].map((m) => m.index!);
+    expect(starts.length).toBeGreaterThanOrEqual(2);
+    for (const at of starts) {
+      const script = readme.indexOf("tickr-hook.cjs", at);
+      if (script < 0 || script - at > 400) continue;
+      expect(readme.slice(at, script), readme.slice(at, script + 40)).not.toContain("*");
+    }
     expect(readme).toMatch(/remove them/);
     for (const rule of rules) {
       // The command text before the script name holds no wildcard.
@@ -107,6 +114,11 @@ describe("commands and skill", () => {
     const wildcardBeforeScript = found.filter((r) => r.slice(0, r.indexOf("tickr-hook.cjs")).includes("*"));
     expect(wildcardBeforeScript).toHaveLength(1);
     expect(wildcardBeforeScript[0]).toContain("clear-context");
+
+    // An inline rule with a directory between the wildcard and the script name is seen too.
+    const inline = "use Bash(node --no-warnings */hooks/dist/tickr-hook.cjs set-context *) here";
+    const at = inline.indexOf("Bash(");
+    expect(inline.slice(at, inline.indexOf("tickr-hook.cjs", at))).toContain("*");
   });
 
   it("link.md pre-authorises no file write nor node command, and links the checkout with `accept`", () => {
