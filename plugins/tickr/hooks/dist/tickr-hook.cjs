@@ -1221,6 +1221,7 @@ var Store = class {
        WHERE s.state = 'active'
          AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'delegated' AND t.target_id = d.entry_id)
          AND (c.target_id IS NULL
+           OR c.canonical_json = ''
            OR json_extract(c.body_json, '$.usageQuality') IS NOT 'complete' AND json_extract(c.body_json, '$.usageQuality') IS NOT 'incomplete'
            OR (s.last_event_time >= ? AND (json_extract(c.body_json, '$.usageQuality') IS NOT 'complete'
              OR EXISTS (SELECT 1 FROM ledger l WHERE l.recipient_kind = 'delegated' AND l.recipient_id = d.entry_id AND l.folded = 0))))
@@ -1356,7 +1357,7 @@ var Store = class {
          LEFT JOIN last_committed c ON c.target_kind = 'segment' AND c.target_id = s.id
          WHERE s.server_state IS NULL
            AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'segment' AND t.target_id = s.id)
-           AND (s.final = 0 OR c.target_id IS NULL OR json_extract(c.body_json, '$.final') IS NOT 1 ${recheck})
+           AND (s.final = 0 OR c.target_id IS NULL OR c.canonical_json = '' OR json_extract(c.body_json, '$.final') IS NOT 1 ${recheck})
          ORDER BY s.started_at, s.id`
     ).all(...sinceIso === void 0 ? [] : [sinceIso]).map((r) => toSegment(r));
   }
@@ -2026,7 +2027,8 @@ function applyEvent(s, ev, cfg) {
     changes.push(diagnostic === void 0 ? { kind: "finalize", id: seg.id, stoppedAt, reason } : { kind: "finalize", id: seg.id, stoppedAt, reason, diagnostic });
     open = null;
   };
-  const start = (startedAt, mappingVersionId, working) => {
+  const start = (startedAt, eventMapping, working) => {
+    const mappingVersionId = cfg.openingMapping?.(s.sessionId, eventMapping) ?? eventMapping;
     open = { id: cfg.newId(), mappingVersionId, startedAt, lastActivityAt: ev.localTime, working, observedAt: ev.localTime };
     changes.push({ kind: "open", seg: open });
   };
@@ -2203,6 +2205,7 @@ var segmentationStage = (ctx) => {
     idleMs,
     newId: () => uuidv7(ctx.now().getTime()),
     renameInPlace: (open, mappingVersionId) => mayRenameInPlace(ctx.store, open.id, open.mappingVersionId, mappingVersionId, ctx.now()),
+    openingMapping: (sessionId, mappingVersionId) => openingMapping(ctx.store, sessionId, mappingVersionId),
     keepMapping: (open, mappingVersionId) => {
       const sessionId = ctx.store.getSegment(open.id)?.sessionId;
       return sessionId !== void 0 && keepsMapping(ctx.store, sessionId, open.mappingVersionId, mappingVersionId);
@@ -2949,6 +2952,10 @@ function keepsMapping(store, sessionId, fromVersionId, toVersionId) {
   const refused = readJson(store, REFUSED_RENAME_PREFIX + sessionId);
   return refused?.from === fromVersionId && refused.to === toVersionId;
 }
+function openingMapping(store, sessionId, versionId) {
+  const refused = readJson(store, REFUSED_RENAME_PREFIX + sessionId);
+  return refused?.to === versionId && store.getMapping(refused.from) !== null ? refused.from : versionId;
+}
 function wireMapping(store, segmentId, mapping) {
   const adopted = readJson(store, ADOPTED_TAGS_PREFIX + segmentId);
   if (adopted === null || !Array.isArray(adopted.to) || canonicalJson(adopted.from) !== canonicalJson(mapping.tagIds)) return mapping;
@@ -2979,6 +2986,8 @@ function tagVerdict(entry, sent, previousTags) {
   if (entry.tagIds === void 0 || !Array.isArray(sent.tagIds)) return "same";
   const got = tagSet(entry.tagIds);
   if (got === tagSet(sent.tagIds)) return "same";
+  const sentSet = new Set(sent.tagIds.map((t) => t.toLowerCase()));
+  if (entry.tagIds.every((t) => sentSet.has(t.toLowerCase()))) return "adopt";
   if (previousTags !== null && tagSet(previousTags) !== tagSet(sent.tagIds) && got === tagSet(previousTags)) return "ignored";
   return "adopt";
 }
@@ -3330,7 +3339,25 @@ function stopLockedSegment(store, row, now) {
   const seg = store.getSegment(row.targetId);
   const session = seg ? store.getSession(seg.sessionId) : null;
   if (session !== null && session.state === ACTIVE_SESSION) store.upsertSession({ ...session, state: STOPPED_LOCKED });
+  if (seg !== null) cancelUncreatedSegments(store, seg.sessionId, now);
   addNotice(store, "entry_locked", now);
+}
+function cancelUncreatedSegments(store, sessionId, now) {
+  const at = now.toISOString();
+  for (const other of store.segmentsForSession(sessionId)) {
+    if (other.createdOnServer || store.isTerminal("segment", other.id)) continue;
+    clearPendingRename(store, other.id);
+    store.deleteOutboxFor("segment", other.id);
+    if (!other.final) store.upsertSegment({ ...other, working: false, final: true, finalReason: STOPPED_LOCKED });
+    store.addTerminal({
+      targetKind: "segment",
+      targetId: other.id,
+      revision: other.lastRevision > 0 ? other.lastRevision : null,
+      code: ENTRY_LOCKED,
+      at,
+      diagnostic: "Not sent: the session was stopped, its period is already submitted."
+    });
+  }
 }
 function closeRefusedProject(store, segmentId) {
   store.deleteOutboxFor("segment", segmentId);

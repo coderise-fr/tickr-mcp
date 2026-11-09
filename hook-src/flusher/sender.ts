@@ -397,7 +397,32 @@ function stopLockedSegment(store: Store, row: OutboxRow, now: Date): void {
   const seg = store.getSegment(row.targetId);
   const session = seg ? store.getSession(seg.sessionId) : null;
   if (session !== null && session.state === ACTIVE_SESSION) store.upsertSession({ ...session, state: STOPPED_LOCKED });
+  if (seg !== null) cancelUncreatedSegments(store, seg.sessionId, now);
   addNotice(store, "entry_locked", now);
+}
+
+/**
+ * The session is stopped: its segments that Tickr does not hold yet would open new entries, so
+ * they are closed locally and terminal, their outbox rows dropped (the send pass checks the
+ * terminal list before every row, including rows it already read). Segments Tickr already holds
+ * keep their updates: each one is accepted, or refused (entry_locked) on its own.
+ */
+function cancelUncreatedSegments(store: Store, sessionId: string, now: Date): void {
+  const at = now.toISOString();
+  for (const other of store.segmentsForSession(sessionId)) {
+    if (other.createdOnServer || store.isTerminal("segment", other.id)) continue;
+    clearPendingRename(store, other.id);
+    store.deleteOutboxFor("segment", other.id);
+    if (!other.final) store.upsertSegment({ ...other, working: false, final: true, finalReason: STOPPED_LOCKED });
+    store.addTerminal({
+      targetKind: "segment",
+      targetId: other.id,
+      revision: other.lastRevision > 0 ? other.lastRevision : null,
+      code: ENTRY_LOCKED,
+      at,
+      diagnostic: "Not sent: the session was stopped, its period is already submitted.",
+    });
+  }
 }
 
 /**

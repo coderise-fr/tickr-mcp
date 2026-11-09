@@ -162,6 +162,16 @@ export function keepsMapping(store: Store, sessionId: string, fromVersionId: num
   return refused?.from === fromVersionId && refused.to === toVersionId;
 }
 
+/**
+ * The mapping version a segment opened in the session takes for an event of mapping version
+ * `versionId`: the one Tickr accepted when it refused this very mapping in the session (a
+ * creation with it would be refused the same way), else `versionId`.
+ */
+export function openingMapping(store: Store, sessionId: string, versionId: number): number {
+  const refused = readJson<RefusedRename>(store, REFUSED_RENAME_PREFIX + sessionId);
+  return refused?.to === versionId && store.getMapping(refused.from) !== null ? refused.from : versionId;
+}
+
 /** The mapping a segment's revisions carry: its mapping, with the tags Tickr holds when adopted. */
 export function wireMapping(store: Store, segmentId: string, mapping: NormalizedMapping): NormalizedMapping {
   const adopted = readJson<AdoptedTags>(store, ADOPTED_TAGS_PREFIX + segmentId);
@@ -207,15 +217,19 @@ function holdsSent(entry: AppliedEntry, sent: Partial<SegmentBody>): boolean {
 }
 
 /**
- * The tags of an answer that holds the sent task and description: "same" as sent; "ignored" when
- * the probe changed the tags and the answer still shows the previous ones (the change was not
- * applied); else "adopt": Tickr applied the revision but holds other tags (a tag deleted on
- * Tickr is dropped, never refused), the segment's next revisions carry the tags Tickr holds.
+ * The tags of an answer that holds the sent task and description: "same" as sent; "adopt" when
+ * Tickr holds a subset of them (a tag deleted on Tickr is dropped, never refused: the change was
+ * applied, the segment's next revisions carry the tags Tickr holds); "ignored" only when the
+ * probe changed the tags and the answer shows the previous ones, which are not a subset of those
+ * sent (the change was not applied); any other difference is adopted too.
  */
 function tagVerdict(entry: AppliedEntry, sent: Partial<SegmentBody>, previousTags: readonly string[] | null): "same" | "ignored" | "adopt" {
   if (entry.tagIds === undefined || !Array.isArray(sent.tagIds)) return "same";
   const got = tagSet(entry.tagIds);
   if (got === tagSet(sent.tagIds)) return "same";
+  // Tags Tickr dropped (deleted ones) leave a subset of those sent: applied, whatever it equals.
+  const sentSet = new Set(sent.tagIds.map((t) => t.toLowerCase()));
+  if (entry.tagIds.every((t) => sentSet.has(t.toLowerCase()))) return "adopt";
   if (previousTags !== null && tagSet(previousTags) !== tagSet(sent.tagIds) && got === tagSet(previousTags)) return "ignored";
   return "adopt";
 }
