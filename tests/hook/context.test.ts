@@ -18,7 +18,7 @@ import {
 import { createAgentApi } from "../../hook-src/flusher/api.js";
 import { RETENTION_KEY, RETENTION_MS } from "../../hook-src/flusher/bounds.js";
 import { PIPELINE, STAGE_NAMES } from "../../hook-src/flusher/stages.js";
-import { contextNote, NOT_LINKED_MESSAGE, recordEvent } from "../../hook-src/intake.js";
+import { contextNote, NOT_LINKED_MESSAGE, NOT_LINKED_NOTE, recordEvent, UNTRACKED_MESSAGE, UNTRACKED_NOTE } from "../../hook-src/intake.js";
 import { main } from "../../hook-src/main.js";
 import { DEFAULT_DESCRIPTION, findMapping, type FoundMapping } from "../../hook-src/mapping.js";
 import { DB_FILE, openStore, type Store } from "../../hook-src/store/db.js";
@@ -509,16 +509,121 @@ describe("SessionStart note for the model (additionalContext)", () => {
     expect(out).not.toContain("hookSpecificOutput");
   });
 
-  it("nothing in a checkout that is not linked, nor in one without .tickr.json", async () => {
+  it("no session context note in a checkout that is not linked, nor in one without .tickr.json", async () => {
     const root = tempDir();
     const data = join(root, "data");
     const unlinked = writeMapping(join(root, "unlinked"));
-    expect(await sessionStart(unlinked, data)).toEqual({ systemMessage: NOT_LINKED_MESSAGE });
+    expect(await sessionStart(unlinked, data)).toEqual({
+      systemMessage: NOT_LINKED_MESSAGE,
+      hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: NOT_LINKED_NOTE },
+    });
     const untracked = join(root, "untracked");
     mkdirSync(untracked);
     const out = await sessionStart(untracked, data);
-    expect(out?.hookSpecificOutput).toBeUndefined();
     expect(out?.systemMessage).toMatch(/not tracked/);
+    expect(out?.hookSpecificOutput?.additionalContext).toBe(UNTRACKED_NOTE);
+    for (const note of [NOT_LINKED_NOTE, UNTRACKED_NOTE]) expect(note).not.toMatch(/Tickr session context/);
+  });
+});
+
+describe("SessionStart note for the model in a checkout that is not linked (ask_to_link)", () => {
+  async function hookOut(event: string, cwd: string, data: string, extra: Record<string, string> = {}, source?: string) {
+    const input = hookInput(event, cwd, source === undefined ? {} : { source });
+    const { code, out } = await run([event], pluginEnv(data, extra), JSON.stringify(input));
+    expect(code).toBe(0);
+    return out === "" ? null : (JSON.parse(out) as { systemMessage?: string; hookSpecificOutput?: { hookEventName: string; additionalContext: string } });
+  }
+  function checkouts() {
+    const root = tempDir();
+    const untracked = join(root, "untracked");
+    mkdirSync(untracked);
+    return { root, data: join(root, "data"), untracked, unlinked: writeMapping(join(root, "unlinked")) };
+  }
+
+  it("no .tickr.json: the message for the user and, in the same JSON object, the rule for the model", async () => {
+    const { data, untracked } = checkouts();
+    for (const source of ["startup", "clear"]) {
+      expect(await hookOut("SessionStart", untracked, data, {}, source)).toEqual({
+        systemMessage: UNTRACKED_MESSAGE,
+        hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: UNTRACKED_NOTE },
+      });
+    }
+    expect(UNTRACKED_NOTE).toMatch(/^Tickr: this Claude Code session is not linked to a Tickr activity/);
+    expect(UNTRACKED_NOTE).toMatch(/no \.tickr\.json was found/);
+  });
+
+  it("a .tickr.json not linked on this machine: the note says it is present but not confirmed, and that linking confirms it", async () => {
+    const { data, unlinked } = checkouts();
+    expect(await hookOut("SessionStart", unlinked, data, {}, "startup")).toEqual({
+      systemMessage: NOT_LINKED_MESSAGE,
+      hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: NOT_LINKED_NOTE },
+    });
+    expect(NOT_LINKED_NOTE).toMatch(/a \.tickr\.json is present but has not been confirmed on this machine/);
+    expect(NOT_LINKED_NOTE).toMatch(/keep/);
+  });
+
+  it("both notes carry the rule: ask once when the user gives work, yes ⇒ tickr:link, no ⇒ never again, never write .tickr.json", () => {
+    for (const note of [UNTRACKED_NOTE, NOT_LINKED_NOTE]) {
+      expect(note).toContain("When the user gives you work to do, ask them once, in one short sentence, whether they want to link this session to a Tickr activity");
+      expect(note).toContain("do not ask for questions or chit-chat");
+      expect(note).toContain("run the tickr:link command (Skill tool, skill 'tickr:link') immediately");
+      expect(note).toContain("if they say no, do not ask again in this session");
+      expect(note).toContain("Never create or edit .tickr.json yourself outside that command");
+      expect(note).not.toMatch(UUID_ANYWHERE);
+      expect(note).not.toMatch(/[0-9a-f]{64}/i);
+      expect(note).not.toMatch(/tkr_|[\\/]/);
+    }
+  });
+
+  it("the skill the note names exists: plugins/tickr/commands/link.md, which the model may invoke", () => {
+    const named = /skill '([a-z]+):([a-z-]+)'/.exec(UNTRACKED_NOTE);
+    expect(named?.slice(1)).toEqual(["tickr", "link"]);
+    const manifest = JSON.parse(readFileSync(new URL("../../plugins/tickr/.claude-plugin/plugin.json", import.meta.url), "utf8")) as { name: string };
+    expect(manifest.name).toBe(named![1]);
+    const command = readFileSync(new URL(`../../plugins/tickr/commands/${named![2]}.md`, import.meta.url), "utf8");
+    expect(command).toMatch(/^---\r?\ndescription: Link this repository to a Tickr project/);
+    expect(command).not.toMatch(/disable-model-invocation/);
+  });
+
+  it("not at resume nor compact (the session was told already), nor at any other event", async () => {
+    const { data, untracked, unlinked } = checkouts();
+    for (const cwd of [untracked, unlinked]) {
+      for (const source of ["resume", "compact"]) expect(await hookOut("SessionStart", cwd, data, {}, source)).toBeNull();
+      for (const event of ["UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd", "SubagentStart", "SubagentStop"]) {
+        expect(await hookOut(event, cwd, data)).toBeNull();
+      }
+    }
+  });
+
+  it("ask_to_link false: the message only, no note; any other value keeps the default (true)", async () => {
+    const { data, untracked, unlinked } = checkouts();
+    for (const raw of ["false", "FALSE", " 0 "]) {
+      expect(await hookOut("SessionStart", untracked, data, { CLAUDE_PLUGIN_OPTION_ASK_TO_LINK: raw }, "startup")).toEqual({ systemMessage: UNTRACKED_MESSAGE });
+      expect(await hookOut("SessionStart", unlinked, data, { CLAUDE_PLUGIN_OPTION_ASK_TO_LINK: raw }, "startup")).toEqual({ systemMessage: NOT_LINKED_MESSAGE });
+    }
+    for (const raw of ["true", "1", ""]) {
+      expect((await hookOut("SessionStart", untracked, data, { CLAUDE_PLUGIN_OPTION_ASK_TO_LINK: raw }, "startup"))?.hookSpecificOutput?.additionalContext).toBe(
+        UNTRACKED_NOTE,
+      );
+    }
+  });
+
+  it("a linked checkout is unchanged: the session context note, with auto_context on or off, and ask_to_link has no effect", async () => {
+    const { cwd, data } = linked();
+    for (const ask of ["true", "false"]) {
+      for (const auto of ["true", "false"]) {
+        const out = await hookOut("SessionStart", cwd, data, { CLAUDE_PLUGIN_OPTION_ASK_TO_LINK: ask, CLAUDE_PLUGIN_OPTION_AUTO_CONTEXT: auto }, "startup");
+        expect(out?.systemMessage).toBeUndefined();
+        expect(out?.hookSpecificOutput?.additionalContext).toBe(contextNote(auto === "true", null));
+      }
+    }
+  });
+
+  it("recordEvent: the note follows the askToLink option of the configuration", () => {
+    const { data, untracked } = checkouts();
+    const input = hookInput("SessionStart", untracked, { source: "startup" });
+    expect(recordEvent(input, { ...pluginConfig(data), askToLink: true }, Date.now() + 1000)).toEqual({ systemMessage: UNTRACKED_MESSAGE, additionalContext: UNTRACKED_NOTE });
+    expect(recordEvent(input, { ...pluginConfig(data), askToLink: false }, Date.now() + 1000)).toEqual({ systemMessage: UNTRACKED_MESSAGE });
   });
 });
 

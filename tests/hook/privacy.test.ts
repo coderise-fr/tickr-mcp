@@ -127,6 +127,10 @@ beforeAll(async () => {
   mkdirSync(invalid, { recursive: true });
   writeFileSync(join(invalid, ".tickr.json"), "{ SENTINEL_NOT_JSON");
   await hook(env, { session_id: "s-other-2", cwd: invalid, hook_event_name: "SessionStart", source: "startup" });
+  const notLinked = join(root, "SENTINEL_NOT_LINKED");
+  mkdirSync(notLinked, { recursive: true });
+  writeFileSync(join(notLinked, ".tickr.json"), readFileSync(join(cwd, ".tickr.json")));
+  await hook(env, { session_id: "s-other-3", cwd: notLinked, hook_event_name: "SessionStart", source: "startup" });
 
   await main(["status", data], env, { stdin: Readable.from([]), deadlineMs: Date.now() + 1000, write: (t) => (status += t) });
 }, 60_000);
@@ -226,7 +230,9 @@ describe("privacy allow-list (D14)", () => {
   });
 
   it("no message shown to the user carries anything private", () => {
-    expect(messages.length).toBeGreaterThanOrEqual(2); // untracked + invalid mapping
+    expect(messages.length).toBeGreaterThanOrEqual(3); // untracked + invalid mapping + not linked
+    // The notes for the model of the untracked and not linked checkouts are in these outputs too.
+    expect(messages.filter((m) => m.includes("additionalContext") && m.includes("ask them once"))).toHaveLength(2);
     for (const m of messages) expectNothingPrivate(m, "systemMessage");
   });
 });

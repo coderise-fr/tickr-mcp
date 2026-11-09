@@ -1,6 +1,6 @@
 {
   "name": "tickr",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Tracks your Claude Code sessions as Tickr time entries and lets Claude start, stop and edit your Tickr time entries.",
   "author": {
     "name": "Coderise",
@@ -37,6 +37,12 @@
       "title": "Automatic session context",
       "description": "Let Claude change the task and description of the session without asking you first (it still picks only existing tasks of the linked project).",
       "default": false
+    },
+    "ask_to_link": {
+      "type": "boolean",
+      "title": "Ask to link",
+      "description": "In a repository not linked to Tickr, Claude asks you once per session, when you give it work, whether to link the session with /tickr:link. Turn it off to only see the not-tracked message.",
+      "default": true
     }
   }
 }

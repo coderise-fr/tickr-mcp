@@ -82,9 +82,11 @@ function idleMinutes(raw) {
   const value = Number(raw);
   return Number.isInteger(value) && value >= MIN_IDLE_MINUTES && value <= MAX_IDLE_MINUTES ? value : DEFAULT_IDLE_MINUTES;
 }
-function flag(raw) {
+function flag(raw, byDefault = false) {
   const v = raw?.trim().toLowerCase();
-  return v === "true" || v === "1";
+  if (v === "true" || v === "1") return true;
+  if (v === "false" || v === "0") return false;
+  return byDefault;
 }
 function readPluginConfig(env) {
   const dataDir = env.CLAUDE_PLUGIN_DATA?.trim();
@@ -104,7 +106,8 @@ function readPluginConfig(env) {
     baseUrl: config.baseUrl,
     idleMinutes: idleMinutes(env.CLAUDE_PLUGIN_OPTION_IDLE_MINUTES),
     dataDir,
-    autoContext: flag(env.CLAUDE_PLUGIN_OPTION_AUTO_CONTEXT)
+    autoContext: flag(env.CLAUDE_PLUGIN_OPTION_AUTO_CONTEXT),
+    askToLink: flag(env.CLAUDE_PLUGIN_OPTION_ASK_TO_LINK, true)
   };
 }
 
@@ -354,7 +357,7 @@ function agentHeaderValue(info) {
 }
 
 // hook-src/version.ts
-var PLUGIN_VERSION = "0.2.0";
+var PLUGIN_VERSION = "0.3.0";
 
 // hook-src/flusher/api.ts
 var REQUEST_TIMEOUT_MS = 3e3;
@@ -3004,9 +3007,12 @@ var HOOK_BUSY_TIMEOUT_MS = 250;
 var INTAKE_PAUSED_KEY = "intake_paused";
 var NOT_LINKED_MESSAGE = "Tickr: this repository's .tickr.json has not been linked on this machine, so this session is not tracked. Run /tickr:link to confirm it.";
 var UNTRACKED_MESSAGE = "Tickr: this session is not tracked. Run /tickr:link to link this repository to a Tickr project.";
-function untracked(input) {
+var ASK_TO_LINK_RULE = "When the user gives you work to do, ask them once, in one short sentence, whether they want to link this session to a Tickr activity; do not ask for questions or chit-chat. If they say yes, run the tickr:link command (Skill tool, skill 'tickr:link') immediately; if they say no, do not ask again in this session. Never create or edit .tickr.json yourself outside that command.";
+var UNTRACKED_NOTE = `Tickr: this Claude Code session is not linked to a Tickr activity (no .tickr.json was found for this repository). ${ASK_TO_LINK_RULE}`;
+var NOT_LINKED_NOTE = `Tickr: this Claude Code session is not linked to a Tickr activity (a .tickr.json is present but has not been confirmed on this machine; linking confirms it: the tickr:link command offers to keep it). ${ASK_TO_LINK_RULE}`;
+function untracked(input, cfg, message, note) {
   if (input.hook_event_name !== "SessionStart" || input.source === "resume" || input.source === "compact") return {};
-  return { systemMessage: UNTRACKED_MESSAGE };
+  return cfg.askToLink ? { systemMessage: message, additionalContext: note } : { systemMessage: message };
 }
 function contextNote(autoContext, ctx) {
   const parts = [];
@@ -3069,7 +3075,7 @@ function journalInStore(dbPath, ev, now) {
 function recordEvent(input, cfg, deadlineMs, opts = {}) {
   const env = opts.env ?? process.env;
   const found = findMapping(input.cwd);
-  if (found === null) return untracked(input);
+  if (found === null) return untracked(input, cfg, UNTRACKED_MESSAGE, UNTRACKED_NOTE);
   if ("invalid" in found) {
     return input.hook_event_name === "SessionStart" ? { systemMessage: `Tickr: ${found.invalid} This session is not tracked.` } : {};
   }
@@ -3078,7 +3084,7 @@ function recordEvent(input, cfg, deadlineMs, opts = {}) {
       if (input.hook_event_name !== "PostToolUse") opts.revokeStale?.(found.dir, found.hash);
     } catch {
     }
-    return input.hook_event_name === "SessionStart" && input.source !== "resume" && input.source !== "compact" ? { systemMessage: NOT_LINKED_MESSAGE } : {};
+    return untracked(input, cfg, NOT_LINKED_MESSAGE, NOT_LINKED_NOTE);
   }
   const now = (opts.now ?? (() => /* @__PURE__ */ new Date()))();
   const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));

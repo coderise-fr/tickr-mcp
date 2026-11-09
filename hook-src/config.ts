@@ -13,6 +13,8 @@ export interface PluginConfig {
   dataDir: string;
   /** Option auto_context: Claude may change the session's task and description without asking first. */
   autoContext: boolean;
+  /** Option ask_to_link: in a checkout that is not linked, Claude asks once whether to link the session. */
+  askToLink: boolean;
 }
 
 function optionWording(message: string): string {
@@ -28,10 +30,12 @@ function idleMinutes(raw: string | undefined): number {
   return Number.isInteger(value) && value >= MIN_IDLE_MINUTES && value <= MAX_IDLE_MINUTES ? value : DEFAULT_IDLE_MINUTES;
 }
 
-/** A boolean plugin option ("true" or "1"; anything else is false, the default). */
-function flag(raw: string | undefined): boolean {
+/** A boolean plugin option: "true" or "1", "false" or "0"; anything else (unset included) is the default. */
+function flag(raw: string | undefined, byDefault = false): boolean {
   const v = raw?.trim().toLowerCase();
-  return v === "true" || v === "1";
+  if (v === "true" || v === "1") return true;
+  if (v === "false" || v === "0") return false;
+  return byDefault;
 }
 
 export function readPluginConfig(env: NodeJS.ProcessEnv): PluginConfig | { problem: string } {
@@ -54,5 +58,6 @@ export function readPluginConfig(env: NodeJS.ProcessEnv): PluginConfig | { probl
     idleMinutes: idleMinutes(env.CLAUDE_PLUGIN_OPTION_IDLE_MINUTES),
     dataDir,
     autoContext: flag(env.CLAUDE_PLUGIN_OPTION_AUTO_CONTEXT),
+    askToLink: flag(env.CLAUDE_PLUGIN_OPTION_ASK_TO_LINK, true),
   };
 }

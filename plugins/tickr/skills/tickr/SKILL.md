@@ -1,6 +1,6 @@
 ---
 name: tickr
-description: How the Tickr plugin records Claude Code sessions as Tickr time entries, what it sends and never sends, how the task and description of a session are chosen, and the rules for touching Tickr entries. Use when the user asks about Tickr time tracking of Claude Code sessions, links a repository to Tickr, when the work of a tracked session moves to another task or purpose, or when asked to change a Tickr time entry.
+description: How the Tickr plugin records Claude Code sessions as Tickr time entries, what it sends and never sends, how the task and description of a session are chosen, and the rules for touching Tickr entries. Use when the user asks about Tickr time tracking of Claude Code sessions, links a repository to Tickr, when a session is not linked to Tickr and the user gives work to do, when the work of a tracked session moves to another task or purpose, or when asked to change a Tickr time entry.
 ---
 
 # Tickr time tracking for Claude Code
@@ -17,9 +17,20 @@ A background process turns that activity into **agent session segments** and sen
 
 `/tickr:status` shows what was sent, paused instances and anything Tickr refused. A session in a repository without `.tickr.json` is not tracked.
 
+## Session not linked
+
+When a session starts in a repository that is not linked (no `.tickr.json`, or one not yet linked on this machine), the plugin gives you a note saying so (plugin option `ask_to_link`, on by default). Then:
+
+- When the user gives you work to do, ask the user **once**, in one short sentence, whether they want to link this session to a Tickr activity. Do not ask for a question or chit-chat.
+- If they say yes, run the `tickr:link` command right away (Skill tool, skill `tickr:link`); it guides the user through the choice of project and records the link.
+- If they say no, do not ask again in this session.
+- Never create or edit `.tickr.json` yourself: only the `tickr:link` command writes it, with the user's choices.
+
 ## Session context: task and description of this session
 
-Each session is recorded under the task and description of `.tickr.json`, unless a **session context** was set for it: a task among the existing tasks of the linked project (or no task) and a short description of the overall work. `/tickr:task` sets both, `/tickr:describe` only the description, `/tickr:task clear` removes the context. The context stays on this machine and applies to this session only; from the moment it changes, a new Tickr entry starts with the new task and description.
+Each session is recorded under the task and description of `.tickr.json`, unless a **session context** was set for it: a task among the existing tasks of the linked project (or no task) and a short description of the overall work. `/tickr:task` sets both, `/tickr:describe` only the description, `/tickr:task clear` removes the context. The context stays on this machine and applies to this session only.
+
+Changing the task or the description starts a new Tickr entry from that moment (the previous one ends there): Tickr does not change the task or description of an entry that already exists. So set the task and the description early, once the work is clear, and do not change them for small shifts.
 
 The note "Tickr session context" given at the start of a tracked session says the mode (manual or automatic) and the current context.
 

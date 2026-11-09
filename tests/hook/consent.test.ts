@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { isLinked, isLinkKeyActive, linkKey, LINKS_DIR, MAX_LINKS, recordLink } from "../../hook-src/consent.js";
-import { NOT_LINKED_MESSAGE } from "../../hook-src/intake.js";
+import { NOT_LINKED_MESSAGE, NOT_LINKED_NOTE } from "../../hook-src/intake.js";
 import { findMapping } from "../../hook-src/mapping.js";
 import { main } from "../../hook-src/main.js";
 import { cleanTempDirs, hookInput, instanceFor, linkCheckout, pluginEnv, tempDir, WS, writeMapping } from "./helpers/env.js";
@@ -31,7 +31,7 @@ describe("consent to a .tickr.json", () => {
     const cwd = writeMapping(join(root, "cloned repo"));
     const data = join(root, "data");
     const started = await run(["SessionStart"], pluginEnv(data), hookInput("SessionStart", cwd, { source: "startup" }));
-    expect(started.out).toBe(JSON.stringify({ systemMessage: NOT_LINKED_MESSAGE }));
+    expect(started.out).toBe(JSON.stringify({ systemMessage: NOT_LINKED_MESSAGE, hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: NOT_LINKED_NOTE } }));
     const prompt = await run(["UserPromptSubmit"], pluginEnv(data), hookInput("UserPromptSubmit", cwd));
     expect(prompt).toEqual({ code: 0, out: "" });
     expect(() => readdirOf(instanceFor(data))).toThrow(); // no instance directory, no store

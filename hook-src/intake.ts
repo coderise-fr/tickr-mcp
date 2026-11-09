@@ -30,13 +30,22 @@ export const NOT_LINKED_MESSAGE =
 /** Shown when a session starts in a checkout without .tickr.json. */
 export const UNTRACKED_MESSAGE = "Tickr: this session is not tracked. Run /tickr:link to link this repository to a Tickr project.";
 
+/** What the model must do in a session that is not linked (option ask_to_link). */
+const ASK_TO_LINK_RULE =
+  "When the user gives you work to do, ask them once, in one short sentence, whether they want to link this session to a Tickr activity; do not ask for questions or chit-chat. If they say yes, run the tickr:link command (Skill tool, skill 'tickr:link') immediately; if they say no, do not ask again in this session. Never create or edit .tickr.json yourself outside that command.";
+/** The note for the model at the SessionStart of a checkout without .tickr.json. */
+export const UNTRACKED_NOTE = `Tickr: this Claude Code session is not linked to a Tickr activity (no .tickr.json was found for this repository). ${ASK_TO_LINK_RULE}`;
+/** The note for the model at the SessionStart of a checkout whose .tickr.json was not linked on this machine. */
+export const NOT_LINKED_NOTE = `Tickr: this Claude Code session is not linked to a Tickr activity (a .tickr.json is present but has not been confirmed on this machine; linking confirms it: the tickr:link command offers to keep it). ${ASK_TO_LINK_RULE}`;
+
 /**
- * The untracked message is shown once per session: at its SessionStart, but not again when the
- * same session resumes or is compacted (/clear starts a new session, which is told again).
+ * The message (and, with ask_to_link, the note for the model) of a checkout that is not tracked,
+ * once per session: at its SessionStart, but not again when the same session resumes or is
+ * compacted (/clear starts a new session, which is told again).
  */
-function untracked(input: HookInput): { systemMessage?: string } {
+function untracked(input: HookInput, cfg: PluginConfig, message: string, note: string): HookOutput {
   if (input.hook_event_name !== "SessionStart" || input.source === "resume" || input.source === "compact") return {};
-  return { systemMessage: UNTRACKED_MESSAGE };
+  return cfg.askToLink ? { systemMessage: message, additionalContext: note } : { systemMessage: message };
 }
 
 /**
@@ -158,7 +167,7 @@ function journalInStore(dbPath: string, ev: JournalEvent, now: Date): Journalled
 export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: number, opts: RecordOptions = {}): HookOutput {
   const env = opts.env ?? process.env;
   const found = findMapping(input.cwd);
-  if (found === null) return untracked(input);
+  if (found === null) return untracked(input, cfg, UNTRACKED_MESSAGE, UNTRACKED_NOTE);
   if ("invalid" in found) {
     return input.hook_event_name === "SessionStart" ? { systemMessage: `Tickr: ${found.invalid} This session is not tracked.` } : {};
   }
@@ -169,9 +178,7 @@ export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: num
     } catch {
       // Best effort: the next hook of this checkout tries again.
     }
-    return input.hook_event_name === "SessionStart" && input.source !== "resume" && input.source !== "compact"
-      ? { systemMessage: NOT_LINKED_MESSAGE }
-      : {};
+    return untracked(input, cfg, NOT_LINKED_MESSAGE, NOT_LINKED_NOTE);
   }
 
   const now = (opts.now ?? (() => new Date()))();

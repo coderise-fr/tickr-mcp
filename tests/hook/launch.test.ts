@@ -41,7 +41,12 @@ function expectJsonOrNothing(stdout: string) {
   if (stdout.trim() === "") return;
   const parsed = JSON.parse(stdout) as Record<string, unknown>;
   expect(typeof parsed).toBe("object");
-  for (const key of Object.keys(parsed)) expect(["systemMessage"]).toContain(key);
+  for (const key of Object.keys(parsed)) expect(["systemMessage", "hookSpecificOutput"]).toContain(key);
+  if ("hookSpecificOutput" in parsed) {
+    const specific = parsed.hookSpecificOutput as Record<string, unknown>;
+    expect(Object.keys(specific).sort()).toEqual(["additionalContext", "hookEventName"]);
+    expect(specific.hookEventName).toBe("SessionStart");
+  }
 }
 
 describe("bundle launch", () => {

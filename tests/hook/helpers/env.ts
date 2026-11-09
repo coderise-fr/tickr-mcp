@@ -44,7 +44,7 @@ export function linkCheckout(dataDir: string, checkout: string): string {
 }
 
 export function pluginConfig(dataDir: string): PluginConfig {
-  return { apiKey: KEY, baseUrl: BASE_URL, idleMinutes: 15, dataDir, autoContext: false };
+  return { apiKey: KEY, baseUrl: BASE_URL, idleMinutes: 15, dataDir, autoContext: false, askToLink: true };
 }
 
 export function pluginEnv(dataDir: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
