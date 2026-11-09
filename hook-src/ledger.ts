@@ -278,13 +278,33 @@ export function foldSettled(store: Store): number {
 
 // The stage
 
-/** Sessions the stage reads: active, with an event since `sinceIso` or an open segment. */
+/**
+ * meta key prefix (+ session id) of a session whose usage snapshots a rename repair dropped while
+ * its reads were partial (flusher/rename.ts repairRename): the session is read, and its segments
+ * evaluated by the revisions stage, past the ledger window until they are rebuilt.
+ */
+export const SNAPSHOT_OWED_PREFIX = "snapshot_owed:";
+/** The snapshots are owed: no complete read since the repair. */
+export const SNAPSHOT_OWED = "owed";
+/** A complete read rebuilt them; the revisions stage has yet to evaluate the session's segments. */
+export const SNAPSHOT_REBUILT = "rebuilt";
+
+/** SQL: the session `s` owes or just rebuilt its snapshots (kept eligible past the window). */
+export const SNAPSHOT_OWED_SQL = `EXISTS (SELECT 1 FROM meta m WHERE m.key = '${SNAPSHOT_OWED_PREFIX}' || s.session_id)`;
+
+/** The revisions stage evaluated the segments of every rebuilt session: nothing is owed any more. */
+export function clearRebuiltSnapshots(store: Store): void {
+  store.db.prepare(`DELETE FROM meta WHERE substr(key, 1, ${SNAPSHOT_OWED_PREFIX.length}) = ? AND value = ?`).run(SNAPSHOT_OWED_PREFIX, SNAPSHOT_REBUILT);
+}
+
+/** Sessions the stage reads: active, with an event since `sinceIso`, an open segment, or snapshots owed. */
 export function sessionsToRead(store: Store, sinceIso: string): string[] {
   return (
     store.db
       .prepare(
         `SELECT s.session_id FROM sessions s WHERE s.state = ? AND (s.last_event_time >= ?
-           OR EXISTS (SELECT 1 FROM segments g WHERE g.session_id = s.session_id AND g.final = 0))
+           OR EXISTS (SELECT 1 FROM segments g WHERE g.session_id = s.session_id AND g.final = 0)
+           OR ${SNAPSHOT_OWED_SQL})
          ORDER BY s.session_id`,
       )
       .all(ACTIVE_SESSION, sinceIso) as Row[]
@@ -504,7 +524,11 @@ export const ledgerStage: StageRun = (ctx) => {
     const reads = readSession(ctx.store, sessionId, now);
     ctx.guarded(() => {
       recordSession(ctx.store, sessionId, reads);
-      if (readsComplete(reads)) snapshotSession(ctx.store, sessionId, now.toISOString());
+      if (readsComplete(reads)) {
+        snapshotSession(ctx.store, sessionId, now.toISOString());
+        // Owed snapshots are rebuilt: the revisions stage evaluates the segments once more, then clears it.
+        if (ctx.store.getMeta(SNAPSHOT_OWED_PREFIX + sessionId) === SNAPSHOT_OWED) ctx.store.setMeta(SNAPSHOT_OWED_PREFIX + sessionId, SNAPSHOT_REBUILT);
+      }
     });
   }
   ctx.guarded(() => foldSettled(ctx.store));

@@ -452,6 +452,36 @@ describe("refusals of a rename", () => {
   });
 });
 
+describe("a terminal segment", () => {
+  it("a change on a segment Tickr refused for good splits: a new segment carries the corrected task and is sent", async () => {
+    const { h, ev, pass } = setup();
+    const BAD = "9f9f9f9f-0000-4000-8000-0000000000bb";
+    const { server, entries } = await fakeTickr(h, {
+      applies: true,
+      intercept: (_req, body) => (body.taskId === BAD ? problem(422, "validation", "Validation failed", { errors: [{ field: "taskId", code: "invalid", message: "m" }] }) : null),
+    });
+    h.ctx.guarded(() => writeRenameSupport(h.store, "supported", new Date(T0)));
+    // The creation carries a task of another project: refused (422), the segment terminal and still open.
+    ev("UserPromptSubmit", 0, { ...MAPPING, taskId: BAD });
+    await pass(1);
+    const [refused] = h.store.segmentsForSession("s-1");
+    expect(h.store.isTerminal("segment", refused!.id)).toBe(true);
+    expect(refused!.final).toBe(false);
+    // The user corrects the task: not a rename of the terminal segment, a new one that is sent.
+    const corrected: NormalizedMapping = { ...MAPPING, taskId: TASK };
+    ev("PostToolUse", 60, corrected);
+    ev("Stop", 90, corrected);
+    await pass(91);
+    const segments = h.store.segmentsForSession("s-1");
+    expect(segments).toHaveLength(2);
+    expect(readPendingRename(h.store, refused!.id)).toBeNull();
+    const next = segments[1]!;
+    expect(h.store.isTerminal("segment", next.id)).toBe(false);
+    expect(entries.get(next.id)).toMatchObject({ taskId: TASK, stoppedAt: at(90) });
+    expect(puts(server.requests).filter((p) => p.id === refused!.id)).toHaveLength(1);
+  });
+});
+
 describe("replays", () => {
   it("503 on the probe: the retry resends the very same bytes, an explicit taskId null included", async () => {
     const { h, ev, pass } = setup();

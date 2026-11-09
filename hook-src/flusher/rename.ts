@@ -44,7 +44,7 @@
 //
 // Revisions already committed are never rewritten: the probe the server ignored is superseded by
 // the final revision of the old segment, which carries the old task and description again.
-import { snapshotUsage } from "../ledger.js";
+import { SNAPSHOT_OWED, SNAPSHOT_OWED_PREFIX, snapshotUsage } from "../ledger.js";
 import { canonicalJson, type NormalizedMapping, parseStoredMapping } from "../mapping.js";
 import { sessionReads } from "../quality.js";
 import type { SegmentRow, Store } from "../store/db.js";
@@ -183,6 +183,9 @@ function mappingOf(store: Store, versionId: number): NormalizedMapping | null {
  */
 export function mayRenameInPlace(store: Store, segmentId: string, fromVersionId: number, toVersionId: number, now: Date): boolean {
   if (readPendingRename(store, segmentId) !== null) return false;
+  // A terminal segment is never sent again: a change on it splits, so that the new mapping goes
+  // to a new, sendable segment (an in-place probe of it would never leave the store).
+  if (store.isTerminal("segment", segmentId)) return false;
   const from = mappingOf(store, fromVersionId);
   const to = mappingOf(store, toVersionId);
   // A change of tags too, once this instance is known to apply renames: its answer then tells a
@@ -399,5 +402,12 @@ export function repairRename(store: Store, segmentId: string, pending: PendingRe
   } else {
     store.deleteUsageSnapshot("segment", segmentId);
     store.deleteUsageSnapshot("segment", newId);
+    // The session stays read (and its segments evaluated) past the ledger window until a
+    // complete read has snapshotted both again (ledger.ts sessionsToRead, revisions stage).
+    owe(store, seg.sessionId);
   }
+}
+
+function owe(store: Store, sessionId: string): void {
+  store.setMeta(SNAPSHOT_OWED_PREFIX + sessionId, SNAPSHOT_OWED);
 }

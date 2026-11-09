@@ -22,6 +22,13 @@
   bytes).
 - `409 entry_locked` (the period is already submitted) stops recording that session,
   with one message, instead of opening new entries in the same period.
+- Fix: a change of task or description on an entry Tickr had refused for good (for
+  instance a task of another project at its creation) is no longer renamed in place,
+  where it would never be sent: it starts a new entry, which is sent.
+- Fix: when an entry was split at a change while the session's transcript was being
+  written, and Tickr's answer came more than a day after the session's last activity,
+  the tokens of both entries are now still rebuilt once the transcript is complete,
+  without new activity in the session.
 - Bundles MCP server 0.2.1 (unchanged).
 
 ## Plugin `tickr` 0.4.1 — 2026-11-09

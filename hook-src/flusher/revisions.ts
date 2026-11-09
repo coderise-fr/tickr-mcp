@@ -6,7 +6,7 @@
 // byte) and the target's last_committed row (kept after the acknowledgement, for the next
 // comparison) are written in one guarded transaction, before any send.
 import { buildTurns, delegatedByTurn, type Turn } from "../attribution.js";
-import { LEDGER_WINDOW_MS } from "../ledger.js";
+import { clearRebuiltSnapshots, LEDGER_WINDOW_MS } from "../ledger.js";
 import { delegatedQuality, finalSegmentQuality, type FinalQuality, nextQuality, type SessionContext, sessionContext, usageForRevision } from "../quality.js";
 import type { CommittedRow, DelegatedRow, SegmentRow, Store, TargetKind } from "../store/db.js";
 import { canonicalJson, type NormalizedMapping, parseStoredMapping } from "../mapping.js";
@@ -329,6 +329,8 @@ export function revisionsStage(sources: readonly RevisionSource[] = REVISION_SOU
         if (commitIfChanged(ctx.store, ctx.generation, target, body, ctx.now()) !== null) ctx.boundary("revision_committed");
       }
     }
+    // Every segment of a session whose snapshots were rebuilt was evaluated: nothing owed now.
+    ctx.guarded(() => clearRebuiltSnapshots(ctx.store));
     return due === null ? {} : { dueInMs: Math.max(0, due) };
   };
 }

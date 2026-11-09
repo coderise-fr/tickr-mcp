@@ -667,7 +667,8 @@ export class Store {
     const recheck =
       sinceIso === undefined
         ? ""
-        : `OR (EXISTS (SELECT 1 FROM sessions x WHERE x.session_id = s.session_id AND x.last_event_time >= ?)
+        : `OR ((EXISTS (SELECT 1 FROM sessions x WHERE x.session_id = s.session_id AND x.last_event_time >= ?)
+               OR EXISTS (SELECT 1 FROM meta m WHERE m.key = 'snapshot_owed:' || s.session_id))
              AND (json_extract(c.body_json, '$.usageQuality') IS NOT 'complete'
                OR EXISTS (SELECT 1 FROM ledger l WHERE l.recipient_kind = 'segment' AND l.recipient_id = s.id AND l.folded = 0)))`;
     return this.db
@@ -877,6 +878,11 @@ export class Store {
     n += this.run(
       `DELETE FROM meta WHERE substr(key, 1, 13) = 'segment_tags:'
          AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 14))`,
+    );
+    // Snapshots a rename repair owes (ledger.ts): kept while the session is, gone with it.
+    n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 14) = 'snapshot_owed:'
+         AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = substr(meta.key, 15))`,
     );
     n += this.run(
       `DELETE FROM meta WHERE substr(key, 1, 16) = 'session_refused:'

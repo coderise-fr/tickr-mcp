@@ -11,7 +11,7 @@ Date: 2026-11-09. Not released yet.
 | Check | Result | Notes |
 | --- | --- | --- |
 | Lint, typecheck, unit and protocol tests | pass | 355 tests. |
-| Hook tests (`npm run test:hook`) | pass | 572 tests, on Node 22.17 (Windows), three runs in a row. CI runs them on Ubuntu, Windows and macOS; that run is not recorded here. |
+| Hook tests (`npm run test:hook`) | pass | 574 tests, on Node 22.17 (Windows), three runs in a row. CI runs them on Ubuntu, Windows and macOS; that run is not recorded here. |
 | Bundle equals its source | pass | Two builds are byte-identical. |
 | Every revision names the task and the description | pass | Pinned by tests: `taskId` is a value or an explicit `null`, never absent; a probe answered `503 workspace_busy` is resent with the very same bytes, `"taskId":null` included. |
 | A Tickr that applies the change | pass (fake server only) | A local fake Tickr that follows the contract: a change of the description only, of the task only, a task cleared with `null`: one segment, one entry renamed, `rename_support` is `supported`. Once supported, a change of tags is renamed in place (replaced, then emptied). |
@@ -23,5 +23,7 @@ Date: 2026-11-09. Not released yet.
 | `409 agent_revision_conflict` | pass (fake server only) | Nothing terminal; the wanted body is committed under the next number (a probe too) and applied; the number already sent is never sent with other bytes. |
 | `409 entry_locked` | pass (fake server only) | One message; the session is no longer recorded; no split into another entry of the same period. |
 | `409 segment_finalized` | pass (fake server only) | A rename whose end moves on a segment Tickr finalised: the segment is closed, the next activity opens a new one. |
+| A change on a terminal segment | pass (fake server only) | A creation refused by a `422` (task of another project) leaves the segment terminal; the corrected task then starts a new segment, which is sent, instead of a probe that would never leave the store. |
+| Usage rebuilt after a late repair | pass | Pipeline test with a fake clock: a probe resolved more than 24 h after the session's last event, with a partial transcript read, drops both segments' usage; once the transcript is complete, the next pass (no new event) reads the session again and both segments are sent with their own tokens; the flag that kept the session read is then cleared, and retention removes it only with its session. |
 | Crash safety and privacy | pass | The existing crash and privacy tests pass. The only thing kept from an answer is the list of tag ids Tickr holds for a segment, after a tag was deleted there. |
 | Real Claude Code session against a Tickr that applies the change | not run | No such Tickr and no key were used for this check. |

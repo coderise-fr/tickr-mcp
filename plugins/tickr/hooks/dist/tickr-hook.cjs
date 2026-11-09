@@ -1347,7 +1347,8 @@ var Store = class {
    * given) final but whose usage may still change: quality not complete yet, or tokens not folded.
    */
   segmentsForRevision(sinceIso) {
-    const recheck = sinceIso === void 0 ? "" : `OR (EXISTS (SELECT 1 FROM sessions x WHERE x.session_id = s.session_id AND x.last_event_time >= ?)
+    const recheck = sinceIso === void 0 ? "" : `OR ((EXISTS (SELECT 1 FROM sessions x WHERE x.session_id = s.session_id AND x.last_event_time >= ?)
+               OR EXISTS (SELECT 1 FROM meta m WHERE m.key = 'snapshot_owed:' || s.session_id))
              AND (json_extract(c.body_json, '$.usageQuality') IS NOT 'complete'
                OR EXISTS (SELECT 1 FROM ledger l WHERE l.recipient_kind = 'segment' AND l.recipient_id = s.id AND l.folded = 0)))`;
     return this.db.prepare(
@@ -1529,6 +1530,10 @@ var Store = class {
     n += this.run(
       `DELETE FROM meta WHERE substr(key, 1, 13) = 'segment_tags:'
          AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 14))`
+    );
+    n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 14) = 'snapshot_owed:'
+         AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = substr(meta.key, 15))`
     );
     n += this.run(
       `DELETE FROM meta WHERE substr(key, 1, 16) = 'session_refused:'
@@ -2582,10 +2587,18 @@ function foldSettled(store) {
   }
   return folded;
 }
+var SNAPSHOT_OWED_PREFIX = "snapshot_owed:";
+var SNAPSHOT_OWED = "owed";
+var SNAPSHOT_REBUILT = "rebuilt";
+var SNAPSHOT_OWED_SQL = `EXISTS (SELECT 1 FROM meta m WHERE m.key = '${SNAPSHOT_OWED_PREFIX}' || s.session_id)`;
+function clearRebuiltSnapshots(store) {
+  store.db.prepare(`DELETE FROM meta WHERE substr(key, 1, ${SNAPSHOT_OWED_PREFIX.length}) = ? AND value = ?`).run(SNAPSHOT_OWED_PREFIX, SNAPSHOT_REBUILT);
+}
 function sessionsToRead(store, sinceIso) {
   return store.db.prepare(
     `SELECT s.session_id FROM sessions s WHERE s.state = ? AND (s.last_event_time >= ?
-           OR EXISTS (SELECT 1 FROM segments g WHERE g.session_id = s.session_id AND g.final = 0))
+           OR EXISTS (SELECT 1 FROM segments g WHERE g.session_id = s.session_id AND g.final = 0)
+           OR ${SNAPSHOT_OWED_SQL})
          ORDER BY s.session_id`
   ).all(ACTIVE_SESSION, sinceIso).map((r) => str2(r.session_id));
 }
@@ -2748,7 +2761,10 @@ var ledgerStage = (ctx) => {
     const reads = readSession(ctx.store, sessionId, now);
     ctx.guarded(() => {
       recordSession(ctx.store, sessionId, reads);
-      if (readsComplete(reads)) snapshotSession(ctx.store, sessionId, now.toISOString());
+      if (readsComplete(reads)) {
+        snapshotSession(ctx.store, sessionId, now.toISOString());
+        if (ctx.store.getMeta(SNAPSHOT_OWED_PREFIX + sessionId) === SNAPSHOT_OWED) ctx.store.setMeta(SNAPSHOT_OWED_PREFIX + sessionId, SNAPSHOT_REBUILT);
+      }
     });
   }
   ctx.guarded(() => foldSettled(ctx.store));
@@ -2945,6 +2961,7 @@ function mappingOf(store, versionId) {
 }
 function mayRenameInPlace(store, segmentId, fromVersionId, toVersionId, now) {
   if (readPendingRename(store, segmentId) !== null) return false;
+  if (store.isTerminal("segment", segmentId)) return false;
   const from = mappingOf(store, fromVersionId);
   const to = mappingOf(store, toVersionId);
   if (from === null || to === null || !contextOnlyChange(from, to, renameSupportState(store) === "supported")) return false;
@@ -3066,7 +3083,11 @@ function repairRename(store, segmentId, pending, newId, now) {
   } else {
     store.deleteUsageSnapshot("segment", segmentId);
     store.deleteUsageSnapshot("segment", newId);
+    owe(store, seg.sessionId);
   }
+}
+function owe(store, sessionId) {
+  store.setMeta(SNAPSHOT_OWED_PREFIX + sessionId, SNAPSHOT_OWED);
 }
 
 // hook-src/flusher/sender.ts
@@ -3799,6 +3820,7 @@ function revisionsStage(sources = REVISION_SOURCES) {
         if (commitIfChanged(ctx.store, ctx.generation, target, body, ctx.now()) !== null) ctx.boundary("revision_committed");
       }
     }
+    ctx.guarded(() => clearRebuiltSnapshots(ctx.store));
     return due === null ? {} : { dueInMs: Math.max(0, due) };
   };
 }
