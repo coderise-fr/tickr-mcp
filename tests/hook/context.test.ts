@@ -562,12 +562,16 @@ describe("SessionStart note for the model in a checkout that is not linked (ask_
     expect(NOT_LINKED_NOTE).toMatch(/keep/);
   });
 
-  it("both notes carry the rule: ask once when the user gives work, yes ⇒ tickr:link, no ⇒ never again, never write .tickr.json", () => {
+  it("both notes carry the rule: ask first, before any work, yes ⇒ tickr:link then the work, no ⇒ the work and never again, never write .tickr.json", () => {
     for (const note of [UNTRACKED_NOTE, NOT_LINKED_NOTE]) {
-      expect(note).toContain("When the user gives you work to do, ask them once, in one short sentence, whether they want to link this session to a Tickr activity");
-      expect(note).toContain("do not ask for questions or chit-chat");
-      expect(note).toContain("run the tickr:link command (Skill tool, skill 'tickr:link') immediately");
-      expect(note).toContain("if they say no, do not ask again in this session");
+      expect(note).toContain("The first time the user gives you work to do in this session, do NOT start the work");
+      expect(note).toContain(
+        "your very first reply is only one short question asking whether they want to link this session to a Tickr activity, with no tool call and no work before their answer",
+      );
+      expect(note).toContain("run the tickr:link command (Skill tool, skill 'tickr:link') immediately, then do the work");
+      expect(note).toContain("if they say no, do the work and do not ask again in this session");
+      expect(note).toContain("Answer questions or chit-chat normally, without the link question");
+      expect(note).toContain("If the user already said not to link or to skip Tickr, do not ask");
       expect(note).toContain("Never create or edit .tickr.json yourself outside that command");
       expect(note).not.toMatch(UUID_ANYWHERE);
       expect(note).not.toMatch(/[0-9a-f]{64}/i);

@@ -3,10 +3,12 @@
 ## Plugin `tickr` 0.3.0 — unreleased
 
 - In a repository that is not linked (no `.tickr.json`, or one not yet linked on this
-  machine), the SessionStart hook now also gives Claude a short note: when you give it
-  work to do, Claude asks you once whether to link the session to a Tickr activity;
-  on yes it runs `/tickr:link` right away, on no it does not ask again in that
-  session. It never writes `.tickr.json` itself outside `/tickr:link`. The note holds
+  machine), the SessionStart hook now also gives Claude a short note: the first time
+  you give it work to do, Claude asks you once, before starting the work, whether to
+  link the session to a Tickr activity; on yes it runs `/tickr:link` right away, then
+  does the work; on no it does the work and does not ask again in that session.
+  Questions are answered without the link question, and it does not ask when you
+  already said to skip Tickr. It never writes `.tickr.json` itself outside `/tickr:link`. The note holds
   no path, id or key, and is not repeated when a session resumes or is compacted.
 - New option `ask_to_link` (default true): set it to false to keep only the
   not-tracked message.

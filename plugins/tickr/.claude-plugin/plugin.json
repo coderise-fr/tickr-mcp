@@ -41,7 +41,7 @@
     "ask_to_link": {
       "type": "boolean",
       "title": "Ask to link",
-      "description": "In a repository not linked to Tickr, Claude asks you once per session, when you give it work, whether to link the session with /tickr:link. Turn it off to only see the not-tracked message.",
+      "description": "In a repository not linked to Tickr, Claude asks you once per session, the first time you give it work and before starting it, whether to link the session with /tickr:link. Turn it off to only see the not-tracked message.",
       "default": true
     }
   }

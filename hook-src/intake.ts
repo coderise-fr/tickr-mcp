@@ -32,7 +32,7 @@ export const UNTRACKED_MESSAGE = "Tickr: this session is not tracked. Run /tickr
 
 /** What the model must do in a session that is not linked (option ask_to_link). */
 const ASK_TO_LINK_RULE =
-  "When the user gives you work to do, ask them once, in one short sentence, whether they want to link this session to a Tickr activity; do not ask for questions or chit-chat. If they say yes, run the tickr:link command (Skill tool, skill 'tickr:link') immediately; if they say no, do not ask again in this session. Never create or edit .tickr.json yourself outside that command.";
+  "The first time the user gives you work to do in this session, do NOT start the work: your very first reply is only one short question asking whether they want to link this session to a Tickr activity, with no tool call and no work before their answer. If they say yes, run the tickr:link command (Skill tool, skill 'tickr:link') immediately, then do the work; if they say no, do the work and do not ask again in this session. Answer questions or chit-chat normally, without the link question. If the user already said not to link or to skip Tickr, do not ask. Never create or edit .tickr.json yourself outside that command.";
 /** The note for the model at the SessionStart of a checkout without .tickr.json. */
 export const UNTRACKED_NOTE = `Tickr: this Claude Code session is not linked to a Tickr activity (no .tickr.json was found for this repository). ${ASK_TO_LINK_RULE}`;
 /** The note for the model at the SessionStart of a checkout whose .tickr.json was not linked on this machine. */

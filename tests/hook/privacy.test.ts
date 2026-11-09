@@ -232,7 +232,7 @@ describe("privacy allow-list (D14)", () => {
   it("no message shown to the user carries anything private", () => {
     expect(messages.length).toBeGreaterThanOrEqual(3); // untracked + invalid mapping + not linked
     // The notes for the model of the untracked and not linked checkouts are in these outputs too.
-    expect(messages.filter((m) => m.includes("additionalContext") && m.includes("ask them once"))).toHaveLength(2);
+    expect(messages.filter((m) => m.includes("additionalContext") && m.includes("do NOT start the work"))).toHaveLength(2);
     for (const m of messages) expectNothingPrivate(m, "systemMessage");
   });
 });

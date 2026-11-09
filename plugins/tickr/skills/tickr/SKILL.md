@@ -21,9 +21,10 @@ A background process turns that activity into **agent session segments** and sen
 
 When a session starts in a repository that is not linked (no `.tickr.json`, or one not yet linked on this machine), the plugin gives you a note saying so (plugin option `ask_to_link`, on by default). Then:
 
-- When the user gives you work to do, ask the user **once**, in one short sentence, whether they want to link this session to a Tickr activity. Do not ask for a question or chit-chat.
-- If they say yes, run the `tickr:link` command right away (Skill tool, skill `tickr:link`); it guides the user through the choice of project and records the link.
-- If they say no, do not ask again in this session.
+- The first time the user gives you work to do, ask the user **once**, **before starting the work**: your very first reply is only one short question whether they want to link this session to a Tickr activity, with no tool call and no work before their answer.
+- If they say yes, run the `tickr:link` command right away (Skill tool, skill `tickr:link`); it guides the user through the choice of project and records the link. Then do the work.
+- If they say no, do the work and do not ask again in this session.
+- Answer questions or chit-chat normally, without the link question. If the user already said not to link or to skip Tickr, do not ask.
 - Never create or edit `.tickr.json` yourself: only the `tickr:link` command writes it, with the user's choices.
 
 ## Session context: task and description of this session

@@ -241,9 +241,12 @@ describe("commands and skill", () => {
 
   it("the skill tells the agent to ask once to link an unlinked session, run tickr:link on yes, and never write .tickr.json itself", () => {
     const text = read("skills/tickr/SKILL.md");
-    expect(text).toContain("ask the user **once**");
+    expect(text).toContain("ask the user **once**, **before starting the work**");
+    expect(text).toContain("no tool call and no work before their answer");
+    expect(text).toMatch(/Then do the work\./);
+    expect(text).toContain("If they say no, do the work and do not ask again in this session.");
+    expect(text).toMatch(/without the link question/);
     expect(text).toContain("run the `tickr:link` command right away");
-    expect(text).toMatch(/If they say no, do not ask again in this session/);
     expect(text).toContain("Never create or edit `.tickr.json` yourself");
     expect(text).toContain("`ask_to_link`");
   });

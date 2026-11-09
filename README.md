@@ -154,10 +154,12 @@ is read or sent.
 
 **Sessions not linked.** When a session starts in a repository that is not linked
 (no `.tickr.json`, or one not yet linked on this machine), you see a message saying the
-session is not tracked, and Claude is told to ask you once, when you give it work to do
-(not for a simple question), whether to link this session to a Tickr activity. If you
-answer yes, Claude runs `/tickr:link` right away; if you answer no, it does not ask
-again in that session. Claude never writes `.tickr.json` itself outside `/tickr:link`.
+session is not tracked, and Claude is told to ask you once, the first time you give it
+work to do and before starting that work, whether to link this session to a Tickr
+activity (not for a simple question, and not when you already said to skip Tickr). If
+you answer yes, Claude runs `/tickr:link` right away, then does the work; if you answer
+no, it does the work and does not ask again in that session. Claude never writes
+`.tickr.json` itself outside `/tickr:link`.
 To turn the question off, set the plugin option `ask_to_link` to `false` (the message
 stays).
 
