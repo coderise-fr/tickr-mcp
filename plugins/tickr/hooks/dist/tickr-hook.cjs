@@ -1422,6 +1422,10 @@ var Store = class {
   deleteOutboxFor(kind, id) {
     return this.run("DELETE FROM outbox WHERE target_kind = ? AND target_id = ?", kind, id);
   }
+  /** Forgets a target's latest complete usage set: its revisions carry no usage until the next one. */
+  deleteUsageSnapshot(kind, id) {
+    return this.run("DELETE FROM usage_snapshots WHERE target_kind = ? AND target_id = ?", kind, id);
+  }
   /**
    * Removes the pending revisions older than their target's latest one. Only the latest is ever
    * sent and its acknowledgement removes the older ones anyway; returns how many.
@@ -2975,6 +2979,9 @@ function repairRename(store, segmentId, pending, newId, now) {
     const nowIso = now.toISOString();
     snapshotUsage(store, { kind: "segment", id: segmentId }, nowIso);
     snapshotUsage(store, { kind: "segment", id: newId }, nowIso);
+  } else {
+    store.deleteUsageSnapshot("segment", segmentId);
+    store.deleteUsageSnapshot("segment", newId);
   }
 }
 
@@ -3610,7 +3617,7 @@ var segmentRevisions = (ctx) => {
     const usage = usageForRevision(ctx.store, target);
     let quality = "pending";
     if (seg.final) {
-      const computed = usage?.clamped ? "incomplete" : finalQuality(ctx.store, seg, now, contextOf(seg.sessionId));
+      const computed = usage === void 0 || usage.clamped ? "incomplete" : finalQuality(ctx.store, seg, now, contextOf(seg.sessionId));
       quality = nextQuality(committedQuality(last), computed, { segment: true, final: true });
     }
     const body = desiredSegmentBody(seg, mapping, now, usage?.usage, quality);

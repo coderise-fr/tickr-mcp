@@ -773,6 +773,11 @@ export class Store {
     return this.run("DELETE FROM outbox WHERE target_kind = ? AND target_id = ?", kind, id);
   }
 
+  /** Forgets a target's latest complete usage set: its revisions carry no usage until the next one. */
+  deleteUsageSnapshot(kind: TargetKind, id: string): number {
+    return this.run("DELETE FROM usage_snapshots WHERE target_kind = ? AND target_id = ?", kind, id);
+  }
+
   /**
    * Removes the pending revisions older than their target's latest one. Only the latest is ever
    * sent and its acknowledgement removes the older ones anyway; returns how many.

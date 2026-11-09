@@ -241,7 +241,8 @@ export const segmentRevisions: RevisionSource = (ctx) => {
     const usage = usageForRevision(ctx.store, target);
     let quality: UsageQuality = "pending";
     if (seg.final) {
-      const computed: FinalQuality = usage?.clamped ? "incomplete" : finalQuality(ctx.store, seg, now, contextOf(seg.sessionId));
+      // No complete usage set (none yet, or dropped by a rename repair): not complete either.
+      const computed: FinalQuality = usage === undefined || usage.clamped ? "incomplete" : finalQuality(ctx.store, seg, now, contextOf(seg.sessionId));
       quality = nextQuality(committedQuality(last), computed, { segment: true, final: true });
     }
     const body = desiredSegmentBody(seg, mapping, now, usage?.usage, quality);

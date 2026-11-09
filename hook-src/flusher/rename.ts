@@ -255,12 +255,17 @@ export function repairRename(store: Store, segmentId: string, pending: PendingRe
   const toMove = db.prepare(`UPDATE ledger SET recipient_id = ? WHERE recipient_kind = 'segment' AND recipient_id = ? AND folded = 0 AND agent_id = ?`);
   for (const { agent_id } of moved) toMove.run(newId, segmentId, agent_id);
 
-  // The usage of both: the latest complete set, when the session's last reads were complete;
-  // otherwise the next complete read of the ledger stage snapshots them.
+  // The usage of both: the latest complete set, when the session's last reads were complete.
+  // Otherwise the segment's set (taken before the move, it holds the tokens moved away) no longer
+  // matches either segment: both carry no usage until the next complete read of the ledger stage
+  // snapshots them (their quality cannot be complete before that read either).
   const reads = sessionReads(store, seg.sessionId);
   if (reads.length > 0 && reads.every((r) => r.status === "complete")) {
     const nowIso = now.toISOString();
     snapshotUsage(store, { kind: "segment", id: segmentId }, nowIso);
     snapshotUsage(store, { kind: "segment", id: newId }, nowIso);
+  } else {
+    store.deleteUsageSnapshot("segment", segmentId);
+    store.deleteUsageSnapshot("segment", newId);
   }
 }

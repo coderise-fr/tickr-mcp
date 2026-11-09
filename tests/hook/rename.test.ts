@@ -1,6 +1,7 @@
 // Renaming a session's entry in place (flusher/rename.ts): a change of task and/or description
 // only keeps the segment and its entry while Tickr applies it, and is split as before (repaired)
 // when Tickr keeps the old values. A local fake Tickr either applies or ignores such a change.
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAgentApi } from "../../hook-src/flusher/api.js";
@@ -16,11 +17,13 @@ import {
 } from "../../hook-src/flusher/rename.js";
 import { PIPELINE, STAGE_NAMES } from "../../hook-src/flusher/stages.js";
 import { ledgerRowsFor } from "../../hook-src/ledger.js";
+import type { UsageRow } from "../../hook-src/flusher/revisions.js";
 import { type NormalizedMapping } from "../../hook-src/mapping.js";
+import { usageForRevision } from "../../hook-src/quality.js";
 import { json, problem, type RecordedRequest, type Reply, startServer } from "../helpers/httpServer.js";
 import { cleanTempDirs, PROJECT, OTHER_PROJECT, WS } from "./helpers/env.js";
 import { journalMapping, MAPPING, type StageHarness, stageHarness } from "./helpers/stage.js";
-import { appendTranscript, writeTranscript } from "./helpers/transcript.js";
+import { appendPartial, appendTranscript, line, writeTranscript } from "./helpers/transcript.js";
 
 const T0 = "2026-11-05T10:00:00.000Z";
 const TASK = "2a9c6e3f-7d4b-4e0a-9c3d-5f7b9d1e3f04";
@@ -322,6 +325,62 @@ describe("crash safety and retention", () => {
     expect(new Set(probes.map((p) => JSON.stringify(p.body))).size).toBe(1);
     expect(h.store.segmentsForSession("s-1")).toHaveLength(2);
     expect(readRenameSupport(h.store)?.state).toBe("unsupported");
+  });
+
+  it("a repair while the reads are partial drops the usage set taken during the probe; the next complete read splits it by time", async () => {
+    const { h, transcript, ev, pass } = setup();
+    let lose = true;
+    const { server } = await tickr(
+      h,
+      () => false,
+      (req) => (lose && req.method === "PUT" && req.body.includes(TASK) ? { status: 503 } : null),
+    );
+    ev("UserPromptSubmit", 0);
+    ev("PostToolUse", 30);
+    await pass(31);
+    // (1) The probe waits for its answer; a complete read snapshots the tokens after the change
+    // with the segment (msg_2 at 70 s, after the change at 60 s).
+    appendTranscript(transcript, [{ id: "msg_2", at: at(70), output: 200 }]);
+    ev("PostToolUse", 60, RENAMED);
+    ev("PostToolUse", 80, RENAMED);
+    await pass(81, 1);
+    const [seg] = h.store.segmentsForSession("s-1");
+    expect(readPendingRename(h.store, seg!.id)).not.toBeNull();
+    const outputOf = (id: string) => (usageForRevision(h.store, { kind: "segment", id })?.usage ?? []).reduce((n, r) => n + r.outputTokens, 0);
+    expect(outputOf(seg!.id)).toBe(300);
+
+    // (2) The answer comes while the transcript's last line is cut mid-write: repair, partial reads.
+    const cut = { id: "msg_3", at: at(85), output: 50 };
+    appendPartial(transcript, cut);
+    ev("Stop", 90, RENAMED);
+    lose = false;
+    const before = server.requests.length;
+    await pass(400);
+    const [old, next] = h.store.segmentsForSession("s-1");
+    expect(h.store.segmentsForSession("s-1")).toHaveLength(2);
+    expect(old!.id).toBe(seg!.id);
+    expect(h.store.getTranscriptOffset(transcript)).toMatchObject({ status: "partial" });
+    // (3) Neither carries usage until a complete read rebuilds both sets.
+    expect(usageForRevision(h.store, { kind: "segment", id: old!.id })).toBeUndefined();
+    expect(usageForRevision(h.store, { kind: "segment", id: next!.id })).toBeUndefined();
+    const afterRepair = puts(server.requests.slice(before));
+    const oldAfter = afterRepair.filter((p) => p.id === old!.id && p.body.description === MAPPING.description);
+    expect(oldAfter.length).toBeGreaterThan(0);
+    expect(oldAfter.every((p) => p.body.usage === undefined)).toBe(true);
+    expect(oldAfter.at(-1)!.body).toMatchObject({ final: true, usageQuality: "incomplete" });
+    expect(afterRepair.filter((p) => p.id === next!.id).every((p) => p.body.usage === undefined)).toBe(true);
+
+    // The line is completed: the next complete read carries each segment's tokens by time.
+    appendFileSync(transcript, line(cut).slice(40));
+    const beforeComplete = server.requests.length;
+    await pass(500);
+    expect(outputOf(old!.id)).toBe(100);
+    expect(outputOf(next!.id)).toBe(250);
+    const lastOf = (id: string) => puts(server.requests.slice(beforeComplete)).filter((p) => p.id === id).at(-1)!.body;
+    const sum = (usage: unknown) => (usage as UsageRow[]).reduce((n, r) => n + r.outputTokens, 0);
+    expect(lastOf(old!.id)).toMatchObject({ final: true, usageQuality: "complete" });
+    expect(sum(lastOf(old!.id).usage)).toBe(100);
+    expect(sum(lastOf(next!.id).usage)).toBe(250);
   });
 
   it("retention removes the pending rename of a segment that is gone", () => {
