@@ -1,6 +1,6 @@
 ---
 name: tickr
-description: How the Tickr plugin records Claude Code sessions as Tickr time entries, what it sends and never sends, how the task and description of a session are chosen, and the rules for touching Tickr entries. Use when the user asks about Tickr time tracking of Claude Code sessions, links a repository to Tickr, when a session is not linked to Tickr and the user gives work to do, when the work of a tracked session moves to another task or purpose, or when asked to change a Tickr time entry.
+description: How the Tickr plugin records Claude Code sessions as Tickr time entries, what it sends and never sends, how the task and description of a session are chosen, and the rules for touching Tickr entries. Use when the user asks about Tickr time tracking of Claude Code sessions, links a repository to Tickr, when the session start note says the session is not linked to Tickr and asks you to offer linking before work, when the work of a tracked session moves to another task or purpose, or when asked to change a Tickr time entry.
 ---
 
 # Tickr time tracking for Claude Code
@@ -19,7 +19,7 @@ A background process turns that activity into **agent session segments** and sen
 
 ## Session not linked
 
-When a session starts in a repository that is not linked (no `.tickr.json`, or one not yet linked on this machine), the plugin gives you a note saying so (plugin option `ask_to_link`, on by default). Then:
+When a session starts in a repository that is not linked (no `.tickr.json`, or one not yet linked on this machine), the plugin gives you a note saying so and telling you to ask (plugin option `ask_to_link`, on by default). These rules apply **only if you received that note at the start of this session**. An unlinked checkout alone is not enough: when the option is off, or you got no such note, **never ask or suggest on your own to link the session**, and do not run `tickr:link` unless the user asks for it. If you did get the note:
 
 - The first time the user gives you work to do, ask the user **once**, **before starting the work**: your very first reply is only one short question whether they want to link this session to a Tickr activity, with no tool call and no work before their answer.
 - If they say yes, run the `tickr:link` command right away (Skill tool, skill `tickr:link`); it guides the user through the choice of project and records the link. Then do the work.

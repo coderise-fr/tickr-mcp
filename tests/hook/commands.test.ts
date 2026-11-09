@@ -251,6 +251,14 @@ describe("commands and skill", () => {
     expect(text).toContain("`ask_to_link`");
   });
 
+  it("the skill's link question is gated on the SessionStart note: an unlinked checkout alone, or ask_to_link off, never prompts", () => {
+    const text = read("skills/tickr/SKILL.md");
+    expect(text).toContain("**only if you received that note at the start of this session**");
+    expect(text).toContain("An unlinked checkout alone is not enough");
+    expect(text).toContain("**never ask or suggest on your own to link the session**");
+    expect(text).toContain("unless the user asks for it");
+  });
+
   it("a task or description change renames the entry in place when Tickr supports it, else starts a new one: said in the skill, /tickr:task, /tickr:describe and the README", () => {
     const readme = readFileSync(`${pluginRoot}../../README.md`, "utf8").replace(/\r\n/g, "\n").replace(/\s+/g, " ");
     const rule = /renamed in place when your Tickr supports it; otherwise a new Tickr entry starts \(the (previous|current) one ends there\)/;

@@ -1,6 +1,6 @@
 {
   "name": "tickr",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Tracks your Claude Code sessions as Tickr time entries and lets Claude start, stop and edit your Tickr time entries.",
   "author": {
     "name": "Coderise",
