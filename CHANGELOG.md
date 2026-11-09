@@ -1,5 +1,18 @@
 # Changelog
 
+## Plugin `tickr` 0.4.0 — unreleased
+
+- Changing the task or the description of a session (`/tickr:task`, `/tickr:describe`)
+  now renames the current Tickr entry in place when your Tickr applies the change; a
+  change of project or tags still starts a new entry.
+- When your Tickr keeps the old task and description, the plugin notices it in the
+  answer and splits the entry at the change as before (the previous one ends there,
+  with its own task, description, time and tokens), then splits directly on later
+  changes. It tries in place again a day later, so an upgraded Tickr is picked up
+  without a plugin release. A change Tickr refuses is split the same way.
+- The skill, `/tickr:task`, `/tickr:describe` and the README say so.
+- Bundles MCP server 0.2.1 (unchanged).
+
 ## Plugin `tickr` 0.3.0 — unreleased
 
 - In a repository that is not linked (no `.tickr.json`, or one not yet linked on this

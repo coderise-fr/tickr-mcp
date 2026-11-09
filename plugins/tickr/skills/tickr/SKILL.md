@@ -31,7 +31,7 @@ When a session starts in a repository that is not linked (no `.tickr.json`, or o
 
 Each session is recorded under the task and description of `.tickr.json`, unless a **session context** was set for it: a task among the existing tasks of the linked project (or no task) and a short description of the overall work. `/tickr:task` sets both, `/tickr:describe` only the description, `/tickr:task clear` removes the context. The context stays on this machine and applies to this session only.
 
-Changing the task or the description starts a new Tickr entry from that moment (the previous one ends there): Tickr does not change the task or description of an entry that already exists. So set the task and the description early, once the work is clear, and do not change them for small shifts.
+When you change the task or the description, the entry is renamed in place when your Tickr supports it; otherwise a new Tickr entry starts (the previous one ends there). So set the task and the description early, once the work is clear, and do not change them for small shifts.
 
 The note "Tickr session context" given at the start of a tracked session says the mode (manual or automatic) and the current context.
 
