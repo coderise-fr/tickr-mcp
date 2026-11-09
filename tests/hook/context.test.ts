@@ -1,6 +1,7 @@
 // Session context (context.ts): a task of the linked project and a short description, set for one
 // session by `set-context` (/tickr:task, /tickr:describe) and applied by the intake as the
-// event's mapping version, so that a change splits the segment.
+// event's mapping version: a change renames the entry in place when Tickr applies it, and splits
+// the segment otherwise.
 import { existsSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -672,17 +673,27 @@ describe("retention of context files", () => {
 });
 
 describe("a context change in a running session (intake, segmentation, revisions and sender together)", () => {
-  it("splits the segment at the change; the next segment carries the new task and description", async () => {
+  it.each([
+    ["applies the change: the entry is renamed in place", true],
+    ["keeps the old task and description: the segment is split at the change", false],
+  ])("a Tickr that %s", async (_name, applies) => {
     const t0 = "2026-11-05T10:00:00.000Z";
     const at = (s: number) => new Date(Date.parse(t0) + s * 1000);
     const { cwd, data, dir, cfg } = linked({ workspace_id: WS, project_id: PROJECT, task_id: FILE_TASK });
     const h = stageHarness({ now: t0, dir, dataDir: data });
     harnesses.push(h);
+    // The entry as Tickr stores it: created from the first revision; a later one changes its task
+    // and description only when this Tickr applies such a change.
+    const stored = new Map<string, { description: string; taskId: string | null }>();
     const server = await startServer((req) => {
       if (req.url === "/api/v1/me") {
         return json(200, { user: { id: "u-1" }, workspace: { id: WS, name: "Acme" }, role: "workspace_user", serverTime: h.ctx.now().toISOString() });
       }
-      return json(201, { id: "e", origin: "agent_session", agentFinalized: false, agentDetached: false });
+      const id = req.url.split("/").pop()!;
+      const body = JSON.parse(req.body) as { description: string; taskId: string | null };
+      const known = stored.get(id);
+      if (known === undefined || applies) stored.set(id, { description: body.description, taskId: body.taskId });
+      return json(known === undefined ? 201 : 200, { id, origin: "agent_session", ...stored.get(id), agentFinalized: false, agentDetached: false });
     });
     servers.push(server);
     h.ctx.api = createAgentApi({ baseUrl: server.baseUrl, apiKey: "tkr_test_context_key_0001", timeoutMs: 3000, now: () => h.ctx.now().getTime() });
@@ -706,22 +717,34 @@ describe("a context change in a running session (intake, segmentation, revisions
     hook("PostToolUse", 60);
     hook("Stop", 90);
     await pass(91);
-
-    const segments = h.store.segmentsForSession("s-1");
-    expect(segments).toHaveLength(2);
-    expect(segments[0]).toMatchObject({ final: true, startedAt: at(0).toISOString(), stoppedAt: at(60).toISOString() });
-    expect(segments[1]).toMatchObject({ final: false, startedAt: at(60).toISOString() });
+    await pass(92);
 
     const bodies = server.requests
       .filter((r) => r.method === "PUT" && r.url.startsWith("/api/v1/agent-segments/"))
       .map((r) => ({ id: r.url.split("/").pop()!, body: JSON.parse(r.body) as { revision: number; taskId: string | null; description: string; final: boolean } }));
     const of = (id: string) => bodies.filter((b) => b.id === id).map((b) => b.body);
+    const fromFile = (b: { taskId: string | null; description: string }) => b.taskId === FILE_TASK && b.description === DEFAULT_DESCRIPTION;
+    const fromContext = (b: { taskId: string | null; description: string }) => b.taskId === TASK && b.description === DESCRIPTION;
+    const segments = h.store.segmentsForSession("s-1");
+
+    if (applies) {
+      expect(segments).toHaveLength(1);
+      expect(segments[0]).toMatchObject({ final: false, startedAt: at(0).toISOString(), stoppedAt: at(90).toISOString() });
+      const sent = of(segments[0]!.id);
+      expect(fromFile(sent[0]!)).toBe(true);
+      expect(fromContext(sent.at(-1)!)).toBe(true);
+      expect(stored.get(segments[0]!.id)).toEqual({ taskId: TASK, description: DESCRIPTION });
+      return;
+    }
+    expect(segments).toHaveLength(2);
+    expect(segments[0]).toMatchObject({ final: true, startedAt: at(0).toISOString(), stoppedAt: at(60).toISOString() });
+    expect(segments[1]).toMatchObject({ final: false, startedAt: at(60).toISOString() });
     const first = of(segments[0]!.id);
     const second = of(segments[1]!.id);
-    expect(first.length).toBeGreaterThan(0);
-    expect(first.every((b) => b.taskId === FILE_TASK && b.description === DEFAULT_DESCRIPTION)).toBe(true);
-    expect(first.at(-1)!.final).toBe(true);
+    // One attempt in place, which this Tickr ignored; the final revision carries the old ones.
+    expect(first.filter((b) => !fromFile(b))).toHaveLength(1);
+    expect(first.at(-1)!).toMatchObject({ final: true, taskId: FILE_TASK, description: DEFAULT_DESCRIPTION });
     expect(second.length).toBeGreaterThan(0);
-    expect(second.every((b) => b.taskId === TASK && b.description === DESCRIPTION)).toBe(true);
+    expect(second.every(fromContext)).toBe(true);
   });
 });

@@ -24,8 +24,15 @@ export const USAGE_BODY_KEYS = ["revision", "agentSessionId", "usageQuality", "u
 
 export type PauseReason = "unauthorized" | "forbidden_role" | "segments_disabled" | "clock_skew";
 
+/** The task and description of the entry Tickr answered with (read, never stored). */
+export interface AppliedEntry {
+  description: string;
+  taskId: string | null;
+}
+
 export type SendOutcome =
-  | { kind: "applied"; created: boolean; finalized: boolean; detached: boolean }
+  /** entry: present when the answer shows the entry's description (flusher/rename.ts). */
+  | { kind: "applied"; created: boolean; finalized: boolean; detached: boolean; entry?: AppliedEntry }
   /** afterMs: the server's Retry-After in milliseconds, or null to back off (sender.ts). */
   | { kind: "retry"; afterMs: number | null }
   | { kind: "pause"; reason: PauseReason }
@@ -147,14 +154,24 @@ export function classify(route: Route, status: number, problem: Problem | null, 
 
 /** A 2xx: applied; the EntryDto adds whether the server has finalised or detached the entry. */
 async function applied(res: Response): Promise<SendOutcome> {
-  const entry = (await res.json().catch(() => null)) as { agentFinalized?: unknown; agentDetached?: unknown } | null;
+  const entry = (await res.json().catch(() => null)) as {
+    agentFinalized?: unknown;
+    agentDetached?: unknown;
+    description?: unknown;
+    taskId?: unknown;
+  } | null;
   // An unreadable answer is applied all the same: it only adds the server state.
-  return {
+  const out: SendOutcome = {
     kind: "applied",
     created: res.status === 201,
     finalized: entry?.agentFinalized === true,
     detached: entry?.agentDetached === true,
   };
+  // The entry's task and description: whether Tickr applied a rename (flusher/rename.ts).
+  if (typeof entry?.description === "string" && (entry.taskId === null || entry.taskId === undefined || typeof entry.taskId === "string")) {
+    out.entry = { description: entry.description, taskId: typeof entry.taskId === "string" ? entry.taskId : null };
+  }
+  return out;
 }
 
 export function createAgentApi(o: AgentApiOptions): AgentApi {

@@ -23,7 +23,9 @@ import { parseStoredMapping } from "../mapping.js";
 import { addNotice } from "../notices.js";
 import type { OutboxRow, Store, TargetKind } from "../store/db.js";
 import { type AgentApi, type PauseReason, REQUEST_TIMEOUT_MS, type SendOutcome, type UsageBody } from "./api.js";
+import { uuidv7 } from "../ids.js";
 import { guarded } from "./owner.js";
+import { resolveAppliedProbe, resolveRefusedProbe } from "./rename.js";
 import type { SegmentBody } from "./revisions.js";
 import { ACTIVE_SESSION, markClosedByServer } from "./segmentation.js";
 import type { FlusherBoundary, StageRun } from "./stages.js";
@@ -286,39 +288,55 @@ async function sendRow(store: Store, api: AgentApi, row: OutboxRow): Promise<Sen
   return api.putUsage(row.targetId, body as UsageBody);
 }
 
-function applyOutcome(store: Store, row: OutboxRow, outcome: SendOutcome, now: Date, random?: () => number): number | null {
+/** What applying one answer did: the retry delay, and whether a rename in place was resolved. */
+interface Applied {
+  delay: number | null;
+  renamed: boolean;
+}
+
+function applyOutcome(store: Store, row: OutboxRow, outcome: SendOutcome, now: Date, random?: () => number): Applied {
   const kind: TargetKind = row.targetKind;
+  const newId = () => uuidv7(now.getTime());
   // Tickr answered about the target itself: whatever paused the instance is over.
   if ((outcome.kind === "applied" || outcome.kind === "terminal") && readPause(store) !== null) resumeSending(store);
   switch (outcome.kind) {
     case "applied": {
       store.deleteOutboxThrough(kind, row.targetId, row.revision);
       if (kind === "segment") {
+        const existed = store.getSegment(row.targetId)?.createdOnServer === true && !outcome.created;
         store.markSegmentCreated(row.targetId);
         const sent = JSON.parse(row.bodyJson) as Partial<SegmentBody>;
         if (outcome.detached || (outcome.finalized && sent.final !== true)) {
           markClosedByServer(store, row.targetId, outcome.detached ? "detached" : "finalized");
           store.deleteOutboxFor(kind, row.targetId);
+          return { delay: null, renamed: false };
         }
+        const answer = { segmentId: row.targetId, revision: row.revision, sent, entry: outcome.entry, existed };
+        return { delay: null, renamed: resolveAppliedProbe(store, answer, newId, now) };
       }
-      return null;
+      return { delay: null, renamed: false };
     }
     case "retry": {
       const attempts = row.attempts + 1;
       const delay = retryDelayMs(outcome.afterMs, attempts, random);
       store.setOutboxAttempt(kind, row.targetId, row.revision, attempts, new Date(now.getTime() + delay).toISOString());
-      return delay;
+      return { delay, renamed: false };
     }
     case "pause":
       pauseSending(store, outcome.reason, now);
-      return null;
+      return { delay: null, renamed: false };
     case "terminal": {
+      // A refused rename in place is split instead: the segment is never left stuck (rename.ts).
+      if (kind === "segment" && !outcome.closesSegment && resolveRefusedProbe(store, row.targetId, row.revision, newId, now)) {
+        if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
+        return { delay: null, renamed: true };
+      }
       recordTerminal(store, row, outcome.code, `Refused by Tickr (${outcome.code}).`, now);
       if (kind === "segment" && outcome.closesSegment) {
         markClosedByServer(store, row.targetId, outcome.code === "segment_detached" ? "detached" : "finalized");
       }
       if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
-      return null;
+      return { delay: null, renamed: false };
     }
   }
 }
@@ -340,6 +358,7 @@ export async function sendDue(store: Store, gen: number, api: AgentApi, now: () 
   // Fixed for the pass: a wait that ends meanwhile is sent by the next pass (due at once).
   const { held } = versionHolds(store, now());
   const waiting = (row: OutboxRow) => row.targetKind === "segment" && held.has(row.targetId);
+  let resolved = false;
   for (;;) {
     // At most held.size of the rows read wait: an empty remainder means nothing else is due.
     const rows = store.dueOutbox(now().toISOString(), SEND_BATCH + held.size).filter((row) => !waiting(row));
@@ -353,13 +372,15 @@ export async function sendDue(store: Store, gen: number, api: AgentApi, now: () 
       }
       const outcome = await sendRow(store, api, row);
       opts.boundary?.("sent");
-      const delay = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));
+      const { delay, renamed } = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));
+      // A rename resolved: the segment's next revisions (or the split) are due in the next pass.
+      if (renamed) resolved = true;
       if (outcome.kind === "applied") opts.boundary?.("acknowledged");
-      if (outcome.kind === "retry") return { dueInMs: delay };
+      if (outcome.kind === "retry") return { dueInMs: resolved ? 0 : delay };
       if (outcome.kind === "pause") return { dueInMs: null };
     }
   }
-  return { dueInMs: nextDueMs(store, now()) };
+  return { dueInMs: resolved ? 0 : nextDueMs(store, now()) };
 }
 
 /** Milliseconds until the next row is due (a version wait counting as its time left), or null. */

@@ -183,10 +183,11 @@ describe("privacy allow-list (D14)", () => {
   it("the session context description is the only free text that reaches Tickr from the session context", () => {
     expect(contextOutput.join("")).toMatch(/^Tickr: from now on this session is recorded with the chosen task/);
     const segments = server.requests.filter((r) => r.method === "PUT" && r.url.startsWith("/api/v1/agent-segments/")).map((r) => JSON.parse(r.body) as Record<string, unknown>);
-    // Before the context: .tickr.json's own task and description; after it: the confirmed ones.
-    expect(new Set(segments.map((b) => `${String(b.taskId)} ${String(b.description)}`))).toEqual(
-      new Set([`null ${DEFAULT_DESCRIPTION}`, `${CONTEXT_TASK} ${CONTEXT_DESCRIPTION}`]),
-    );
+    // .tickr.json's own task and description, or the confirmed ones (the context was set before
+    // the session's first revision: its entry is created with them, renamed in place).
+    const pairs = new Set(segments.map((b) => `${String(b.taskId)} ${String(b.description)}`));
+    expect(pairs).toContain(`${CONTEXT_TASK} ${CONTEXT_DESCRIPTION}`);
+    for (const pair of pairs) expect([`null ${DEFAULT_DESCRIPTION}`, `${CONTEXT_TASK} ${CONTEXT_DESCRIPTION}`]).toContain(pair);
     // Every other text value of every body is an id, a time, a model or a fixed word: no free text.
     const leaves = (value: unknown, key = ""): [string, string][] =>
       typeof value === "string"

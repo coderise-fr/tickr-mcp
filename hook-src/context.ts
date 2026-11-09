@@ -7,7 +7,9 @@
 // id (or null: no task), the description and the time it was set, never a path. On every hook
 // event the intake overrides the task and/or description of the checkout's .tickr.json with it,
 // only when it names the same project (effectiveMapping): the result is the event's mapping
-// version, so a change splits the segment and the next one carries the new task and description.
+// version. A change of task and/or description renames the open segment's entry in place when
+// the user's Tickr applies such a change (flusher/rename.ts); otherwise the segment is split and
+// the next one carries the new task and description.
 // The consent link stays computed from .tickr.json itself.
 //
 // Everything read from a context file is untrusted: a file that is not a small regular file, or

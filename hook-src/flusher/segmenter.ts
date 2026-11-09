@@ -10,7 +10,9 @@
 //   at that last activity.
 // - The segment is split, the next one starting exactly at the boundary, at the next UTC
 //   midnight of its start (00:00:00Z) or 23 h after its start, whichever comes first, and when
-//   an activity event carries another mapping version (split at the event).
+//   an activity event carries another mapping version (split at the event), unless the caller
+//   renames the segment in place (cfg.renameInPlace: a change of task and/or description only,
+//   flusher/rename.ts), the segment then taking the new mapping version from that event.
 // - Clock: each event carries wall time and uptime. Uptime decreased ⇒ reboot, nothing concluded
 //   (the idle rule applies). Otherwise |Δwall − Δuptime| > 2 min ⇒ proven jump: the segment is
 //   finalised at its last activity and the next one starts at the new event time.
@@ -50,11 +52,18 @@ export type FinalReason = "idle" | "midnight" | "max_duration" | "mapping" | "cl
 export type SegmentChange =
   | { kind: "open"; seg: OpenSegment }
   | { kind: "extend"; id: string; lastActivityAt: string; working: boolean; observedAt: string }
-  | { kind: "finalize"; id: string; stoppedAt: string; reason: FinalReason; diagnostic?: string };
+  | { kind: "finalize"; id: string; stoppedAt: string; reason: FinalReason; diagnostic?: string }
+  /** The open segment took the event's mapping version in place (`previous`: before the event). */
+  | { kind: "rename"; seg: OpenSegment; at: string; previous: OpenSegment };
 
 export interface SegmenterConfig {
   idleMs: number;
   newId: () => string;
+  /**
+   * Whether the open segment takes another mapping version in place instead of being split
+   * (flusher/rename.ts: a change of task and/or description only). Absent: always split.
+   */
+  renameInPlace?: (open: OpenSegment, mappingVersionId: number) => boolean;
 }
 
 /** The event fields the reducer reads. */
@@ -151,7 +160,18 @@ export function applyEvent(s: SessionState, ev: SegmentEvent, cfg: SegmenterConf
     } else {
       const boundary = segmentBoundary(current);
       const otherMapping = working && ev.mappingVersionId !== current.mappingVersionId;
-      if (otherMapping || wall > boundary.at) {
+      if (otherMapping && wall <= boundary.at && ev.mappingVersionId !== null && cfg.renameInPlace?.(current, ev.mappingVersionId) === true) {
+        // A rename in place: the segment keeps its id and takes the new mapping from this event.
+        const seg: OpenSegment = {
+          ...current,
+          mappingVersionId: ev.mappingVersionId,
+          lastActivityAt: later(current.lastActivityAt, ev.localTime),
+          working,
+          observedAt: later(current.observedAt, ev.localTime),
+        };
+        open = seg;
+        changes.push({ kind: "rename", seg, at: ev.localTime, previous: current });
+      } else if (otherMapping || wall > boundary.at) {
         // Split exactly at the boundary: the event's time, or the synthetic midnight / 23 h bound.
         const at = wall > boundary.at ? iso(boundary.at) : ev.localTime;
         finalize(current, at, wall > boundary.at ? boundary.reason : "mapping");

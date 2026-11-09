@@ -805,8 +805,8 @@ export class Store {
    * their delegated row is gone, events already segmented, sessions left without events nor
    * segments (then their ledger rows and totals, unless their recipient has a pending revision,
    * their delegated entries without a pending revision, transcript offsets, subagents and Agent
-   * launches), usage snapshots of targets gone, unused mapping versions, terminal items and shown
-   * notices.
+   * launches), usage snapshots of targets gone, unused mapping versions, pending renames of
+   * segments gone, terminal items and shown notices.
    * Returns the rows deleted.
    */
   deleteRetired(cutoffIso: string): number {
@@ -859,7 +859,14 @@ export class Store {
     }
     n += this.run(
       `DELETE FROM mapping_versions WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.mapping_version_id = mapping_versions.id)
-         AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.mapping_version_id = mapping_versions.id)`,
+         AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.mapping_version_id = mapping_versions.id)
+         AND NOT EXISTS (SELECT 1 FROM meta m WHERE substr(m.key, 1, 15) = 'segment_rename:'
+           AND json_extract(m.value, '$.fromMappingVersionId') = mapping_versions.id)`,
+    );
+    // Pending renames in place (flusher/rename.ts) of segments gone.
+    n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 15) = 'segment_rename:'
+         AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 16))`,
     );
     n += this.run("DELETE FROM terminal WHERE at < ?", cutoffIso);
     n += this.run("DELETE FROM notices WHERE shown_at IS NOT NULL AND created_at < ?", cutoffIso);
