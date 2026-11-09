@@ -1,6 +1,12 @@
 # Changelog
 
-## Plugin `tickr` 0.4.0 — unreleased
+## Plugin `tickr` 0.4.1 — 2026-11-09
+
+- The skill asks to link a session only when the model received the SessionStart
+  ask-to-link note: an unlinked checkout alone, or the option `ask_to_link` turned off,
+  never prompts, and the model never suggests linking on its own.
+
+## Plugin `tickr` 0.4.0 — 2026-11-09
 
 - Changing the task or the description of a session (`/tickr:task`, `/tickr:describe`)
   now renames the current Tickr entry in place when your Tickr applies the change; a
@@ -13,7 +19,7 @@
 - The skill, `/tickr:task`, `/tickr:describe` and the README say so.
 - Bundles MCP server 0.2.1 (unchanged).
 
-## Plugin `tickr` 0.3.0 — unreleased
+## Plugin `tickr` 0.3.0 — 2026-11-09
 
 - In a repository that is not linked (no `.tickr.json`, or one not yet linked on this
   machine), the SessionStart hook now also gives Claude a short note: the first time
@@ -31,7 +37,7 @@
   exists; set them early, once the work is clear.
 - Bundles MCP server 0.2.1 (unchanged).
 
-## Plugin `tickr` 0.2.0 — unreleased
+## Plugin `tickr` 0.2.0 — 2026-11-06
 
 - New `/tickr:task`: choose, for the current session only, a task among the
   existing tasks of the linked project (or no task) and a short description of the
