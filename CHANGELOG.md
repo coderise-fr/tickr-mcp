@@ -1,6 +1,6 @@
 # Changelog
 
-## Plugin `tickr` 0.4.2 — unreleased
+## Plugin `tickr` 0.4.2 — 2026-11-09
 
 - Follows the segment route's rename contract of a Tickr that applies the change, and
   still works with one that does not: which one is told by Tickr's answer alone, never

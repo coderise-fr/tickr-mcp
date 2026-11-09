@@ -6,7 +6,7 @@ working with a Tickr that does not: the plugin tells them apart from the answer 
 from a version number. See the [0.4.0 record](plugin-0.4.0.md) for the rename in place and
 the [0.1.0 record](plugin-0.1.0.md) for the full checklist.
 
-Date: 2026-11-09. Not released yet.
+Date: 2026-11-09. Released as tag `plugin-v0.4.2`.
 
 | Check | Result | Notes |
 | --- | --- | --- |
