@@ -20,12 +20,12 @@
 // time left as its due. Updates of created segments, final segments and delegated entries never wait.
 import { agentHeaderValue } from "../../src/api/agent.js";
 import { parseStoredMapping } from "../mapping.js";
-import { addNotice } from "../notices.js";
 import type { OutboxRow, Store, TargetKind } from "../store/db.js";
-import { type AgentApi, type PauseReason, REQUEST_TIMEOUT_MS, type SendOutcome, type UsageBody } from "./api.js";
+import { addNotice, renameRefusedKind } from "../notices.js";
+import { type AgentApi, ENTRY_LOCKED, IMMUTABLE, type PauseReason, REQUEST_TIMEOUT_MS, REVISION_CONFLICT, type SendOutcome, type UsageBody } from "./api.js";
 import { uuidv7 } from "../ids.js";
 import { guarded } from "./owner.js";
-import { resolveAppliedProbe, resolveRefusedProbe } from "./rename.js";
+import { clearPendingRename, resolveAppliedProbe, resolveRefusedProbe, supersedeProbe } from "./rename.js";
 import type { SegmentBody } from "./revisions.js";
 import { ACTIVE_SESSION, markClosedByServer } from "./segmentation.js";
 import type { FlusherBoundary, StageRun } from "./stages.js";
@@ -45,6 +45,8 @@ export const SEND_BATCH = 50;
 export const STOPPED_MISMATCH = "stopped_mismatch";
 /** Session state of a session whose checkout is no longer linked on this machine (consent.ts). */
 export const UNLINKED = "unlinked";
+/** Session state of a session one of whose segments Tickr refused as in a submitted period (entry_locked). */
+export const STOPPED_LOCKED = "stopped_locked";
 
 export const PAUSE_KEY = "send_pause";
 export const WORKSPACE_KEY = "workspace";
@@ -288,10 +290,14 @@ async function sendRow(store: Store, api: AgentApi, row: OutboxRow): Promise<Sen
   return api.putUsage(row.targetId, body as UsageBody);
 }
 
-/** What applying one answer did: the retry delay, and whether a rename in place was resolved. */
+/**
+ * What applying one answer did: the retry delay, whether something is due again at once (a rename
+ * in place resolved, a conflict superseded), and whether it was a revision conflict.
+ */
 interface Applied {
   delay: number | null;
   renamed: boolean;
+  conflict?: true;
 }
 
 function applyOutcome(store: Store, row: OutboxRow, outcome: SendOutcome, now: Date, random?: () => number): Applied {
@@ -325,20 +331,86 @@ function applyOutcome(store: Store, row: OutboxRow, outcome: SendOutcome, now: D
     case "pause":
       pauseSending(store, outcome.reason, now);
       return { delay: null, renamed: false };
-    case "terminal": {
-      // A refused rename in place is split instead: the segment is never left stuck (rename.ts).
-      if (kind === "segment" && !outcome.closesSegment && resolveRefusedProbe(store, row.targetId, row.revision, newId, now)) {
-        if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
-        return { delay: null, renamed: true };
-      }
-      recordTerminal(store, row, outcome.code, `Refused by Tickr (${outcome.code}).`, now);
-      if (kind === "segment" && outcome.closesSegment) {
-        markClosedByServer(store, row.targetId, outcome.code === "segment_detached" ? "detached" : "finalized");
-      }
+    case "terminal":
+      return applyRefusal(store, row, outcome, newId, now);
+  }
+}
+
+type Refusal = Extract<SendOutcome, { kind: "terminal" }>;
+
+/** A refusal (PD-12 terminal) of one revision, inside the send's guarded transaction. */
+function applyRefusal(store: Store, row: OutboxRow, outcome: Refusal, newId: () => string, now: Date): Applied {
+  const kind = row.targetKind;
+  // Tickr holds this number with another content: the desired body goes under the next one.
+  if (outcome.code === REVISION_CONFLICT) {
+    supersedeConflicted(store, row);
+    return { delay: null, renamed: true, conflict: true };
+  }
+  if (kind === "segment" && outcome.code === ENTRY_LOCKED) {
+    stopLockedSegment(store, row, now);
+    return { delay: null, renamed: false };
+  }
+  if (kind === "segment" && !outcome.closesSegment) {
+    // A refused rename in place is split or given up: the segment is never left stuck (rename.ts).
+    const refusal = { revision: row.revision, code: outcome.code, validation: outcome.validation === true };
+    const resolved = resolveRefusedProbe(store, row.targetId, refusal, newId, now);
+    if (resolved === "reverted") addNotice(store, renameRefusedKind(outcome.code), now);
+    if (resolved !== null) {
       if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
-      return { delay: null, renamed: false };
+      return { delay: null, renamed: true };
+    }
+    if (outcome.code === IMMUTABLE) {
+      closeRefusedProject(store, row.targetId);
+      return { delay: null, renamed: true };
     }
   }
+  recordTerminal(store, row, outcome.code, `Refused by Tickr (${outcome.code}).`, now);
+  if (kind === "segment" && outcome.closesSegment) {
+    markClosedByServer(store, row.targetId, outcome.code === "segment_detached" ? "detached" : "finalized");
+  }
+  if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
+  return { delay: null, renamed: false };
+}
+
+/**
+ * 409 agent_revision_conflict: Tickr already holds this revision number with another content
+ * (a number is never sent with two bodies by this store, so the server's copy came from elsewhere,
+ * a lost store for instance). Nothing goes terminal and no committed body is rewritten: the
+ * target's unsent rows are dropped and its last commit no longer matches any body, so the
+ * revisions stage commits the desired body as the next number (a pending rename's probe too).
+ */
+function supersedeConflicted(store: Store, row: OutboxRow): void {
+  store.deleteOutboxFor(row.targetKind, row.targetId);
+  const last = store.getLastCommitted(row.targetKind, row.targetId);
+  if (last !== null) store.putLastCommitted({ ...last, canonicalJson: "" });
+  if (row.targetKind === "segment") supersedeProbe(store, row.targetId, row.revision);
+}
+
+/**
+ * 409 entry_locked on a segment: the period is already submitted. The segment is terminal (its
+ * rows dropped, a pending rename of it given up: no split, which would only open another entry in
+ * the same period), its session is no longer segmented (no new entries), one notice.
+ */
+function stopLockedSegment(store: Store, row: OutboxRow, now: Date): void {
+  clearPendingRename(store, row.targetId);
+  recordTerminal(store, row, ENTRY_LOCKED, "Refused by Tickr (entry_locked): the period is already submitted.", now);
+  const seg = store.getSegment(row.targetId);
+  const session = seg ? store.getSession(seg.sessionId) : null;
+  if (session !== null && session.state === ACTIVE_SESSION) store.upsertSession({ ...session, state: STOPPED_LOCKED });
+  addNotice(store, "entry_locked", now);
+}
+
+/**
+ * 422 immutable on a revision that is not a rename's probe: Tickr holds another project for the
+ * entry than the segment's own, which every revision of the segment carries (a project change is
+ * always a split, rename.ts). Sending the segment again would be refused the same way: it is
+ * closed locally (not terminal) and the session's next activity opens a new segment.
+ */
+function closeRefusedProject(store: Store, segmentId: string): void {
+  store.deleteOutboxFor("segment", segmentId);
+  markClosedByServer(store, segmentId, "immutable");
+  const seg = store.getSegment(segmentId);
+  if (seg !== null) store.upsertSegment({ ...seg, finalDiagnostic: "Tickr holds another project for this entry (immutable)." });
 }
 
 /**
@@ -372,9 +444,11 @@ export async function sendDue(store: Store, gen: number, api: AgentApi, now: () 
       }
       const outcome = await sendRow(store, api, row);
       opts.boundary?.("sent");
-      const { delay, renamed } = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));
+      const { delay, renamed, conflict } = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));
       // A rename resolved: the segment's next revisions (or the split) are due in the next pass.
       if (renamed) resolved = true;
+      // Debug-safe: a fixed point name in the debug log, never the body nor the ids.
+      if (conflict) opts.boundary?.("revision_conflict");
       if (outcome.kind === "applied") opts.boundary?.("acknowledged");
       if (outcome.kind === "retry") return { dueInMs: resolved ? 0 : delay };
       if (outcome.kind === "pause") return { dueInMs: null };

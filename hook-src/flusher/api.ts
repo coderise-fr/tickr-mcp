@@ -24,10 +24,12 @@ export const USAGE_BODY_KEYS = ["revision", "agentSessionId", "usageQuality", "u
 
 export type PauseReason = "unauthorized" | "forbidden_role" | "segments_disabled" | "clock_skew";
 
-/** The task and description of the entry Tickr answered with (read, never stored). */
+/** The task, description and tags of the entry Tickr answered with (read, never stored as such). */
 export interface AppliedEntry {
   description: string;
   taskId: string | null;
+  /** The tags the entry holds, when the answer lists them. */
+  tagIds?: string[];
 }
 
 export type SendOutcome =
@@ -36,7 +38,8 @@ export type SendOutcome =
   /** afterMs: the server's Retry-After in milliseconds, or null to back off (sender.ts). */
   | { kind: "retry"; afterMs: number | null }
   | { kind: "pause"; reason: PauseReason }
-  | { kind: "terminal"; code: string; closesSegment: boolean };
+  /** validation: a 422, the revision refused as invalid (Tickr wrote nothing of it). */
+  | { kind: "terminal"; code: string; closesSegment: boolean; validation?: true };
 
 export interface MeInfo {
   workspaceId: string;
@@ -66,6 +69,13 @@ export const USER_AGENT = `tickr-plugin/${PLUGIN_VERSION}`;
 /** detail of the 404 Tickr answers on the segment route while agent segments are switched off. */
 export const ROUTE_NOT_FOUND = "Route not found";
 
+/** 422 code (on the field projectId) of a revision that would change the entry's project. */
+export const IMMUTABLE = "immutable";
+/** 409 detail of a revision number Tickr already holds with another content. */
+export const REVISION_CONFLICT = "agent_revision_conflict";
+/** 409 detail of an entry, or a new entry, in a period already submitted. */
+export const ENTRY_LOCKED = "entry_locked";
+
 /** 409 details that are permanent for the target; the first two also close the open segment. */
 const CLOSING_CONFLICTS = new Set(["segment_detached", "segment_finalized"]);
 
@@ -94,7 +104,10 @@ export function parseRetryAfter(value: string | null, nowMs: number): number | n
 /** The parts of an RFC 7807 problem the classification reads. */
 export interface Problem {
   detail: string | null;
+  /** The codes of `errors` (a 422's field errors), in order. */
   codes: string[];
+  /** The fields of `errors`, index for index with `codes` (null when an error names none). */
+  fields?: (string | null)[];
 }
 
 async function readProblem(res: Response): Promise<Problem | null> {
@@ -106,10 +119,15 @@ async function readProblem(res: Response): Promise<Problem | null> {
   try {
     const body = (await res.json()) as { detail?: unknown; errors?: unknown } | null;
     if (typeof body !== "object" || body === null) return null;
-    const codes = Array.isArray(body.errors)
-      ? body.errors.map((e) => (e as { code?: unknown } | null)?.code).filter((c): c is string => typeof c === "string")
-      : [];
-    return { detail: typeof body.detail === "string" ? body.detail : null, codes };
+    // errors: [{ field, code, message }] (a 422). The message is never read.
+    const errors = (Array.isArray(body.errors) ? body.errors : [])
+      .map((e) => e as { field?: unknown; code?: unknown } | null)
+      .filter((e): e is { field?: unknown; code: string } => typeof e?.code === "string");
+    return {
+      detail: typeof body.detail === "string" ? body.detail : null,
+      codes: errors.map((e) => e.code),
+      fields: errors.map((e) => (typeof e.field === "string" ? e.field : null)),
+    };
   } catch {
     return null;
   }
@@ -124,6 +142,16 @@ function code(raw: string | null | undefined, fallback: string): string {
 }
 
 export type Route = "segment" | "usage" | "me";
+
+/**
+ * The code of a 422: its first field error's, except that projectId refused as immutable wins
+ * over any other error (flusher/rename.ts then splits instead of giving up).
+ */
+function validationCode(problem: Problem | null): string {
+  const codes = problem?.codes ?? [];
+  if (codes.some((c, i) => code(c, "") === IMMUTABLE && problem?.fields?.[i] === "projectId")) return IMMUTABLE;
+  return code(codes[0], "validation");
+}
 
 /** PD-12: the outcome of an answer that is not a 2xx. */
 export function classify(route: Route, status: number, problem: Problem | null, retryAfterMs: number | null): SendOutcome {
@@ -145,7 +173,7 @@ export function classify(route: Route, status: number, problem: Problem | null, 
     const c = code(detail, "conflict");
     return { kind: "terminal", code: c, closesSegment: route === "segment" && CLOSING_CONFLICTS.has(c) };
   }
-  if (status === 422) return { kind: "terminal", code: code(problem?.codes[0], "validation"), closesSegment: false };
+  if (status === 422) return { kind: "terminal", code: validationCode(problem), closesSegment: false, validation: true };
   if (status === 429 || status >= 500) return { kind: "retry", afterMs: retryAfterMs };
   // A redirect (never followed) or any other answer: transient as far as the plugin can tell.
   if (status < 400) return { kind: "retry", afterMs: retryAfterMs };
@@ -159,6 +187,7 @@ async function applied(res: Response): Promise<SendOutcome> {
     agentDetached?: unknown;
     description?: unknown;
     taskId?: unknown;
+    tagIds?: unknown;
   } | null;
   // An unreadable answer is applied all the same: it only adds the server state.
   const out: SendOutcome = {
@@ -167,9 +196,11 @@ async function applied(res: Response): Promise<SendOutcome> {
     finalized: entry?.agentFinalized === true,
     detached: entry?.agentDetached === true,
   };
-  // The entry's task and description: whether Tickr applied a rename (flusher/rename.ts).
+  // The entry's task, description and tags: whether Tickr applied a rename (flusher/rename.ts).
   if (typeof entry?.description === "string" && (entry.taskId === null || entry.taskId === undefined || typeof entry.taskId === "string")) {
-    out.entry = { description: entry.description, taskId: typeof entry.taskId === "string" ? entry.taskId : null };
+    const shown: AppliedEntry = { description: entry.description, taskId: typeof entry.taskId === "string" ? entry.taskId : null };
+    if (Array.isArray(entry.tagIds) && entry.tagIds.every((t) => typeof t === "string")) shown.tagIds = entry.tagIds as string[];
+    out.entry = shown;
   }
   return out;
 }

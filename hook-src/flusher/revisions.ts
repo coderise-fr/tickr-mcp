@@ -12,7 +12,7 @@ import type { CommittedRow, DelegatedRow, SegmentRow, Store, TargetKind } from "
 import { canonicalJson, type NormalizedMapping, parseStoredMapping } from "../mapping.js";
 import type { UsageBody } from "./api.js";
 import { guarded } from "./owner.js";
-import { probeView, readPendingRename } from "./rename.js";
+import { probeView, readPendingRename, wireMapping } from "./rename.js";
 import type { StageContext, StageRun } from "./stages.js";
 
 /** `working: true` is only built for an event at most this old (the server re-checks at 5 min). */
@@ -227,8 +227,10 @@ export const segmentRevisions: RevisionSource = (ctx) => {
       const version = ctx.store.getMapping(seg.mappingVersionId);
       mappings.set(seg.mappingVersionId, version ? parseStoredMapping(version.normalizedJson) : null);
     }
-    const mapping = mappings.get(seg.mappingVersionId);
-    if (!mapping) continue;
+    const stored = mappings.get(seg.mappingVersionId);
+    if (!stored) continue;
+    // The tags Tickr holds when it dropped some of the mapping's (rename.ts adoptTags).
+    const mapping = wireMapping(ctx.store, seg.id, stored);
     const target: RevisionTarget = { kind: "segment", id: seg.id };
     const pending = readPendingRename(ctx.store, seg.id);
     if (pending !== null) {

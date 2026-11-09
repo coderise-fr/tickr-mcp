@@ -26,7 +26,8 @@ export type StageName = (typeof STAGE_NAMES)[number];
  * Points where the flusher reports its progress (FlusherDeps.onBoundary); crash tests kill the
  * process there. run.ts reports "claimed", "fallback_committed", "stage:<name>" (after each
  * stage) and "released"; the revisions stage reports "revision_committed", the send stage "sent"
- * (an answer came back, before it is applied) and "acknowledged" (its acknowledgement committed).
+ * (an answer came back, before it is applied), "acknowledged" (its acknowledgement committed) and
+ * "revision_conflict" (a 409 agent_revision_conflict superseded: debug log only, no crash point).
  */
 export type FlusherBoundary =
   | "claimed"
@@ -35,6 +36,7 @@ export type FlusherBoundary =
   | "revision_committed"
   | "sent"
   | "acknowledged"
+  | "revision_conflict"
   | "released";
 
 export interface StageContext {

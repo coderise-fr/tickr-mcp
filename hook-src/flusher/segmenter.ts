@@ -64,6 +64,11 @@ export interface SegmenterConfig {
    * (flusher/rename.ts: a change of task and/or description only). Absent: always split.
    */
   renameInPlace?: (open: OpenSegment, mappingVersionId: number) => boolean;
+  /**
+   * Whether an event's other mapping version is taken as the open segment's own (neither split
+   * nor renamed: Tickr refused that rename of the segment, flusher/rename.ts). Absent: never.
+   */
+  keepMapping?: (open: OpenSegment, mappingVersionId: number) => boolean;
 }
 
 /** The event fields the reducer reads. */
@@ -159,7 +164,10 @@ export function applyEvent(s: SessionState, ev: SegmentEvent, cfg: SegmenterConf
       if (working && ev.mappingVersionId !== null) start(ev.localTime, ev.mappingVersionId, true);
     } else {
       const boundary = segmentBoundary(current);
-      const otherMapping = working && ev.mappingVersionId !== current.mappingVersionId;
+      const otherMapping =
+        working &&
+        ev.mappingVersionId !== current.mappingVersionId &&
+        !(ev.mappingVersionId !== null && cfg.keepMapping?.(current, ev.mappingVersionId) === true);
       if (otherMapping && wall <= boundary.at && ev.mappingVersionId !== null && cfg.renameInPlace?.(current, ev.mappingVersionId) === true) {
         // A rename in place: the segment keeps its id and takes the new mapping from this event.
         const seg: OpenSegment = {

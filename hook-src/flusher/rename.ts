@@ -20,14 +20,27 @@
 // Then (sender.ts):
 //
 //   applied with the new values   the rename stands (rename_support supported when the entry
-//                                 existed before the probe)
+//                                 existed before the probe); when only the tags differ (a tag
+//                                 deleted on Tickr is dropped, never refused) the segment adopts
+//                                 the tags Tickr holds for its next revisions (wireMapping)
 //   applied with the old values   rename_support unsupported, and the repair: the segment is put
 //                                 back as the split would have left it (its previous mapping,
 //                                 final, stopped at the change) and a new segment carries the new
 //                                 mapping from the change on, with the time, the activity and the
 //                                 tokens the segment had after the change
-//   refused (terminal)            the same repair, the capability unchanged: the change is never
-//                                 lost and the segment is never left stuck
+//   422 immutable                 the same repair (a project change is always a split anyway)
+//   other 422 (too_long,          the change is given up (revertRename): the segment goes on with
+//   invalid, required...)         the accepted mapping, its end and usage, one notice; the refused
+//                                 mapping is not tried again in the session (keepsMapping)
+//   refused otherwise (terminal)  the repair, the capability unchanged: the change is never lost
+//                                 and the segment is never left stuck (entry_locked excepted:
+//                                 sender.ts stops the session instead of opening another entry)
+//
+// Every revision carries projectId, taskId (a value or null), tagIds and description explicitly:
+// Tickr reads an absent taskId as "keep" and null as "clear", so neither is ever left out, and a
+// retry replays the committed bytes. A change of tags is renamed in place only once the instance
+// is known to apply renames (supported): only then does an answer without a sent tag mean a tag
+// deleted on Tickr rather than a change ignored.
 //
 // Revisions already committed are never rewritten: the probe the server ignored is superseded by
 // the final revision of the old segment, which carries the old task and description again.
@@ -35,7 +48,7 @@ import { snapshotUsage } from "../ledger.js";
 import { canonicalJson, type NormalizedMapping, parseStoredMapping } from "../mapping.js";
 import { sessionReads } from "../quality.js";
 import type { SegmentRow, Store } from "../store/db.js";
-import type { AppliedEntry } from "./api.js";
+import { type AppliedEntry, IMMUTABLE } from "./api.js";
 import type { SegmentBody } from "./revisions.js";
 
 export const RENAME_SUPPORT_KEY = "rename_support";
@@ -110,12 +123,53 @@ export function clearPendingRename(store: Store, segmentId: string): void {
   store.deleteMeta(PENDING_RENAME_PREFIX + segmentId);
 }
 
-/** The two mappings differ in taskId and/or description only. */
-export function contextOnlyChange(from: NormalizedMapping, to: NormalizedMapping): boolean {
+/**
+ * The two mappings differ in taskId and/or description only, or also in tagIds when `tags`. A
+ * change of workspace or project is never one: Tickr refuses a new project on an entry
+ * (422 immutable), so it is always a split, the old segment keeping its project.
+ */
+export function contextOnlyChange(from: NormalizedMapping, to: NormalizedMapping, tags = false): boolean {
   if (from.workspaceId !== to.workspaceId || from.projectId !== to.projectId) return false;
-  if (canonicalJson(from.tagIds) !== canonicalJson(to.tagIds)) return false;
-  return from.taskId !== to.taskId || from.description !== to.description;
+  const tagsDiffer = canonicalJson(from.tagIds) !== canonicalJson(to.tagIds);
+  if (tagsDiffer && !tags) return false;
+  return tagsDiffer || from.taskId !== to.taskId || from.description !== to.description;
 }
+
+/** meta key prefix (+ session id) of the last rename Tickr refused (422) in a session. */
+export const REFUSED_RENAME_PREFIX = "session_refused:";
+/** meta key prefix of the tags Tickr holds for a segment instead of those of its mapping. */
+export const ADOPTED_TAGS_PREFIX = "segment_tags:";
+
+/** Tickr refused (422) the rename from mapping version `from` to `to`: it is not asked again. */
+interface RefusedRename {
+  from: number;
+  to: number;
+}
+
+/** The tags Tickr holds for a segment whose mapping names the tags `from` (some deleted on Tickr). */
+interface AdoptedTags {
+  from: string[];
+  to: string[];
+}
+
+/**
+ * Whether an event's mapping version is taken as the open segment's own (segmenter
+ * SegmenterConfig.keepMapping): Tickr refused this very rename in the session. The segment goes
+ * on with the mapping Tickr accepted; the refused payload is never sent again.
+ */
+export function keepsMapping(store: Store, sessionId: string, fromVersionId: number, toVersionId: number): boolean {
+  const refused = readJson<RefusedRename>(store, REFUSED_RENAME_PREFIX + sessionId);
+  return refused?.from === fromVersionId && refused.to === toVersionId;
+}
+
+/** The mapping a segment's revisions carry: its mapping, with the tags Tickr holds when adopted. */
+export function wireMapping(store: Store, segmentId: string, mapping: NormalizedMapping): NormalizedMapping {
+  const adopted = readJson<AdoptedTags>(store, ADOPTED_TAGS_PREFIX + segmentId);
+  if (adopted === null || !Array.isArray(adopted.to) || canonicalJson(adopted.from) !== canonicalJson(mapping.tagIds)) return mapping;
+  return { ...mapping, tagIds: [...adopted.to] };
+}
+
+const tagSet = (tags: readonly string[]): string => canonicalJson([...new Set(tags.map((t) => t.toLowerCase()))].sort());
 
 function mappingOf(store: Store, versionId: number): NormalizedMapping | null {
   const version = store.getMapping(versionId);
@@ -131,7 +185,9 @@ export function mayRenameInPlace(store: Store, segmentId: string, fromVersionId:
   if (readPendingRename(store, segmentId) !== null) return false;
   const from = mappingOf(store, fromVersionId);
   const to = mappingOf(store, toVersionId);
-  if (from === null || to === null || !contextOnlyChange(from, to)) return false;
+  // A change of tags too, once this instance is known to apply renames: its answer then tells a
+  // tag Tickr dropped from a change Tickr ignored only with that knowledge (resolveAppliedProbe).
+  if (from === null || to === null || !contextOnlyChange(from, to, renameSupportState(store) === "supported")) return false;
   return tryInPlace(store, now);
 }
 
@@ -145,6 +201,20 @@ function holdsSent(entry: AppliedEntry, sent: Partial<SegmentBody>): boolean {
   const sentTask = typeof sent.taskId === "string" ? sent.taskId.toLowerCase() : null;
   const gotTask = entry.taskId === null ? null : entry.taskId.toLowerCase();
   return entry.description === sent.description && gotTask === sentTask;
+}
+
+/**
+ * The tags of an answer that holds the sent task and description: "same" as sent; "ignored" when
+ * the probe changed the tags and the answer still shows the previous ones (the change was not
+ * applied); else "adopt": Tickr applied the revision but holds other tags (a tag deleted on
+ * Tickr is dropped, never refused), the segment's next revisions carry the tags Tickr holds.
+ */
+function tagVerdict(entry: AppliedEntry, sent: Partial<SegmentBody>, previousTags: readonly string[] | null): "same" | "ignored" | "adopt" {
+  if (entry.tagIds === undefined || !Array.isArray(sent.tagIds)) return "same";
+  const got = tagSet(entry.tagIds);
+  if (got === tagSet(sent.tagIds)) return "same";
+  if (previousTags !== null && tagSet(previousTags) !== tagSet(sent.tagIds) && got === tagSet(previousTags)) return "ignored";
+  return "adopt";
 }
 
 /** The revision `sent` of the segment carries its pending rename (the probe). */
@@ -174,9 +244,13 @@ export function resolveAppliedProbe(store: Store, answer: AppliedAnswer, newId: 
   const { segmentId, revision, sent, entry, existed } = answer;
   const pending = readPendingRename(store, segmentId);
   if (pending === null || !isProbe(pending, revision)) return false;
-  if (entry !== undefined && holdsSent(entry, sent)) {
+  const previous = mappingOf(store, pending.fromMappingVersionId);
+  const previousTags = previous === null ? null : wireMapping(store, segmentId, previous).tagIds;
+  const tags = entry !== undefined && holdsSent(entry, sent) ? tagVerdict(entry, sent, previousTags) : "ignored";
+  if (entry !== undefined && tags !== "ignored") {
     clearPendingRename(store, segmentId);
     if (existed) writeRenameSupport(store, "supported", now);
+    if (tags === "adopt") adoptTags(store, segmentId, entry.tagIds!);
     return true;
   }
   // An answer that does not show the entry says nothing about the capability.
@@ -185,12 +259,68 @@ export function resolveAppliedProbe(store: Store, answer: AppliedAnswer, newId: 
   return true;
 }
 
-/** Tickr refused the probe of a pending rename (inside the send's guarded transaction): repair. */
-export function resolveRefusedProbe(store: Store, segmentId: string, revision: number, newId: () => string, now: Date): boolean {
+/** The segment's next revisions carry the tags Tickr holds, while its mapping names the same tags. */
+function adoptTags(store: Store, segmentId: string, held: readonly string[]): void {
+  const seg = store.getSegment(segmentId);
+  const mapping = seg ? mappingOf(store, seg.mappingVersionId) : null;
+  if (mapping === null) return;
+  store.setMeta(ADOPTED_TAGS_PREFIX + segmentId, JSON.stringify({ from: [...mapping.tagIds], to: [...held] } satisfies AdoptedTags));
+}
+
+/** How a refused probe was resolved: split at the change, or the change given up. */
+export type RefusedProbe = "repaired" | "reverted";
+
+/**
+ * Tickr refused the probe of a pending rename (inside the send's guarded transaction), or null
+ * when `revision` is not one:
+ *
+ *   422 immutable      the split (repairRename): the old segment keeps its project, final at the
+ *                      change, its end and usage sent again in its final revision (Tickr wrote
+ *                      nothing of the refused one); a new segment carries the new mapping
+ *   other 422          the change is given up (revertRename): the segment goes on with the
+ *                      mapping Tickr accepted, its end and usage included; the refused mapping is
+ *                      never sent again on it
+ *   anything else      the split, as before
+ */
+export function resolveRefusedProbe(
+  store: Store,
+  segmentId: string,
+  refusal: { revision: number; code: string; validation: boolean },
+  newId: () => string,
+  now: Date,
+): RefusedProbe | null {
   const pending = readPendingRename(store, segmentId);
-  if (pending === null || !isProbe(pending, revision)) return false;
+  if (pending === null || !isProbe(pending, refusal.revision)) return null;
+  if (refusal.validation && refusal.code !== IMMUTABLE && revertRename(store, segmentId, pending)) return "reverted";
   repairRename(store, segmentId, pending, newId(), now);
+  return "repaired";
+}
+
+/**
+ * Gives a refused rename up (inside a guarded transaction): the segment takes its previous mapping
+ * back and stays as it is (open or final, its end and activity unchanged), the refused mapping
+ * version is remembered (keepsMapping), the unsent revisions (the refused probe) are dropped: the
+ * next revision carries the accepted mapping with the up-to-date end and usage. False when the
+ * previous mapping is gone (the caller splits instead).
+ */
+export function revertRename(store: Store, segmentId: string, pending: PendingRename): boolean {
+  const seg = store.getSegment(segmentId);
+  if (seg === null || seg.serverState !== null || store.getMapping(pending.fromMappingVersionId) === null) return false;
+  clearPendingRename(store, segmentId);
+  const refused: RefusedRename = { from: pending.fromMappingVersionId, to: seg.mappingVersionId };
+  store.setMeta(REFUSED_RENAME_PREFIX + seg.sessionId, JSON.stringify(refused));
+  store.upsertSegment({ ...seg, mappingVersionId: pending.fromMappingVersionId });
+  store.deleteOutboxFor("segment", segmentId);
   return true;
+}
+
+/**
+ * Tickr holds revision `revision` of the segment with another content (409 agent_revision_conflict):
+ * a pending rename's probe is committed again under the next number (its base moves to `revision`).
+ */
+export function supersedeProbe(store: Store, segmentId: string, revision: number): void {
+  const pending = readPendingRename(store, segmentId);
+  if (pending !== null && isProbe(pending, revision)) writePendingRename(store, segmentId, { ...pending, baseRevision: revision });
 }
 
 /**
@@ -204,6 +334,8 @@ export function resolveRefusedProbe(store: Store, segmentId: string, revision: n
  */
 export function repairRename(store: Store, segmentId: string, pending: PendingRename, newId: string, now: Date): void {
   clearPendingRename(store, segmentId);
+  // The old segment sends its final revision again with the up-to-date end and usage (below): a
+  // last committed revision that Tickr refused (422) wrote nothing, it is superseded all the same.
   const seg = store.getSegment(segmentId);
   if (seg === null || seg.serverState !== null) return;
   // The previous mapping is gone (it cannot be while the rename is pending): the rename stays.

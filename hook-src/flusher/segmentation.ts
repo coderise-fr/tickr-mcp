@@ -19,7 +19,7 @@ import {
   type SegmenterConfig,
   type SessionState,
 } from "./segmenter.js";
-import { clearPendingRename, mayRenameInPlace, writePendingRename } from "./rename.js";
+import { clearPendingRename, keepsMapping, mayRenameInPlace, writePendingRename } from "./rename.js";
 import type { StageRun } from "./stages.js";
 
 /** Events read per guarded transaction. */
@@ -27,7 +27,8 @@ export const SEGMENTATION_BATCH = 500;
 /** Sessions in any other state (stopped_mismatch, unlinked: set by the workspace stage) consume events without segments. */
 export const ACTIVE_SESSION = "active";
 
-export type ServerClosedState = "detached" | "finalized";
+/** detached / finalized: told by Tickr (B8); immutable: Tickr holds another project for it (sender.ts). */
+export type ServerClosedState = "detached" | "finalized" | "immutable";
 
 function newSessionRow(sessionId: string): SessionRow {
   return { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, state: ACTIVE_SESSION, agentVersion: null, provider: null, lateEvents: 0 };
@@ -170,6 +171,10 @@ export const segmentationStage: StageRun = (ctx) => {
     idleMs,
     newId: () => uuidv7(ctx.now().getTime()),
     renameInPlace: (open, mappingVersionId) => mayRenameInPlace(ctx.store, open.id, open.mappingVersionId, mappingVersionId, ctx.now()),
+    keepMapping: (open, mappingVersionId) => {
+      const sessionId = ctx.store.getSegment(open.id)?.sessionId;
+      return sessionId !== undefined && keepsMapping(ctx.store, sessionId, open.mappingVersionId, mappingVersionId);
+    },
   };
   for (const sessionId of ctx.store.pendingEventSessions()) {
     for (;;) {

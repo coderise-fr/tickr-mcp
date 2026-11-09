@@ -873,6 +873,15 @@ export class Store {
       `DELETE FROM meta WHERE substr(key, 1, 15) = 'segment_rename:'
          AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 16))`,
     );
+    // Tags adopted from Tickr for segments gone, refused renames of sessions gone (flusher/rename.ts).
+    n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 13) = 'segment_tags:'
+         AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 14))`,
+    );
+    n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 16) = 'session_refused:'
+         AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = substr(meta.key, 17))`,
+    );
     n += this.run("DELETE FROM terminal WHERE at < ?", cutoffIso);
     n += this.run("DELETE FROM notices WHERE shown_at IS NOT NULL AND created_at < ?", cutoffIso);
     return n;
