@@ -10,9 +10,15 @@ export type NoticeKind =
   | "clock_skew"
   | "workspace_mismatch"
   | "not_project_member"
-  | "unlinked";
+  | "unlinked"
+  | "entry_locked"
+  /** A rename refused by Tickr, with the refusal's code (letters, digits and underscores only). */
+  | `${typeof RENAME_REFUSED}:${string}`;
 
-const MESSAGES: Record<NoticeKind, string> = {
+/** Notice kind prefix of a rename Tickr refused (`rename_refused:<code>`). */
+export const RENAME_REFUSED = "rename_refused";
+
+const MESSAGES: Record<Exclude<NoticeKind, `${typeof RENAME_REFUSED}:${string}`>, string> = {
   intake_paused:
     "Tickr: time tracking is paused because the local queue reached its size limit. Run /tickr:status for details.",
   unauthorized: "Tickr: the API key was refused. Check the Tickr plugin option api_key; sending is paused until then.",
@@ -24,9 +30,20 @@ const MESSAGES: Record<NoticeKind, string> = {
   not_project_member: "Tickr: you are not a member of the project named in .tickr.json. Run /tickr:link to pick another one.",
   unlinked:
     "Tickr: this repository is no longer linked on this machine, so its session stopped being tracked. Run /tickr:link to link it again.",
+  entry_locked: "Tickr says this period is already submitted; the session is not recorded further.",
 };
 
+/** The notice kind of a rename refused with this code (already reduced to [a-z0-9_] by api.ts). */
+export function renameRefusedKind(code: string): NoticeKind {
+  const clean = code.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 64);
+  return `${RENAME_REFUSED}:${clean === "" ? "validation" : clean}`;
+}
+
 export function noticeMessage(kind: string): string {
+  if (kind.startsWith(`${RENAME_REFUSED}:`)) {
+    const code = kind.slice(RENAME_REFUSED.length + 1).replace(/[^a-z0-9_]/g, "");
+    return `Tickr refused the new task or description of this session (${code}); the previous ones are kept.`;
+  }
   return (MESSAGES as Record<string, string>)[kind] ?? "Tickr: something needs your attention. Run /tickr:status for details.";
 }
 

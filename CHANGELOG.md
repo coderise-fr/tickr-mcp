@@ -1,5 +1,36 @@
 # Changelog
 
+## Plugin `tickr` 0.4.2 — 2026-11-09
+
+- Follows the segment route's rename contract of a Tickr that applies the change, and
+  still works with one that does not: which one is told by Tickr's answer alone, never
+  by a version number.
+- Every revision sends the task (or an explicit `null`) and the description; a retry
+  resends the same bytes.
+- When the answer shows the new task and description but not one of the tags (a tag
+  deleted in Tickr), the rename counts as applied and the next revisions send the tags
+  Tickr holds. Once your Tickr is known to apply renames, a change of tags is renamed in
+  place too; a change of project always starts a new entry, the previous one keeping
+  its project, end and tokens.
+- A new task or description Tickr refuses (`422`, for instance a task of another
+  project) is given up instead of being split: the session goes on with the previous
+  ones, its time and tokens included, a message says so, and the refused change is not
+  sent again in that session. A `422 immutable` on the project splits the entry
+  instead, without marking anything as failed.
+- `409 agent_revision_conflict` no longer gives up on the entry: the wanted state is
+  sent under the next revision number (a number already sent is never sent with other
+  bytes).
+- `409 entry_locked` (the period is already submitted) stops recording that session,
+  with one message, instead of opening new entries in the same period.
+- Fix: a change of task or description on an entry Tickr had refused for good (for
+  instance a task of another project at its creation) is no longer renamed in place,
+  where it would never be sent: it starts a new entry, which is sent.
+- Fix: when an entry was split at a change while the session's transcript was being
+  written, and Tickr's answer came more than a day after the session's last activity,
+  the tokens of both entries are now still rebuilt once the transcript is complete,
+  without new activity in the session.
+- Bundles MCP server 0.2.1 (unchanged).
+
 ## Plugin `tickr` 0.4.1 — 2026-11-09
 
 - The skill asks to link a session only when the model received the SessionStart

@@ -12,6 +12,7 @@ import {
   readWorkspace,
   SEND_BATCH,
   sendDue,
+  STOPPED_LOCKED,
   STOPPED_MISMATCH,
   writeWorkspace,
 } from "../../hook-src/flusher/sender.js";
@@ -246,13 +247,52 @@ describe("sendDue", () => {
     expect(t.h.store.pendingOutboxCount()).toBe(0);
   });
 
-  it.each(["segment_id_unavailable", "agent_session_mismatch", "agent_revision_conflict", "entry_locked"])("409 %s ⇒ terminal", async (code) => {
+  it.each(["segment_id_unavailable", "agent_session_mismatch", "entry_locked"])("409 %s ⇒ terminal", async (code) => {
     const t = await setup(() => problem(409, "conflict", code));
     await t.check();
     t.activity();
     await t.send();
     expect(t.h.store.listTerminal().map((r) => r.code)).toEqual([code]);
     expect(t.h.store.segmentsForSession("s-1")[0]!.final).toBe(false);
+  });
+
+  it("409 agent_revision_conflict ⇒ nothing terminal, the desired body goes under the next number, the sent bytes never rewritten", async () => {
+    const t = await setup((_req, i) => (i === 0 ? problem(409, "conflict", "agent_revision_conflict") : ok(200)));
+    await t.check();
+    t.activity();
+    const seg = t.h.store.segmentsForSession("s-1")[0]!;
+    const first = t.h.store.getLastCommitted("segment", seg.id)!.bodyJson;
+    expect(await t.send()).toEqual({ dueInMs: 0 });
+    expect(t.h.store.listTerminal()).toEqual([]);
+    expect(t.h.store.outboxFor("segment", seg.id)).toEqual([]);
+    expect(t.h.boundaries).toContain("revision_conflict");
+    void revisionsStage()(t.h.ctx);
+    await t.send();
+    const [a, b] = t.puts();
+    expect(a!.body).toBe(first);
+    const second = JSON.parse(b!.body) as Record<string, unknown>;
+    expect(second.revision).toBe(2);
+    expect({ ...second, revision: 1 }).toEqual(JSON.parse(first));
+    expect(t.h.store.pendingOutboxCount()).toBe(0);
+    expect(t.h.store.listTerminal()).toEqual([]);
+  });
+
+  it("409 entry_locked ⇒ one notice, the session is no longer segmented: no new entries", async () => {
+    const t = await setup(() => problem(409, "conflict", "entry_locked"));
+    await t.check();
+    t.activity();
+    await t.send();
+    expect(t.h.store.listNotices().map((n) => n.kind)).toEqual(["entry_locked"]);
+    expect(t.h.store.getSession("s-1")!.state).toBe(STOPPED_LOCKED);
+    // Long after the segment went idle, more activity: no new segment, nothing more sent.
+    for (let i = 1; i <= 3; i++) {
+      t.h.setNow(plus(NOW, i * 30 * MIN));
+      t.activity();
+      await t.send();
+    }
+    expect(t.h.store.segmentsForSession("s-1")).toHaveLength(1);
+    expect(t.puts()).toHaveLength(1);
+    expect(t.h.store.listNotices()).toHaveLength(1);
   });
 
   it("422 and 404 Project not found ⇒ terminal with the field code", async () => {

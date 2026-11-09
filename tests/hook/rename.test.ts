@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAgentApi } from "../../hook-src/flusher/api.js";
 import {
+  ADOPTED_TAGS_PREFIX,
   contextOnlyChange,
+  REFUSED_RENAME_PREFIX,
   PENDING_RENAME_PREFIX,
   readPendingRename,
   readRenameSupport,
@@ -16,7 +18,7 @@ import {
   writeRenameSupport,
 } from "../../hook-src/flusher/rename.js";
 import { PIPELINE, STAGE_NAMES } from "../../hook-src/flusher/stages.js";
-import { ledgerRowsFor } from "../../hook-src/ledger.js";
+import { ledgerRowsFor, SNAPSHOT_OWED_PREFIX } from "../../hook-src/ledger.js";
 import type { UsageRow } from "../../hook-src/flusher/revisions.js";
 import { type NormalizedMapping } from "../../hook-src/mapping.js";
 import { usageForRevision } from "../../hook-src/quality.js";
@@ -117,6 +119,10 @@ describe("which changes are renamed in place", () => {
     expect(contextOnlyChange(MAPPING, { ...RENAMED, tagIds: [TAG] })).toBe(false);
     expect(contextOnlyChange(MAPPING, { ...RENAMED, projectId: OTHER_PROJECT })).toBe(false);
     expect(contextOnlyChange(MAPPING, { ...RENAMED, workspaceId: "9b9b9b9b-0000-4000-8000-000000000099" })).toBe(false);
+    // Tags too once the instance is known to apply renames; a project never.
+    expect(contextOnlyChange(MAPPING, { ...MAPPING, tagIds: [TAG] }, true)).toBe(true);
+    expect(contextOnlyChange(MAPPING, { ...RENAMED, projectId: OTHER_PROJECT }, true)).toBe(false);
+    expect(contextOnlyChange(MAPPING, MAPPING, true)).toBe(false);
   });
 
   it("tried in place while the capability is unknown or supported; once unsupported, again only REPROBE_MS later", () => {
@@ -275,7 +281,7 @@ describe("a Tickr that keeps the old task and description", () => {
     expect(readRenameSupport(h.store)).toEqual({ state: "supported", at: at(121) });
   });
 
-  it("a refused rename (422 on the task) is split instead: the old segment is never left stuck", async () => {
+  it("a refused rename (422 on the task) is given up: the segment goes on with the accepted mapping, never left stuck", async () => {
     const { h, ev, pass } = setup();
     const { server } = await tickr(
       h,
@@ -287,15 +293,20 @@ describe("a Tickr that keeps the old task and description", () => {
     ev("PostToolUse", 60, RENAMED);
     ev("Stop", 90, RENAMED);
     await pass(91);
-    const [old, next] = h.store.segmentsForSession("s-1");
-    expect(old).toMatchObject({ final: true, finalReason: "mapping", stoppedAt: at(60) });
-    expect(h.store.isTerminal("segment", old!.id)).toBe(false);
-    expect(puts(server.requests).filter((p) => p.id === old!.id).at(-1)!.body).toMatchObject({ final: true, description: MAPPING.description });
-    expect(h.store.outboxFor("segment", old!.id)).toEqual([]);
-    // The new segment carries the refused task: Tickr refuses it as before, and nothing learnt.
-    expect(h.store.isTerminal("segment", next!.id)).toBe(true);
+    const segments = h.store.segmentsForSession("s-1");
+    expect(segments).toHaveLength(1);
+    const seg = segments[0]!;
+    expect(seg).toMatchObject({ final: false, stoppedAt: at(90) });
+    expect(mappingOf(h, seg.mappingVersionId)).toEqual(MAPPING);
+    expect(h.store.isTerminal("segment", seg.id)).toBe(false);
+    // The refused probe wrote nothing: the next revision carries the accepted mapping and the end.
+    expect(puts(server.requests).at(-1)!.body).toMatchObject({ description: MAPPING.description, taskId: null, stoppedAt: at(90) });
+    expect(puts(server.requests).filter((p) => p.body.taskId === TASK)).toHaveLength(1);
+    expect(h.store.outboxFor("segment", seg.id)).toEqual([]);
+    // Nothing learnt about the capability; one notice with the refusal's code.
     expect(readRenameSupport(h.store)).toBeNull();
-    expect(h.store.getMeta(PENDING_RENAME_PREFIX + old!.id)).toBeNull();
+    expect(h.store.getMeta(PENDING_RENAME_PREFIX + seg.id)).toBeNull();
+    expect(h.store.listNotices().map((n) => n.kind)).toEqual(["rename_refused:task_not_found"]);
   });
 });
 
@@ -383,14 +394,70 @@ describe("crash safety and retention", () => {
     expect(sum(lastOf(next!.id).usage)).toBe(250);
   });
 
+  it("a repair resolved after the ledger window with a partial read: the snapshots are rebuilt later without new activity", async () => {
+    const { h, transcript, ev, pass } = setup();
+    let lose = true;
+    const { server } = await tickr(
+      h,
+      () => false,
+      (req) => (lose && req.method === "PUT" && req.body.includes(TASK) ? { status: 503 } : null),
+    );
+    ev("UserPromptSubmit", 0);
+    ev("PostToolUse", 30);
+    await pass(31);
+    appendTranscript(transcript, [{ id: "msg_2", at: at(70), output: 200 }]);
+    ev("PostToolUse", 60, RENAMED);
+    ev("PostToolUse", 80, RENAMED);
+    const cut = { id: "msg_3", at: at(85), output: 50 };
+    appendPartial(transcript, cut);
+    ev("Stop", 90, RENAMED);
+    await pass(91);
+    const [seg] = h.store.segmentsForSession("s-1");
+    expect(readPendingRename(h.store, seg!.id)).not.toBeNull();
+    expect(h.store.getTranscriptOffset(transcript)).toMatchObject({ status: "partial" });
+
+    // Tickr answers more than a day later (LEDGER_WINDOW_MS), the session quiet: repair, reads partial.
+    lose = false;
+    const late = 90 + 25 * 3600;
+    await pass(late);
+    const [old, next] = h.store.segmentsForSession("s-1");
+    expect(h.store.segmentsForSession("s-1")).toHaveLength(2);
+    expect(usageForRevision(h.store, { kind: "segment", id: old!.id })).toBeUndefined();
+    expect(h.store.getMeta(`${SNAPSHOT_OWED_PREFIX}s-1`)).toBe("owed");
+
+    // The line is completed, no new event: the next pass reads the session and both get their tokens.
+    appendFileSync(transcript, line(cut).slice(40));
+    const before = server.requests.length;
+    await pass(late + 600);
+    const outputOf = (id: string) => (usageForRevision(h.store, { kind: "segment", id })?.usage ?? []).reduce((n, r) => n + r.outputTokens, 0);
+    expect(outputOf(old!.id)).toBe(100);
+    expect(outputOf(next!.id)).toBe(250);
+    const lastOf = (id: string) => puts(server.requests.slice(before)).filter((p) => p.id === id).at(-1)!.body;
+    const sum = (usage: unknown) => (usage as UsageRow[]).reduce((n, r) => n + r.outputTokens, 0);
+    expect(sum(lastOf(old!.id).usage)).toBe(100);
+    expect(sum(lastOf(next!.id).usage)).toBe(250);
+    // Nothing owed any more; retention keeps a flag only while its session exists.
+    expect(h.store.getMeta(`${SNAPSHOT_OWED_PREFIX}s-1`)).toBeNull();
+  });
+
   it("retention removes the pending rename of a segment that is gone", () => {
     const { h, ev } = setup();
     ev("UserPromptSubmit", 0);
     h.ctx.guarded(() => {
       h.store.setMeta(`${PENDING_RENAME_PREFIX}gone`, JSON.stringify({ fromMappingVersionId: 999, at: T0, lastActivityAt: T0, observedAt: T0, baseRevision: 1 }));
+      h.store.setMeta(`${ADOPTED_TAGS_PREFIX}gone`, JSON.stringify({ from: [TAG], to: [] }));
+      h.store.setMeta(`${REFUSED_RENAME_PREFIX}gone-session`, JSON.stringify({ from: 1, to: 2 }));
+      h.store.setMeta(`${SNAPSHOT_OWED_PREFIX}gone-session`, "owed");
+      h.store.setMeta(`${SNAPSHOT_OWED_PREFIX}s-1`, "owed");
+      h.store.upsertSession({ sessionId: "s-1", lastEventSeq: 0, lastEventTime: T0, lastUptimeS: null, state: "active", agentVersion: null, provider: null, lateEvents: 0 });
       h.store.deleteRetired("2026-11-04T00:00:00.000Z");
     });
+    expect(h.store.getMeta(`${SNAPSHOT_OWED_PREFIX}gone-session`)).toBeNull();
+    // Still owed while its session is kept.
+    expect(h.store.getMeta(`${SNAPSHOT_OWED_PREFIX}s-1`)).toBe("owed");
     expect(h.store.getMeta(`${PENDING_RENAME_PREFIX}gone`)).toBeNull();
+    expect(h.store.getMeta(`${ADOPTED_TAGS_PREFIX}gone`)).toBeNull();
+    expect(h.store.getMeta(`${REFUSED_RENAME_PREFIX}gone-session`)).toBeNull();
   });
 });
 

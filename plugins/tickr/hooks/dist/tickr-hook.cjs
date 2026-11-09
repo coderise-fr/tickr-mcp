@@ -357,12 +357,15 @@ function agentHeaderValue(info) {
 }
 
 // hook-src/version.ts
-var PLUGIN_VERSION = "0.4.1";
+var PLUGIN_VERSION = "0.4.2";
 
 // hook-src/flusher/api.ts
 var REQUEST_TIMEOUT_MS = 3e3;
 var USER_AGENT = `tickr-plugin/${PLUGIN_VERSION}`;
 var ROUTE_NOT_FOUND = "Route not found";
+var IMMUTABLE = "immutable";
+var REVISION_CONFLICT = "agent_revision_conflict";
+var ENTRY_LOCKED = "entry_locked";
 var CLOSING_CONFLICTS = /* @__PURE__ */ new Set(["segment_detached", "segment_finalized"]);
 function parseRetryAfter(value, nowMs) {
   if (value === null || value.trim() === "") return null;
@@ -381,8 +384,12 @@ async function readProblem(res) {
   try {
     const body = await res.json();
     if (typeof body !== "object" || body === null) return null;
-    const codes = Array.isArray(body.errors) ? body.errors.map((e) => e?.code).filter((c) => typeof c === "string") : [];
-    return { detail: typeof body.detail === "string" ? body.detail : null, codes };
+    const errors = (Array.isArray(body.errors) ? body.errors : []).map((e) => e).filter((e) => typeof e?.code === "string");
+    return {
+      detail: typeof body.detail === "string" ? body.detail : null,
+      codes: errors.map((e) => e.code),
+      fields: errors.map((e) => typeof e.field === "string" ? e.field : null)
+    };
   } catch {
     return null;
   }
@@ -392,6 +399,11 @@ function code(raw, fallback) {
   const parts = raw.toLowerCase().split(/[^a-z0-9]/).filter((part) => part !== "");
   const clean2 = parts.join("_").slice(0, 64);
   return clean2 === "" ? fallback : clean2;
+}
+function validationCode(problem) {
+  const codes = problem?.codes ?? [];
+  if (codes.some((c, i) => code(c, "") === IMMUTABLE && problem?.fields?.[i] === "projectId")) return IMMUTABLE;
+  return code(codes[0], "validation");
 }
 function classify(route, status, problem, retryAfterMs) {
   const detail = problem?.detail ?? null;
@@ -409,7 +421,7 @@ function classify(route, status, problem, retryAfterMs) {
     const c = code(detail, "conflict");
     return { kind: "terminal", code: c, closesSegment: route === "segment" && CLOSING_CONFLICTS.has(c) };
   }
-  if (status === 422) return { kind: "terminal", code: code(problem?.codes[0], "validation"), closesSegment: false };
+  if (status === 422) return { kind: "terminal", code: validationCode(problem), closesSegment: false, validation: true };
   if (status === 429 || status >= 500) return { kind: "retry", afterMs: retryAfterMs };
   if (status < 400) return { kind: "retry", afterMs: retryAfterMs };
   return { kind: "terminal", code: `http_${status}`, closesSegment: false };
@@ -423,7 +435,9 @@ async function applied(res) {
     detached: entry?.agentDetached === true
   };
   if (typeof entry?.description === "string" && (entry.taskId === null || entry.taskId === void 0 || typeof entry.taskId === "string")) {
-    out.entry = { description: entry.description, taskId: typeof entry.taskId === "string" ? entry.taskId : null };
+    const shown = { description: entry.description, taskId: typeof entry.taskId === "string" ? entry.taskId : null };
+    if (Array.isArray(entry.tagIds) && entry.tagIds.every((t) => typeof t === "string")) shown.tagIds = entry.tagIds;
+    out.entry = shown;
   }
   return out;
 }
@@ -1333,7 +1347,8 @@ var Store = class {
    * given) final but whose usage may still change: quality not complete yet, or tokens not folded.
    */
   segmentsForRevision(sinceIso) {
-    const recheck = sinceIso === void 0 ? "" : `OR (EXISTS (SELECT 1 FROM sessions x WHERE x.session_id = s.session_id AND x.last_event_time >= ?)
+    const recheck = sinceIso === void 0 ? "" : `OR ((EXISTS (SELECT 1 FROM sessions x WHERE x.session_id = s.session_id AND x.last_event_time >= ?)
+               OR EXISTS (SELECT 1 FROM meta m WHERE m.key = 'snapshot_owed:' || s.session_id))
              AND (json_extract(c.body_json, '$.usageQuality') IS NOT 'complete'
                OR EXISTS (SELECT 1 FROM ledger l WHERE l.recipient_kind = 'segment' AND l.recipient_id = s.id AND l.folded = 0)))`;
     return this.db.prepare(
@@ -1511,6 +1526,18 @@ var Store = class {
     n += this.run(
       `DELETE FROM meta WHERE substr(key, 1, 15) = 'segment_rename:'
          AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 16))`
+    );
+    n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 13) = 'segment_tags:'
+         AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 14))`
+    );
+    n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 14) = 'snapshot_owed:'
+         AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = substr(meta.key, 15))`
+    );
+    n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 16) = 'session_refused:'
+         AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = substr(meta.key, 17))`
     );
     n += this.run("DELETE FROM terminal WHERE at < ?", cutoffIso);
     n += this.run("DELETE FROM notices WHERE shown_at IS NOT NULL AND created_at < ?", cutoffIso);
@@ -1758,6 +1785,7 @@ function findMapping(cwd) {
 }
 
 // hook-src/notices.ts
+var RENAME_REFUSED = "rename_refused";
 var MESSAGES = {
   intake_paused: "Tickr: time tracking is paused because the local queue reached its size limit. Run /tickr:status for details.",
   unauthorized: "Tickr: the API key was refused. Check the Tickr plugin option api_key; sending is paused until then.",
@@ -1766,9 +1794,18 @@ var MESSAGES = {
   clock_skew: "Tickr: this computer's clock is ahead of Tickr. Sending is paused until the clocks agree.",
   workspace_mismatch: "Tickr: .tickr.json names another workspace than the API key's. This session is not tracked; run /tickr:link.",
   not_project_member: "Tickr: you are not a member of the project named in .tickr.json. Run /tickr:link to pick another one.",
-  unlinked: "Tickr: this repository is no longer linked on this machine, so its session stopped being tracked. Run /tickr:link to link it again."
+  unlinked: "Tickr: this repository is no longer linked on this machine, so its session stopped being tracked. Run /tickr:link to link it again.",
+  entry_locked: "Tickr says this period is already submitted; the session is not recorded further."
 };
+function renameRefusedKind(code2) {
+  const clean2 = code2.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 64);
+  return `${RENAME_REFUSED}:${clean2 === "" ? "validation" : clean2}`;
+}
 function noticeMessage(kind) {
+  if (kind.startsWith(`${RENAME_REFUSED}:`)) {
+    const code2 = kind.slice(RENAME_REFUSED.length + 1).replace(/[^a-z0-9_]/g, "");
+    return `Tickr refused the new task or description of this session (${code2}); the previous ones are kept.`;
+  }
   return MESSAGES[kind] ?? "Tickr: something needs your attention. Run /tickr:status for details.";
 }
 function collectionInterruptedMessage(gaps) {
@@ -2006,7 +2043,7 @@ function applyEvent(s, ev, cfg) {
       if (working && ev.mappingVersionId !== null) start(ev.localTime, ev.mappingVersionId, true);
     } else {
       const boundary = segmentBoundary(current);
-      const otherMapping = working && ev.mappingVersionId !== current.mappingVersionId;
+      const otherMapping = working && ev.mappingVersionId !== current.mappingVersionId && !(ev.mappingVersionId !== null && cfg.keepMapping?.(current, ev.mappingVersionId) === true);
       if (otherMapping && wall <= boundary.at && ev.mappingVersionId !== null && cfg.renameInPlace?.(current, ev.mappingVersionId) === true) {
         const seg = {
           ...current,
@@ -2165,7 +2202,11 @@ var segmentationStage = (ctx) => {
   const cfg = {
     idleMs,
     newId: () => uuidv7(ctx.now().getTime()),
-    renameInPlace: (open, mappingVersionId) => mayRenameInPlace(ctx.store, open.id, open.mappingVersionId, mappingVersionId, ctx.now())
+    renameInPlace: (open, mappingVersionId) => mayRenameInPlace(ctx.store, open.id, open.mappingVersionId, mappingVersionId, ctx.now()),
+    keepMapping: (open, mappingVersionId) => {
+      const sessionId = ctx.store.getSegment(open.id)?.sessionId;
+      return sessionId !== void 0 && keepsMapping(ctx.store, sessionId, open.mappingVersionId, mappingVersionId);
+    }
   };
   for (const sessionId of ctx.store.pendingEventSessions()) {
     for (; ; ) {
@@ -2546,10 +2587,18 @@ function foldSettled(store) {
   }
   return folded;
 }
+var SNAPSHOT_OWED_PREFIX = "snapshot_owed:";
+var SNAPSHOT_OWED = "owed";
+var SNAPSHOT_REBUILT = "rebuilt";
+var SNAPSHOT_OWED_SQL = `EXISTS (SELECT 1 FROM meta m WHERE m.key = '${SNAPSHOT_OWED_PREFIX}' || s.session_id)`;
+function clearRebuiltSnapshots(store) {
+  store.db.prepare(`DELETE FROM meta WHERE substr(key, 1, ${SNAPSHOT_OWED_PREFIX.length}) = ? AND value = ?`).run(SNAPSHOT_OWED_PREFIX, SNAPSHOT_REBUILT);
+}
 function sessionsToRead(store, sinceIso) {
   return store.db.prepare(
     `SELECT s.session_id FROM sessions s WHERE s.state = ? AND (s.last_event_time >= ?
-           OR EXISTS (SELECT 1 FROM segments g WHERE g.session_id = s.session_id AND g.final = 0))
+           OR EXISTS (SELECT 1 FROM segments g WHERE g.session_id = s.session_id AND g.final = 0)
+           OR ${SNAPSHOT_OWED_SQL})
          ORDER BY s.session_id`
   ).all(ACTIVE_SESSION, sinceIso).map((r) => str2(r.session_id));
 }
@@ -2712,7 +2761,10 @@ var ledgerStage = (ctx) => {
     const reads = readSession(ctx.store, sessionId, now);
     ctx.guarded(() => {
       recordSession(ctx.store, sessionId, reads);
-      if (readsComplete(reads)) snapshotSession(ctx.store, sessionId, now.toISOString());
+      if (readsComplete(reads)) {
+        snapshotSession(ctx.store, sessionId, now.toISOString());
+        if (ctx.store.getMeta(SNAPSHOT_OWED_PREFIX + sessionId) === SNAPSHOT_OWED) ctx.store.setMeta(SNAPSHOT_OWED_PREFIX + sessionId, SNAPSHOT_REBUILT);
+      }
     });
   }
   ctx.guarded(() => foldSettled(ctx.store));
@@ -2862,6 +2914,9 @@ function readRenameSupport(store) {
   const v = readJson(store, RENAME_SUPPORT_KEY);
   return v !== null && (v.state === "supported" || v.state === "unsupported") && typeof v.at === "string" ? v : null;
 }
+function renameSupportState(store) {
+  return readRenameSupport(store)?.state ?? "unknown";
+}
 function writeRenameSupport(store, state, now) {
   store.setMeta(RENAME_SUPPORT_KEY, JSON.stringify({ state, at: now.toISOString() }));
 }
@@ -2882,20 +2937,34 @@ function writePendingRename(store, segmentId, pending) {
 function clearPendingRename(store, segmentId) {
   store.deleteMeta(PENDING_RENAME_PREFIX + segmentId);
 }
-function contextOnlyChange(from, to) {
+function contextOnlyChange(from, to, tags = false) {
   if (from.workspaceId !== to.workspaceId || from.projectId !== to.projectId) return false;
-  if (canonicalJson(from.tagIds) !== canonicalJson(to.tagIds)) return false;
-  return from.taskId !== to.taskId || from.description !== to.description;
+  const tagsDiffer = canonicalJson(from.tagIds) !== canonicalJson(to.tagIds);
+  if (tagsDiffer && !tags) return false;
+  return tagsDiffer || from.taskId !== to.taskId || from.description !== to.description;
 }
+var REFUSED_RENAME_PREFIX = "session_refused:";
+var ADOPTED_TAGS_PREFIX = "segment_tags:";
+function keepsMapping(store, sessionId, fromVersionId, toVersionId) {
+  const refused = readJson(store, REFUSED_RENAME_PREFIX + sessionId);
+  return refused?.from === fromVersionId && refused.to === toVersionId;
+}
+function wireMapping(store, segmentId, mapping) {
+  const adopted = readJson(store, ADOPTED_TAGS_PREFIX + segmentId);
+  if (adopted === null || !Array.isArray(adopted.to) || canonicalJson(adopted.from) !== canonicalJson(mapping.tagIds)) return mapping;
+  return { ...mapping, tagIds: [...adopted.to] };
+}
+var tagSet = (tags) => canonicalJson([...new Set(tags.map((t) => t.toLowerCase()))].sort());
 function mappingOf(store, versionId) {
   const version = store.getMapping(versionId);
   return version ? parseStoredMapping(version.normalizedJson) : null;
 }
 function mayRenameInPlace(store, segmentId, fromVersionId, toVersionId, now) {
   if (readPendingRename(store, segmentId) !== null) return false;
+  if (store.isTerminal("segment", segmentId)) return false;
   const from = mappingOf(store, fromVersionId);
   const to = mappingOf(store, toVersionId);
-  if (from === null || to === null || !contextOnlyChange(from, to)) return false;
+  if (from === null || to === null || !contextOnlyChange(from, to, renameSupportState(store) === "supported")) return false;
   return tryInPlace(store, now);
 }
 function probeView(seg, pending) {
@@ -2906,6 +2975,13 @@ function holdsSent(entry, sent) {
   const gotTask = entry.taskId === null ? null : entry.taskId.toLowerCase();
   return entry.description === sent.description && gotTask === sentTask;
 }
+function tagVerdict(entry, sent, previousTags) {
+  if (entry.tagIds === void 0 || !Array.isArray(sent.tagIds)) return "same";
+  const got = tagSet(entry.tagIds);
+  if (got === tagSet(sent.tagIds)) return "same";
+  if (previousTags !== null && tagSet(previousTags) !== tagSet(sent.tagIds) && got === tagSet(previousTags)) return "ignored";
+  return "adopt";
+}
 function isProbe(pending, revision) {
   return revision > pending.baseRevision;
 }
@@ -2913,20 +2989,45 @@ function resolveAppliedProbe(store, answer, newId, now) {
   const { segmentId, revision, sent, entry, existed } = answer;
   const pending = readPendingRename(store, segmentId);
   if (pending === null || !isProbe(pending, revision)) return false;
-  if (entry !== void 0 && holdsSent(entry, sent)) {
+  const previous = mappingOf(store, pending.fromMappingVersionId);
+  const previousTags = previous === null ? null : wireMapping(store, segmentId, previous).tagIds;
+  const tags = entry !== void 0 && holdsSent(entry, sent) ? tagVerdict(entry, sent, previousTags) : "ignored";
+  if (entry !== void 0 && tags !== "ignored") {
     clearPendingRename(store, segmentId);
     if (existed) writeRenameSupport(store, "supported", now);
+    if (tags === "adopt") adoptTags(store, segmentId, entry.tagIds);
     return true;
   }
   if (entry !== void 0 && existed) writeRenameSupport(store, "unsupported", now);
   repairRename(store, segmentId, pending, newId(), now);
   return true;
 }
-function resolveRefusedProbe(store, segmentId, revision, newId, now) {
+function adoptTags(store, segmentId, held) {
+  const seg = store.getSegment(segmentId);
+  const mapping = seg ? mappingOf(store, seg.mappingVersionId) : null;
+  if (mapping === null) return;
+  store.setMeta(ADOPTED_TAGS_PREFIX + segmentId, JSON.stringify({ from: [...mapping.tagIds], to: [...held] }));
+}
+function resolveRefusedProbe(store, segmentId, refusal, newId, now) {
   const pending = readPendingRename(store, segmentId);
-  if (pending === null || !isProbe(pending, revision)) return false;
+  if (pending === null || !isProbe(pending, refusal.revision)) return null;
+  if (refusal.validation && refusal.code !== IMMUTABLE && revertRename(store, segmentId, pending)) return "reverted";
   repairRename(store, segmentId, pending, newId(), now);
+  return "repaired";
+}
+function revertRename(store, segmentId, pending) {
+  const seg = store.getSegment(segmentId);
+  if (seg === null || seg.serverState !== null || store.getMapping(pending.fromMappingVersionId) === null) return false;
+  clearPendingRename(store, segmentId);
+  const refused = { from: pending.fromMappingVersionId, to: seg.mappingVersionId };
+  store.setMeta(REFUSED_RENAME_PREFIX + seg.sessionId, JSON.stringify(refused));
+  store.upsertSegment({ ...seg, mappingVersionId: pending.fromMappingVersionId });
+  store.deleteOutboxFor("segment", segmentId);
   return true;
+}
+function supersedeProbe(store, segmentId, revision) {
+  const pending = readPendingRename(store, segmentId);
+  if (pending !== null && isProbe(pending, revision)) writePendingRename(store, segmentId, { ...pending, baseRevision: revision });
 }
 function repairRename(store, segmentId, pending, newId, now) {
   clearPendingRename(store, segmentId);
@@ -2982,7 +3083,11 @@ function repairRename(store, segmentId, pending, newId, now) {
   } else {
     store.deleteUsageSnapshot("segment", segmentId);
     store.deleteUsageSnapshot("segment", newId);
+    owe(store, seg.sessionId);
   }
+}
+function owe(store, sessionId) {
+  store.setMeta(SNAPSHOT_OWED_PREFIX + sessionId, SNAPSHOT_OWED);
 }
 
 // hook-src/flusher/sender.ts
@@ -2994,6 +3099,7 @@ var AGENT_VERSION_GRACE_MS = 2 * 6e4;
 var SEND_BATCH = 50;
 var STOPPED_MISMATCH = "stopped_mismatch";
 var UNLINKED = "unlinked";
+var STOPPED_LOCKED = "stopped_locked";
 var PAUSE_KEY = "send_pause";
 var WORKSPACE_KEY = "workspace";
 function readJson2(store, key) {
@@ -3178,19 +3284,59 @@ function applyOutcome(store, row, outcome, now, random) {
     case "pause":
       pauseSending(store, outcome.reason, now);
       return { delay: null, renamed: false };
-    case "terminal": {
-      if (kind === "segment" && !outcome.closesSegment && resolveRefusedProbe(store, row.targetId, row.revision, newId, now)) {
-        if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
-        return { delay: null, renamed: true };
-      }
-      recordTerminal(store, row, outcome.code, `Refused by Tickr (${outcome.code}).`, now);
-      if (kind === "segment" && outcome.closesSegment) {
-        markClosedByServer(store, row.targetId, outcome.code === "segment_detached" ? "detached" : "finalized");
-      }
+    case "terminal":
+      return applyRefusal(store, row, outcome, newId, now);
+  }
+}
+function applyRefusal(store, row, outcome, newId, now) {
+  const kind = row.targetKind;
+  if (outcome.code === REVISION_CONFLICT) {
+    supersedeConflicted(store, row);
+    return { delay: null, renamed: true, conflict: true };
+  }
+  if (kind === "segment" && outcome.code === ENTRY_LOCKED) {
+    stopLockedSegment(store, row, now);
+    return { delay: null, renamed: false };
+  }
+  if (kind === "segment" && !outcome.closesSegment) {
+    const refusal = { revision: row.revision, code: outcome.code, validation: outcome.validation === true };
+    const resolved = resolveRefusedProbe(store, row.targetId, refusal, newId, now);
+    if (resolved === "reverted") addNotice(store, renameRefusedKind(outcome.code), now);
+    if (resolved !== null) {
       if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
-      return { delay: null, renamed: false };
+      return { delay: null, renamed: true };
+    }
+    if (outcome.code === IMMUTABLE) {
+      closeRefusedProject(store, row.targetId);
+      return { delay: null, renamed: true };
     }
   }
+  recordTerminal(store, row, outcome.code, `Refused by Tickr (${outcome.code}).`, now);
+  if (kind === "segment" && outcome.closesSegment) {
+    markClosedByServer(store, row.targetId, outcome.code === "segment_detached" ? "detached" : "finalized");
+  }
+  if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
+  return { delay: null, renamed: false };
+}
+function supersedeConflicted(store, row) {
+  store.deleteOutboxFor(row.targetKind, row.targetId);
+  const last = store.getLastCommitted(row.targetKind, row.targetId);
+  if (last !== null) store.putLastCommitted({ ...last, canonicalJson: "" });
+  if (row.targetKind === "segment") supersedeProbe(store, row.targetId, row.revision);
+}
+function stopLockedSegment(store, row, now) {
+  clearPendingRename(store, row.targetId);
+  recordTerminal(store, row, ENTRY_LOCKED, "Refused by Tickr (entry_locked): the period is already submitted.", now);
+  const seg = store.getSegment(row.targetId);
+  const session = seg ? store.getSession(seg.sessionId) : null;
+  if (session !== null && session.state === ACTIVE_SESSION) store.upsertSession({ ...session, state: STOPPED_LOCKED });
+  addNotice(store, "entry_locked", now);
+}
+function closeRefusedProject(store, segmentId) {
+  store.deleteOutboxFor("segment", segmentId);
+  markClosedByServer(store, segmentId, "immutable");
+  const seg = store.getSegment(segmentId);
+  if (seg !== null) store.upsertSegment({ ...seg, finalDiagnostic: "Tickr holds another project for this entry (immutable)." });
 }
 async function sendDue(store, gen, api, now, budgetMs, opts = {}) {
   const endAt = performance.now() + budgetMs;
@@ -3214,8 +3360,9 @@ async function sendDue(store, gen, api, now, budgetMs, opts = {}) {
       }
       const outcome = await sendRow(store, api, row);
       opts.boundary?.("sent");
-      const { delay, renamed } = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));
+      const { delay, renamed, conflict } = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));
       if (renamed) resolved = true;
+      if (conflict) opts.boundary?.("revision_conflict");
       if (outcome.kind === "applied") opts.boundary?.("acknowledged");
       if (outcome.kind === "retry") return { dueInMs: resolved ? 0 : delay };
       if (outcome.kind === "pause") return { dueInMs: null };
@@ -3605,8 +3752,9 @@ var segmentRevisions = (ctx) => {
       const version = ctx.store.getMapping(seg.mappingVersionId);
       mappings.set(seg.mappingVersionId, version ? parseStoredMapping(version.normalizedJson) : null);
     }
-    const mapping = mappings.get(seg.mappingVersionId);
-    if (!mapping) continue;
+    const stored = mappings.get(seg.mappingVersionId);
+    if (!stored) continue;
+    const mapping = wireMapping(ctx.store, seg.id, stored);
     const target = { kind: "segment", id: seg.id };
     const pending = readPendingRename(ctx.store, seg.id);
     if (pending !== null) {
@@ -3672,6 +3820,7 @@ function revisionsStage(sources = REVISION_SOURCES) {
         if (commitIfChanged(ctx.store, ctx.generation, target, body, ctx.now()) !== null) ctx.boundary("revision_committed");
       }
     }
+    ctx.guarded(() => clearRebuiltSnapshots(ctx.store));
     return due === null ? {} : { dueInMs: Math.max(0, due) };
   };
 }
@@ -3793,7 +3942,7 @@ var DEBUG_FILE = "debug.log";
 var DEBUG_MAX_BYTES = 1e6;
 var STEPS = /* @__PURE__ */ new Set(["start", "claimed", "pass", "stage", "boundary", "handover", "end"]);
 var OUTCOMES = /* @__PURE__ */ new Set(["done", "not_owner", "newer_schema", "lost_ownership"]);
-var BOUNDARY = /^(claimed|fallback_committed|revision_committed|sent|acknowledged|released|stage:[a-z]+)$/;
+var BOUNDARY = /^(claimed|fallback_committed|revision_committed|sent|acknowledged|revision_conflict|released|stage:[a-z]+)$/;
 var NUMBERS = ["generation", "pass", "dueInMs", "ms", "pendingRevisions", "terminalItems"];
 function debugLine(rec, at) {
   const out = { at: at.toISOString() };

@@ -6,13 +6,13 @@
 // byte) and the target's last_committed row (kept after the acknowledgement, for the next
 // comparison) are written in one guarded transaction, before any send.
 import { buildTurns, delegatedByTurn, type Turn } from "../attribution.js";
-import { LEDGER_WINDOW_MS } from "../ledger.js";
+import { clearRebuiltSnapshots, LEDGER_WINDOW_MS } from "../ledger.js";
 import { delegatedQuality, finalSegmentQuality, type FinalQuality, nextQuality, type SessionContext, sessionContext, usageForRevision } from "../quality.js";
 import type { CommittedRow, DelegatedRow, SegmentRow, Store, TargetKind } from "../store/db.js";
 import { canonicalJson, type NormalizedMapping, parseStoredMapping } from "../mapping.js";
 import type { UsageBody } from "./api.js";
 import { guarded } from "./owner.js";
-import { probeView, readPendingRename } from "./rename.js";
+import { probeView, readPendingRename, wireMapping } from "./rename.js";
 import type { StageContext, StageRun } from "./stages.js";
 
 /** `working: true` is only built for an event at most this old (the server re-checks at 5 min). */
@@ -227,8 +227,10 @@ export const segmentRevisions: RevisionSource = (ctx) => {
       const version = ctx.store.getMapping(seg.mappingVersionId);
       mappings.set(seg.mappingVersionId, version ? parseStoredMapping(version.normalizedJson) : null);
     }
-    const mapping = mappings.get(seg.mappingVersionId);
-    if (!mapping) continue;
+    const stored = mappings.get(seg.mappingVersionId);
+    if (!stored) continue;
+    // The tags Tickr holds when it dropped some of the mapping's (rename.ts adoptTags).
+    const mapping = wireMapping(ctx.store, seg.id, stored);
     const target: RevisionTarget = { kind: "segment", id: seg.id };
     const pending = readPendingRename(ctx.store, seg.id);
     if (pending !== null) {
@@ -327,6 +329,8 @@ export function revisionsStage(sources: readonly RevisionSource[] = REVISION_SOU
         if (commitIfChanged(ctx.store, ctx.generation, target, body, ctx.now()) !== null) ctx.boundary("revision_committed");
       }
     }
+    // Every segment of a session whose snapshots were rebuilt was evaluated: nothing owed now.
+    ctx.guarded(() => clearRebuiltSnapshots(ctx.store));
     return due === null ? {} : { dueInMs: Math.max(0, due) };
   };
 }

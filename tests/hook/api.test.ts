@@ -143,10 +143,45 @@ describe("classification (PD-12)", () => {
     [
       "422 invalid_segment_bounds",
       problem(422, "validation", "Validation failed", { errors: [{ field: "stoppedAt", code: "invalid_segment_bounds", message: "m" }] }),
-      { kind: "terminal", code: "invalid_segment_bounds", closesSegment: false },
+      { kind: "terminal", code: "invalid_segment_bounds", closesSegment: false, validation: true },
     ],
-    ["422 without errors", problem(422, "validation"), { kind: "terminal", code: "validation", closesSegment: false }],
+    ["422 without errors", problem(422, "validation"), { kind: "terminal", code: "validation", closesSegment: false, validation: true }],
+    // The backend serialises field errors as errors: [{ field, code, message }]; projectId immutable wins.
+    [
+      "422 projectId immutable",
+      problem(422, "validation", "Validation failed", { errors: [{ field: "projectId", code: "immutable", message: "projectId cannot be changed" }] }),
+      { kind: "terminal", code: "immutable", closesSegment: false, validation: true },
+    ],
+    [
+      "422 projectId immutable after another field error",
+      problem(422, "validation", "Validation failed", {
+        errors: [
+          { field: "description", code: "too_long", message: "m" },
+          { field: "projectId", code: "immutable", message: "m" },
+        ],
+      }),
+      { kind: "terminal", code: "immutable", closesSegment: false, validation: true },
+    ],
+    [
+      "422 taskId invalid",
+      problem(422, "validation", "Validation failed", { errors: [{ field: "taskId", code: "invalid", message: "m" }] }),
+      { kind: "terminal", code: "invalid", closesSegment: false, validation: true },
+    ],
   ];
+
+  it("a 200 lists the entry's task, description and tags as Tickr holds them", async () => {
+    const tag = "5c1e8a2b-9f3d-4e6a-8b0c-7d2f4a6c8e06";
+    const { api } = await serve(() => json(200, { ...entry(), description: "Mobile app", taskId: null, taskName: null, tagIds: [tag] }));
+    expect(await api.putSegment(SEGMENT, BODY, "claude-code/unknown")).toMatchObject({ entry: { description: "Mobile app", taskId: null, tagIds: [tag] } });
+    const { api: noTags } = await serve(() => json(200, { ...entry(), description: "Mobile app", taskId: null }));
+    const out = await noTags.putSegment(SEGMENT, BODY, "claude-code/unknown");
+    expect(out.kind === "applied" && out.entry).toEqual({ description: "Mobile app", taskId: null });
+  });
+
+  it("classify reads the field of each error: only projectId immutable is the project refusal", () => {
+    expect(classify("segment", 422, { detail: null, codes: ["too_long", "immutable"], fields: ["description", "projectId"] }, null)).toMatchObject({ code: "immutable" });
+    expect(classify("segment", 422, { detail: null, codes: ["too_long", "immutable"], fields: ["description", "tagIds"] }, null)).toMatchObject({ code: "too_long" });
+  });
 
   it.each(cases)("segment route: %s", async (_name, reply, expected) => {
     const { api } = await serve(() => reply);

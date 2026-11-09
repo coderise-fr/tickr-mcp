@@ -67,7 +67,7 @@ export interface DebugRecord {
 
 const STEPS = new Set<DebugRecord["step"]>(["start", "claimed", "pass", "stage", "boundary", "handover", "end"]);
 const OUTCOMES = new Set<FlushOutcome>(["done", "not_owner", "newer_schema", "lost_ownership"]);
-const BOUNDARY = /^(claimed|fallback_committed|revision_committed|sent|acknowledged|released|stage:[a-z]+)$/;
+const BOUNDARY = /^(claimed|fallback_committed|revision_committed|sent|acknowledged|revision_conflict|released|stage:[a-z]+)$/;
 const NUMBERS = ["generation", "pass", "dueInMs", "ms", "pendingRevisions", "terminalItems"] as const;
 
 /** The JSON line of a record: allow-listed fields only, anything unexpected dropped. */

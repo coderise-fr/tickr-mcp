@@ -187,7 +187,10 @@ of the project or that its purpose changed. A description is plain text of at mo
 change the task or the description, the entry is renamed in place when your Tickr
 supports it; otherwise a new Tickr entry starts (the previous one ends there). The
 plugin learns which from Tickr's answers and asks again a day later, so an upgraded
-Tickr is picked up. Set them early, once the work is clear, and avoid changing them
+Tickr is picked up. Renaming an entry in place needs a Tickr that applies the change;
+otherwise the plugin falls back to starting a new entry, automatically. When Tickr
+refuses the new task or description, the session keeps the previous ones and a message
+says so; a change of project always starts a new entry. Set them early, once the work is clear, and avoid changing them
 for small shifts. The
 choice is kept on your machine, in one small file per session in the plugin data
 directory (removed after 90 days); different sessions in the same repository keep
