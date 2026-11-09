@@ -6,7 +6,7 @@ allowed-tools: Bash(node --no-warnings "${CLAUDE_PLUGIN_ROOT}/hooks/dist/tickr-h
 
 # Tickr description of this session
 
-Set the short description this Claude Code session is recorded under in Tickr, from now on; the task stays as it is. It is a label of the overall work that the user confirms, not conversation content. The `set-context` command below is NOT pre-authorised: Claude Code asks the user to allow it, and that is intended.
+Set the short description this Claude Code session is recorded under in Tickr, from now on; the task stays as it is. It is a label of the overall work that the user confirms, not conversation content. A change starts a new Tickr entry (the current one ends there), because Tickr does not change the task or description of an entry that already exists. The `set-context` command below is NOT pre-authorised: Claude Code asks the user to allow it, and that is intended.
 
 ## What the plugin records for this session
 
@@ -20,7 +20,7 @@ The JSON line above comes from the plugin's read-only `context-info` command (a 
 
 2. **Propose a description.** Use "$ARGUMENTS" when given, otherwise describe the overall work of this session so far: plain text of at most 10 words and 100 characters (numbers do not count as words), without `"`, `` ` ``, `$` or `\`, for example `Implementation of the mobile app UI` or `Fix tickets 1 2 3 4 5 6 7 110 210`. Never quote prompts, answers, code, file or branch names or paths in it. When the given text breaks these rules, propose a shorter one.
 
-3. **Confirm.** In manual mode (the default), ask the user to confirm or edit the description, and wait for the answer. In automatic mode (the Tickr session context note given at the start of the session says `Mode: automatic`), do not ask in chat: go on with step 4.
+3. **Confirm.** In manual mode (the default), ask the user to confirm or edit the description, and wait for the answer. Say in one short sentence that the change starts a new Tickr entry (the current one ends there), so it is best made once, when the work is clear, and not for small shifts. In automatic mode (the Tickr session context note given at the start of the session says `Mode: automatic`), do not ask in chat: go on with step 4.
 
 4. **Apply.** Run `node --no-warnings "${CLAUDE_PLUGIN_ROOT}/hooks/dist/tickr-hook.cjs" set-context "${CLAUDE_PLUGIN_DATA}" "${CLAUDE_SESSION_ID}" "<project_id>" --description "<description>"` with the `project_id` printed above (no `--task`: the task is kept). If the user declines the command, nothing is changed; say so.
 

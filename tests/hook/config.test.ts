@@ -15,12 +15,18 @@ describe("readPluginConfig", () => {
       idleMinutes: 15,
       dataDir: "/data/tickr",
       autoContext: false,
+      askToLink: true,
     });
   });
 
   it("reads auto_context as a boolean option: true only for true or 1", () => {
     for (const raw of ["true", "TRUE", " 1 "]) expect(readPluginConfig(env({ CLAUDE_PLUGIN_OPTION_AUTO_CONTEXT: raw }))).toMatchObject({ autoContext: true });
     for (const raw of ["false", "0", "", "yes", undefined]) expect(readPluginConfig(env({ CLAUDE_PLUGIN_OPTION_AUTO_CONTEXT: raw }))).toMatchObject({ autoContext: false });
+  });
+
+  it("reads ask_to_link as a boolean option, true by default: false only for false or 0", () => {
+    for (const raw of ["false", "FALSE", " 0 "]) expect(readPluginConfig(env({ CLAUDE_PLUGIN_OPTION_ASK_TO_LINK: raw }))).toMatchObject({ askToLink: false });
+    for (const raw of ["true", "1", "", "yes", undefined]) expect(readPluginConfig(env({ CLAUDE_PLUGIN_OPTION_ASK_TO_LINK: raw }))).toMatchObject({ askToLink: true });
   });
 
   it("validates the URL with the server's rules and normalises it", () => {

@@ -132,8 +132,8 @@ tokens it used. The plugin needs a Tickr version that accepts agent sessions.
 Claude Code then asks for the plugin options: `api_key` (a key with the
 **Workspace user** role, see section 1), `base_url` (default
 `https://tickr.coderise.cloud`), `idle_minutes` (default 15: a segment ends
-after that long without activity) and `auto_context` (default false: see "Manual or
-automatic" below).
+after that long without activity), `auto_context` (default false: see "Manual or
+automatic" below) and `ask_to_link` (default true: see "Sessions not linked" below).
 
 **Link a repository.** Run `/tickr:link` in the repository: it asks for the
 project (and optionally the task, tags and description), writes a
@@ -151,6 +151,17 @@ then the session says it is not tracked. Claude Code asks your permission to wri
 file and to record the link. A session already recorded stops being tracked once
 `.tickr.json` changes or its link is removed from the plugin data: nothing more of it
 is read or sent.
+
+**Sessions not linked.** When a session starts in a repository that is not linked
+(no `.tickr.json`, or one not yet linked on this machine), you see a message saying the
+session is not tracked, and Claude is told to ask you once, the first time you give it
+work to do and before starting that work, whether to link this session to a Tickr
+activity (not for a simple question, and not when you already said to skip Tickr). If
+you answer yes, Claude runs `/tickr:link` right away, then does the work; if you answer
+no, it does the work and does not ask again in that session. Claude never writes
+`.tickr.json` itself outside `/tickr:link`.
+To turn the question off, set the plugin option `ask_to_link` to `false` (the message
+stays).
 
 **Task and description of a session.** A session is recorded under the task and
 description of `.tickr.json`, unless you choose others for that session only:
@@ -172,8 +183,11 @@ Claude also proposes `/tickr:task` when it notices that the work moved to anothe
 of the project or that its purpose changed. A description is plain text of at most
 10 words and 100 characters; only words with a letter count, so numbers are free (the
 100 characters still apply), and `"`, `` ` ``, `$` and `\` are refused. Examples:
-`Implementation of the mobile app UI`, `Fix tickets 1 2 3 4 5 6 7 110 210`. From the
-moment you change it, a new Tickr entry starts with the new task and description. The
+`Implementation of the mobile app UI`, `Fix tickets 1 2 3 4 5 6 7 110 210`. Changing
+the task or the description starts a new Tickr entry from that moment (the previous one
+ends there), because Tickr does not change the task or description of an entry that
+already exists: set them early, once the work is clear, and avoid changing them for
+small shifts. The
 choice is kept on your machine, in one small file per session in the plugin data
 directory (removed after 90 days); different sessions in the same repository keep
 their own choice.

@@ -6,7 +6,7 @@ import { claimOwnership } from "../../hook-src/flusher/owner.js";
 import { commitIfChanged } from "../../hook-src/flusher/revisions.js";
 import { pauseSending, writeWorkspace } from "../../hook-src/flusher/sender.js";
 import { instanceDir, instanceId, writeInstanceInfo } from "../../hook-src/identity.js";
-import { INTAKE_PAUSED_KEY, recordEvent, UNTRACKED_MESSAGE } from "../../hook-src/intake.js";
+import { INTAKE_PAUSED_KEY, recordEvent, UNTRACKED_MESSAGE, UNTRACKED_NOTE } from "../../hook-src/intake.js";
 import { main } from "../../hook-src/main.js";
 import { canonicalJson } from "../../hook-src/mapping.js";
 import { renderStatus } from "../../hook-src/status.js";
@@ -116,18 +116,18 @@ describe("untracked sessions", () => {
     const root = tempDir();
     const cfg = pluginConfig(join(root, "data"));
     const soon = () => Date.now() + 1000;
-    expect(recordEvent(hookInput("SessionStart", root, { source: "startup" }), cfg, soon())).toEqual({ systemMessage: UNTRACKED_MESSAGE });
+    expect(recordEvent(hookInput("SessionStart", root, { source: "startup" }), cfg, soon())).toEqual({ systemMessage: UNTRACKED_MESSAGE, additionalContext: UNTRACKED_NOTE });
     expect(recordEvent(hookInput("UserPromptSubmit", root), cfg, soon())).toEqual({});
     expect(recordEvent(hookInput("PostToolUse", root), cfg, soon())).toEqual({});
     expect(recordEvent(hookInput("SessionStart", root, { source: "compact" }), cfg, soon())).toEqual({});
     expect(recordEvent(hookInput("SessionStart", root, { source: "resume" }), cfg, soon())).toEqual({});
     // /clear starts a new session.
-    expect(recordEvent(hookInput("SessionStart", root, { session_id: "s-2", source: "clear" }), cfg, soon())).toEqual({ systemMessage: UNTRACKED_MESSAGE });
+    expect(recordEvent(hookInput("SessionStart", root, { session_id: "s-2", source: "clear" }), cfg, soon())).toEqual({ systemMessage: UNTRACKED_MESSAGE, additionalContext: UNTRACKED_NOTE });
     expect(UNTRACKED_MESSAGE).toMatch(/not tracked.*\/tickr:link/);
 
     let out = "";
     const input = JSON.stringify({ session_id: "s-3", cwd: root, hook_event_name: "SessionStart", source: "startup" });
     await main(["SessionStart"], pluginEnv(join(root, "data")), { stdin: Readable.from([input]), deadlineMs: Date.now() + 1000, write: (t) => (out += t) });
-    expect(JSON.parse(out)).toEqual({ systemMessage: UNTRACKED_MESSAGE });
+    expect(JSON.parse(out)).toEqual({ systemMessage: UNTRACKED_MESSAGE, hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: UNTRACKED_NOTE } });
   });
 });

@@ -1,5 +1,23 @@
 # Changelog
 
+## Plugin `tickr` 0.3.0 — unreleased
+
+- In a repository that is not linked (no `.tickr.json`, or one not yet linked on this
+  machine), the SessionStart hook now also gives Claude a short note: the first time
+  you give it work to do, Claude asks you once, before starting the work, whether to
+  link the session to a Tickr activity; on yes it runs `/tickr:link` right away, then
+  does the work; on no it does the work and does not ask again in that session.
+  Questions are answered without the link question, and it does not ask when you
+  already said to skip Tickr. It never writes `.tickr.json` itself outside `/tickr:link`. The note holds
+  no path, id or key, and is not repeated when a session resumes or is compacted.
+- New option `ask_to_link` (default true): set it to false to keep only the
+  not-tracked message.
+- The skill, `/tickr:task`, `/tickr:describe` and the README now say that changing the
+  task or the description starts a new Tickr entry (the previous one ends there),
+  since Tickr does not change the task or description of an entry that already
+  exists; set them early, once the work is clear.
+- Bundles MCP server 0.2.1 (unchanged).
+
 ## Plugin `tickr` 0.2.0 — unreleased
 
 - New `/tickr:task`: choose, for the current session only, a task among the
