@@ -12,6 +12,7 @@ import type { CommittedRow, DelegatedRow, SegmentRow, Store, TargetKind } from "
 import { canonicalJson, type NormalizedMapping, parseStoredMapping } from "../mapping.js";
 import type { UsageBody } from "./api.js";
 import { guarded } from "./owner.js";
+import { probeView, readPendingRename } from "./rename.js";
 import type { StageContext, StageRun } from "./stages.js";
 
 /** `working: true` is only built for an event at most this old (the server re-checks at 5 min). */
@@ -229,11 +230,19 @@ export const segmentRevisions: RevisionSource = (ctx) => {
     const mapping = mappings.get(seg.mappingVersionId);
     if (!mapping) continue;
     const target: RevisionTarget = { kind: "segment", id: seg.id };
+    const pending = readPendingRename(ctx.store, seg.id);
+    if (pending !== null) {
+      // A rename in place waits for Tickr's answer to its probe (flusher/rename.ts): the probe is
+      // committed once, then nothing else of the segment until the answer resolves it.
+      if (seg.lastRevision <= pending.baseRevision) desired.push({ target, body: desiredSegmentBody(probeView(seg, pending), mapping, now, undefined, "pending") });
+      continue;
+    }
     const last = ctx.store.getLastCommitted("segment", seg.id);
     const usage = usageForRevision(ctx.store, target);
     let quality: UsageQuality = "pending";
     if (seg.final) {
-      const computed: FinalQuality = usage?.clamped ? "incomplete" : finalQuality(ctx.store, seg, now, contextOf(seg.sessionId));
+      // No complete usage set (none yet, or dropped by a rename repair): not complete either.
+      const computed: FinalQuality = usage === undefined || usage.clamped ? "incomplete" : finalQuality(ctx.store, seg, now, contextOf(seg.sessionId));
       quality = nextQuality(committedQuality(last), computed, { segment: true, final: true });
     }
     const body = desiredSegmentBody(seg, mapping, now, usage?.usage, quality);

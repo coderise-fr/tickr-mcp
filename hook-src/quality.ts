@@ -4,7 +4,8 @@
 //   segment    pending while it is not final (a new turn may still join it). Once final:
 //              complete iff every turn and every known subagent attributed to it has ended, no
 //              message in its span is still undecided, and a complete read of every transcript
-//              of its session was made after the last of those ends; else incomplete.
+//              of its session was made after the last of those ends; else incomplete. A final
+//              segment with no complete usage set (revisions.ts) is incomplete too.
 //   delegated  the first entry of a turn: pending until its turn and the subagents launched in it
 //              have ended and a complete read covered them, then complete; incomplete once the
 //              session ended first (SessionEnd, or no activity for LEDGER_WINDOW_MS: a crashed

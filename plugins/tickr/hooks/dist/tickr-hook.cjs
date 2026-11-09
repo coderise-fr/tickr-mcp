@@ -357,7 +357,7 @@ function agentHeaderValue(info) {
 }
 
 // hook-src/version.ts
-var PLUGIN_VERSION = "0.3.0";
+var PLUGIN_VERSION = "0.4.0";
 
 // hook-src/flusher/api.ts
 var REQUEST_TIMEOUT_MS = 3e3;
@@ -416,12 +416,16 @@ function classify(route, status, problem, retryAfterMs) {
 }
 async function applied(res) {
   const entry = await res.json().catch(() => null);
-  return {
+  const out = {
     kind: "applied",
     created: res.status === 201,
     finalized: entry?.agentFinalized === true,
     detached: entry?.agentDetached === true
   };
+  if (typeof entry?.description === "string" && (entry.taskId === null || entry.taskId === void 0 || typeof entry.taskId === "string")) {
+    out.entry = { description: entry.description, taskId: typeof entry.taskId === "string" ? entry.taskId : null };
+  }
+  return out;
 }
 function createAgentApi(o) {
   const timeoutMs = o.timeoutMs ?? REQUEST_TIMEOUT_MS;
@@ -1418,6 +1422,10 @@ var Store = class {
   deleteOutboxFor(kind, id) {
     return this.run("DELETE FROM outbox WHERE target_kind = ? AND target_id = ?", kind, id);
   }
+  /** Forgets a target's latest complete usage set: its revisions carry no usage until the next one. */
+  deleteUsageSnapshot(kind, id) {
+    return this.run("DELETE FROM usage_snapshots WHERE target_kind = ? AND target_id = ?", kind, id);
+  }
   /**
    * Removes the pending revisions older than their target's latest one. Only the latest is ever
    * sent and its acknowledgement removes the older ones anyway; returns how many.
@@ -1444,8 +1452,8 @@ var Store = class {
    * their delegated row is gone, events already segmented, sessions left without events nor
    * segments (then their ledger rows and totals, unless their recipient has a pending revision,
    * their delegated entries without a pending revision, transcript offsets, subagents and Agent
-   * launches), usage snapshots of targets gone, unused mapping versions, terminal items and shown
-   * notices.
+   * launches), usage snapshots of targets gone, unused mapping versions, pending renames of
+   * segments gone, terminal items and shown notices.
    * Returns the rows deleted.
    */
   deleteRetired(cutoffIso) {
@@ -1496,7 +1504,13 @@ var Store = class {
     }
     n += this.run(
       `DELETE FROM mapping_versions WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.mapping_version_id = mapping_versions.id)
-         AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.mapping_version_id = mapping_versions.id)`
+         AND NOT EXISTS (SELECT 1 FROM segments g WHERE g.mapping_version_id = mapping_versions.id)
+         AND NOT EXISTS (SELECT 1 FROM meta m WHERE substr(m.key, 1, 15) = 'segment_rename:'
+           AND json_extract(m.value, '$.fromMappingVersionId') = mapping_versions.id)`
+    );
+    n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 15) = 'segment_rename:'
+         AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 16))`
     );
     n += this.run("DELETE FROM terminal WHERE at < ?", cutoffIso);
     n += this.run("DELETE FROM notices WHERE shown_at IS NOT NULL AND created_at < ?", cutoffIso);
@@ -1845,6 +1859,83 @@ function ulid(nowMs, rand = import_node_crypto5.randomBytes) {
   return encodeTime(ms4) + lastDigits.map((d) => CROCKFORD[d]).join("");
 }
 
+// hook-src/attribution.ts
+var DAY_MS = 864e5;
+var ms = (iso2) => Date.parse(iso2);
+function nextUtcMidnight(t) {
+  return (Math.floor(t / DAY_MS) + 1) * DAY_MS;
+}
+function buildTurns(sessionId, events) {
+  const sorted = events.filter((e) => e.sessionId === sessionId).sort((a, b) => ms(a.localTime) - ms(b.localTime) || a.seq - b.seq);
+  const turns = [];
+  let open = null;
+  for (const ev of sorted) {
+    if (ev.type === "UserPromptSubmit") {
+      if (open !== null) open.endedAt = ev.localTime;
+      open = { sessionId, promptId: ev.promptId ?? ev.eventId, startedAt: ev.localTime, endedAt: null };
+      turns.push(open);
+    } else if ((ev.type === "Stop" || ev.type === "SessionEnd") && open !== null) {
+      open.endedAt = ev.localTime;
+      open = null;
+    }
+  }
+  return turns;
+}
+function turnAt(t, turns) {
+  let found = null;
+  for (const turn of turns) {
+    if (ms(turn.startedAt) <= t && (turn.endedAt === null || t < ms(turn.endedAt))) found = turn;
+  }
+  return found;
+}
+function delegatedByTurn(events, turns) {
+  const out = /* @__PURE__ */ new Map();
+  const known = new Set(turns.map((t) => t.promptId));
+  const withEntry = events.filter((e) => e.entryId !== null).sort((a, b) => a.seq - b.seq);
+  for (const ev of withEntry) {
+    const promptId = ev.promptId !== null && known.has(ev.promptId) ? ev.promptId : turnAt(ms(ev.localTime), turns)?.promptId;
+    if (promptId === void 0) continue;
+    const list = out.get(promptId) ?? [];
+    if (!list.includes(ev.entryId)) list.push(ev.entryId);
+    out.set(promptId, list);
+  }
+  return out;
+}
+function resolveTurn(turn, ctx) {
+  const first = ctx.delegatedByTurn.get(turn.promptId)?.[0];
+  if (first !== void 0) return { kind: "delegated", entryId: first };
+  if (turn.endedAt !== null) return null;
+  return { kind: "turn", sessionId: turn.sessionId, promptId: turn.promptId };
+}
+function resolveRecipient(r, ctx) {
+  if (r === null || r.kind !== "turn") return r;
+  const turn = ctx.turns.find((t) => t.promptId === r.promptId);
+  return turn === void 0 ? r : resolveTurn(turn, ctx);
+}
+function recipientAt(timestamp, ctx) {
+  const t = ms(timestamp);
+  let inside = null;
+  let before = null;
+  for (const seg2 of ctx.segments) {
+    const start = ms(seg2.startedAt);
+    if (start > t) continue;
+    if (t < ms(seg2.stoppedAt) && (inside === null || start >= ms(inside.startedAt))) inside = seg2;
+    if (t < nextUtcMidnight(start) && (before === null || start >= ms(before.startedAt))) before = seg2;
+  }
+  const seg = inside ?? before;
+  if (seg !== null) return { kind: "segment", id: seg.id };
+  const turn = turnAt(t, ctx.turns);
+  return turn === null ? null : resolveTurn(turn, ctx);
+}
+function recipientFor(msg, ctx) {
+  if (msg.agentId !== void 0 && ctx.subagents.has(msg.agentId)) return resolveRecipient(ctx.subagents.get(msg.agentId), ctx);
+  return recipientAt(msg.timestamp, ctx);
+}
+function settled(timestamp, segments) {
+  const t = ms(timestamp);
+  return segments.every((seg) => seg.final || t <= ms(seg.lastActivityAt));
+}
+
 // hook-src/flusher/segmenter.ts
 var CLOCK_TOLERANCE_MS = 2 * 6e4;
 var MAX_SEGMENT_MS = 23 * 36e5;
@@ -1854,7 +1945,7 @@ var OPENING = /* @__PURE__ */ new Set(["UserPromptSubmit", "PostToolUse"]);
 function newSessionState(sessionId) {
   return { sessionId, open: null, lastEventTime: null, lastUptimeS: null, lateEvents: 0 };
 }
-var ms = (iso2) => Date.parse(iso2);
+var ms2 = (iso2) => Date.parse(iso2);
 var iso = (t) => new Date(t).toISOString();
 function segmentBoundary(seg) {
   const start = new Date(seg.startedAt);
@@ -1864,7 +1955,7 @@ function segmentBoundary(seg) {
 }
 function judgeClock(s, wall, uptimeS) {
   if (s.lastEventTime === null || s.lastUptimeS === null) return "normal";
-  const dWall = wall - ms(s.lastEventTime);
+  const dWall = wall - ms2(s.lastEventTime);
   const dUptime = (uptimeS - s.lastUptimeS) * 1e3;
   if (dWall < 0 && dUptime <= 0) return "late";
   if (dUptime < 0) return "reboot";
@@ -1874,14 +1965,14 @@ function judgeClock(s, wall, uptimeS) {
   return "normal";
 }
 function later(a, b) {
-  return ms(b) > ms(a) ? b : a;
+  return ms2(b) > ms2(a) ? b : a;
 }
 function applyLate(s, ev, wall, cfg) {
   const open = s.open;
   const activity = OPENING.has(ev.type) || ev.type === "Stop";
-  const inside = open !== null && wall >= ms(open.startedAt) && wall <= segmentBoundary(open).at && wall - ms(open.lastActivityAt) < cfg.idleMs && (!OPENING.has(ev.type) || ev.mappingVersionId === open.mappingVersionId);
+  const inside = open !== null && wall >= ms2(open.startedAt) && wall <= segmentBoundary(open).at && wall - ms2(open.lastActivityAt) < cfg.idleMs && (!OPENING.has(ev.type) || ev.mappingVersionId === open.mappingVersionId);
   if (!inside) return { state: { ...s, lateEvents: s.lateEvents + 1 }, changes: [] };
-  if (!activity || wall <= ms(open.lastActivityAt)) return { state: s, changes: [] };
+  if (!activity || wall <= ms2(open.lastActivityAt)) return { state: s, changes: [] };
   const seg = { ...open, lastActivityAt: ev.localTime };
   return {
     state: { ...s, open: seg },
@@ -1889,7 +1980,7 @@ function applyLate(s, ev, wall, cfg) {
   };
 }
 function applyEvent(s, ev, cfg) {
-  const wall = ms(ev.localTime);
+  const wall = ms2(ev.localTime);
   const verdict = judgeClock(s, wall, ev.uptimeS);
   if (verdict === "late") return applyLate(s, ev, wall, cfg);
   const changes = [];
@@ -1905,7 +1996,7 @@ function applyEvent(s, ev, cfg) {
   if (open !== null && (verdict === "forward" || verdict === "backward")) {
     finalize(open, open.lastActivityAt, "clock_jump", verdict === "forward" ? DRIFT_DIAGNOSTIC : BACKWARDS_DIAGNOSTIC);
   }
-  if (open !== null && wall - ms(open.lastActivityAt) >= cfg.idleMs) finalize(open, open.lastActivityAt, "idle");
+  if (open !== null && wall - ms2(open.lastActivityAt) >= cfg.idleMs) finalize(open, open.lastActivityAt, "idle");
   const current = open;
   if (ev.type === "SessionEnd") {
     if (current !== null) finalize(current, current.lastActivityAt, "session_end");
@@ -1916,7 +2007,17 @@ function applyEvent(s, ev, cfg) {
     } else {
       const boundary = segmentBoundary(current);
       const otherMapping = working && ev.mappingVersionId !== current.mappingVersionId;
-      if (otherMapping || wall > boundary.at) {
+      if (otherMapping && wall <= boundary.at && ev.mappingVersionId !== null && cfg.renameInPlace?.(current, ev.mappingVersionId) === true) {
+        const seg = {
+          ...current,
+          mappingVersionId: ev.mappingVersionId,
+          lastActivityAt: later(current.lastActivityAt, ev.localTime),
+          working,
+          observedAt: later(current.observedAt, ev.localTime)
+        };
+        open = seg;
+        changes.push({ kind: "rename", seg, at: ev.localTime, previous: current });
+      } else if (otherMapping || wall > boundary.at) {
         const at = wall > boundary.at ? iso(boundary.at) : ev.localTime;
         finalize(current, at, wall > boundary.at ? boundary.reason : "mapping");
         const mapping = otherMapping ? ev.mappingVersionId : current.mappingVersionId;
@@ -1937,12 +2038,12 @@ function applyEvent(s, ev, cfg) {
 }
 function onWake(s, now, cfg) {
   const open = s.open;
-  if (open === null || now.getTime() - ms(open.lastActivityAt) < cfg.idleMs) return { state: s, changes: [] };
+  if (open === null || now.getTime() - ms2(open.lastActivityAt) < cfg.idleMs) return { state: s, changes: [] };
   return { state: { ...s, open: null }, changes: [{ kind: "finalize", id: open.id, stoppedAt: open.lastActivityAt, reason: "idle" }] };
 }
 function idleDueInMs(s, now, cfg) {
   if (s.open === null) return null;
-  return Math.max(0, ms(s.open.lastActivityAt) + cfg.idleMs - now.getTime());
+  return Math.max(0, ms2(s.open.lastActivityAt) + cfg.idleMs - now.getTime());
 }
 
 // hook-src/flusher/segmentation.ts
@@ -1997,9 +2098,21 @@ function applyChanges(store, sessionId, changes) {
       });
       continue;
     }
-    const row = store.getSegment(c.id);
+    const row = store.getSegment(c.kind === "rename" ? c.seg.id : c.id);
     if (row === null || row.final) continue;
-    if (c.kind === "extend") {
+    if (c.kind === "rename") {
+      const s = c.seg;
+      store.upsertSegment({ ...row, mappingVersionId: s.mappingVersionId, lastActivityAt: s.lastActivityAt, stoppedAt: s.lastActivityAt, working: s.working, observedAt: s.observedAt });
+      if (row.lastRevision > 0) {
+        writePendingRename(store, s.id, {
+          fromMappingVersionId: c.previous.mappingVersionId,
+          at: c.at,
+          lastActivityAt: c.previous.lastActivityAt,
+          observedAt: c.previous.observedAt,
+          baseRevision: row.lastRevision
+        });
+      }
+    } else if (c.kind === "extend") {
       store.upsertSegment({ ...row, lastActivityAt: c.lastActivityAt, stoppedAt: c.lastActivityAt, working: c.working, observedAt: c.observedAt });
     } else {
       store.upsertSegment({ ...row, stoppedAt: c.stoppedAt, working: false, final: true, finalReason: c.reason, finalDiagnostic: c.diagnostic ?? null });
@@ -2045,10 +2158,15 @@ function markClosedByServer(store, segmentId, serverState) {
   const row = store.getSegment(segmentId);
   if (row === null) return;
   store.upsertSegment({ ...row, working: false, final: true, finalReason: row.final ? row.finalReason : "server_closed", serverState });
+  clearPendingRename(store, segmentId);
 }
 var segmentationStage = (ctx) => {
   const idleMs = ctx.config.idleMinutes * 6e4;
-  const cfg = { idleMs, newId: () => uuidv7(ctx.now().getTime()) };
+  const cfg = {
+    idleMs,
+    newId: () => uuidv7(ctx.now().getTime()),
+    renameInPlace: (open, mappingVersionId) => mayRenameInPlace(ctx.store, open.id, open.mappingVersionId, mappingVersionId, ctx.now())
+  };
   for (const sessionId of ctx.store.pendingEventSessions()) {
     for (; ; ) {
       if (ctx.remainingMs() <= 0) return { dueInMs: 0 };
@@ -2059,332 +2177,6 @@ var segmentationStage = (ctx) => {
   const due = ctx.guarded(() => finalizeIdle(ctx.store, ctx.now(), idleMs));
   return due === null ? {} : { dueInMs: due };
 };
-
-// hook-src/flusher/sender.ts
-var MAX_BACKOFF_MS = 5 * 6e4;
-var MAX_RETRY_AFTER_MS = 60 * 6e4;
-var PROBE_INTERVAL_MS = 60 * 6e4;
-var INGESTION_WINDOW_MS = 30 * 24 * 60 * 6e4;
-var AGENT_VERSION_GRACE_MS = 2 * 6e4;
-var SEND_BATCH = 50;
-var STOPPED_MISMATCH = "stopped_mismatch";
-var UNLINKED = "unlinked";
-var PAUSE_KEY = "send_pause";
-var WORKSPACE_KEY = "workspace";
-function readJson(store, key) {
-  const raw = store.getMeta(key);
-  if (raw === null) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-function readPause(store) {
-  return readJson(store, PAUSE_KEY);
-}
-function readWorkspace(store) {
-  return readJson(store, WORKSPACE_KEY);
-}
-function writeWorkspace(store, ws) {
-  store.setMeta(WORKSPACE_KEY, JSON.stringify(ws));
-}
-function pauseSending(store, reason, now) {
-  const current = readPause(store);
-  const probeAt = new Date(now.getTime() + PROBE_INTERVAL_MS).toISOString();
-  const pause2 = { reason, since: current?.reason === reason ? current.since : now.toISOString(), probeAt };
-  store.setMeta(PAUSE_KEY, JSON.stringify(pause2));
-  if (current?.reason !== reason) addNotice(store, reason, now);
-}
-function allowProbeSend(store) {
-  const current = readPause(store);
-  if (current !== null) store.setMeta(PAUSE_KEY, JSON.stringify({ ...current, probing: true }));
-}
-function canSend(store) {
-  const pause2 = readPause(store);
-  return readWorkspace(store) !== null && (pause2 === null || pause2.probing === true);
-}
-function resumeSending(store) {
-  store.deleteMeta(PAUSE_KEY);
-}
-function backoffMs(attempts, random = Math.random) {
-  const base = Math.min(2 ** Math.max(1, attempts) * 1e3, MAX_BACKOFF_MS);
-  const r = Math.min(1, Math.max(0, random()));
-  return Math.round(base / 2 + r * base / 2);
-}
-function retryDelayMs(afterMs, attempts, random) {
-  return afterMs === null ? backoffMs(attempts, random) : Math.min(Math.max(0, afterMs), MAX_RETRY_AFTER_MS);
-}
-function stopMismatchedSession(store, sessionId, now) {
-  const row = store.getSession(sessionId);
-  if (row?.state === STOPPED_MISMATCH) return;
-  store.upsertSession({
-    ...row ?? { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, agentVersion: null, provider: null, lateEvents: 0 },
-    state: STOPPED_MISMATCH
-  });
-  for (const seg of store.segmentsForSession(sessionId)) {
-    store.deleteOutboxFor("segment", seg.id);
-    if (store.isTerminal("segment", seg.id)) continue;
-    store.addTerminal({
-      targetKind: "segment",
-      targetId: seg.id,
-      revision: seg.lastRevision > 0 ? seg.lastRevision : null,
-      code: "workspace_mismatch",
-      at: now.toISOString(),
-      diagnostic: "The mapping names another workspace than the API key's."
-    });
-  }
-  addNotice(store, "workspace_mismatch", now);
-}
-function stopUnlinkedSession(store, sessionId, now) {
-  const row = store.getSession(sessionId);
-  if (row?.state === UNLINKED) return;
-  store.upsertSession({
-    ...row ?? { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, agentVersion: null, provider: null, lateEvents: 0 },
-    state: UNLINKED
-  });
-  const at = now.toISOString();
-  const diagnostic = "The repository is no longer linked on this machine.";
-  for (const seg of store.segmentsForSession(sessionId)) {
-    if (!seg.final) store.upsertSegment({ ...seg, working: false, final: true, finalReason: UNLINKED });
-    store.deleteOutboxFor("segment", seg.id);
-    if (store.isTerminal("segment", seg.id)) continue;
-    store.addTerminal({ targetKind: "segment", targetId: seg.id, revision: seg.lastRevision > 0 ? seg.lastRevision : null, code: UNLINKED, at, diagnostic });
-  }
-  for (const entry of store.delegatedForSession(sessionId)) {
-    store.deleteOutboxFor("delegated", entry.entryId);
-    if (store.isTerminal("delegated", entry.entryId)) continue;
-    const revision = store.getLastCommitted("delegated", entry.entryId)?.revision ?? null;
-    store.addTerminal({ targetKind: "delegated", targetId: entry.entryId, revision, code: UNLINKED, at, diagnostic });
-  }
-  addNotice(store, UNLINKED, now);
-}
-function reactivateLinkedSession(store, sessionId) {
-  const row = store.getSession(sessionId);
-  if (row?.state === UNLINKED) store.upsertSession({ ...row, state: ACTIVE_SESSION });
-}
-function recordTerminal(store, row, code2, diagnostic, now) {
-  store.deleteOutboxFor(row.targetKind, row.targetId);
-  if (store.isTerminal(row.targetKind, row.targetId)) return;
-  store.addTerminal({ targetKind: row.targetKind, targetId: row.targetId, revision: row.revision, code: code2, at: now.toISOString(), diagnostic });
-}
-function segmentMismatch(store, segmentId, workspaceId) {
-  const seg = store.getSegment(segmentId);
-  if (seg === null) return null;
-  const version = store.getMapping(seg.mappingVersionId);
-  const mapping = version ? parseStoredMapping(version.normalizedJson) : null;
-  return mapping !== null && mapping.workspaceId !== workspaceId ? seg.sessionId : null;
-}
-function expireBeforeSend(store, workspaceId, now) {
-  const oldest = now.getTime() - INGESTION_WINDOW_MS;
-  for (const row of store.latestOutbox()) {
-    if (row.targetKind !== "segment") continue;
-    const mismatched = segmentMismatch(store, row.targetId, workspaceId);
-    if (mismatched !== null) {
-      stopMismatchedSession(store, mismatched, now);
-      continue;
-    }
-    const seg = store.getSegment(row.targetId);
-    if (seg?.createdOnServer) continue;
-    const startedAt = Date.parse(JSON.parse(row.bodyJson).startedAt ?? "");
-    if (Number.isFinite(startedAt) && startedAt < oldest) {
-      recordTerminal(store, row, "ingestion_window", "Started more than 30 days ago: Tickr no longer accepts it.", now);
-    }
-  }
-}
-function versionHoldMs(store, row, now) {
-  if (row.targetKind !== "segment") return null;
-  const seg = store.getSegment(row.targetId);
-  if (seg === null || seg.createdOnServer || seg.final) return null;
-  if (JSON.parse(row.bodyJson).final === true) return null;
-  if ((store.getSession(seg.sessionId)?.agentVersion ?? null) !== null) return null;
-  const elapsed = now.getTime() - Date.parse(seg.startedAt);
-  if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= AGENT_VERSION_GRACE_MS) return null;
-  return AGENT_VERSION_GRACE_MS - elapsed;
-}
-function versionHolds(store, now) {
-  const held = /* @__PURE__ */ new Set();
-  let dueInMs = null;
-  for (const row of store.latestOutbox()) {
-    const wait = versionHoldMs(store, row, now);
-    if (wait === null) continue;
-    held.add(row.targetId);
-    dueInMs = dueInMs === null ? wait : Math.min(dueInMs, wait);
-  }
-  return { held, dueInMs };
-}
-async function sendRow(store, api, row) {
-  const body = JSON.parse(row.bodyJson);
-  if (row.targetKind === "segment") {
-    const seg = store.getSegment(row.targetId);
-    const session = seg ? store.getSession(seg.sessionId) : null;
-    const agent = agentHeaderValue({ name: "claude-code", version: session?.agentVersion ?? "unknown" });
-    return api.putSegment(row.targetId, body, agent);
-  }
-  return api.putUsage(row.targetId, body);
-}
-function applyOutcome(store, row, outcome, now, random) {
-  const kind = row.targetKind;
-  if ((outcome.kind === "applied" || outcome.kind === "terminal") && readPause(store) !== null) resumeSending(store);
-  switch (outcome.kind) {
-    case "applied": {
-      store.deleteOutboxThrough(kind, row.targetId, row.revision);
-      if (kind === "segment") {
-        store.markSegmentCreated(row.targetId);
-        const sent = JSON.parse(row.bodyJson);
-        if (outcome.detached || outcome.finalized && sent.final !== true) {
-          markClosedByServer(store, row.targetId, outcome.detached ? "detached" : "finalized");
-          store.deleteOutboxFor(kind, row.targetId);
-        }
-      }
-      return null;
-    }
-    case "retry": {
-      const attempts = row.attempts + 1;
-      const delay = retryDelayMs(outcome.afterMs, attempts, random);
-      store.setOutboxAttempt(kind, row.targetId, row.revision, attempts, new Date(now.getTime() + delay).toISOString());
-      return delay;
-    }
-    case "pause":
-      pauseSending(store, outcome.reason, now);
-      return null;
-    case "terminal": {
-      recordTerminal(store, row, outcome.code, `Refused by Tickr (${outcome.code}).`, now);
-      if (kind === "segment" && outcome.closesSegment) {
-        markClosedByServer(store, row.targetId, outcome.code === "segment_detached" ? "detached" : "finalized");
-      }
-      if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
-      return null;
-    }
-  }
-}
-async function sendDue(store, gen, api, now, budgetMs, opts = {}) {
-  const endAt = performance.now() + budgetMs;
-  const remaining = opts.remainingMs ?? (() => endAt - performance.now());
-  const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
-  const inTx = (fn) => guarded(store, gen, now().toISOString(), fn);
-  const workspace = readWorkspace(store);
-  if (workspace === null || !canSend(store)) return { dueInMs: null };
-  inTx(() => expireBeforeSend(store, workspace.workspaceId, now()));
-  const { held } = versionHolds(store, now());
-  const waiting = (row) => row.targetKind === "segment" && held.has(row.targetId);
-  for (; ; ) {
-    const rows = store.dueOutbox(now().toISOString(), SEND_BATCH + held.size).filter((row) => !waiting(row));
-    if (rows.length === 0) break;
-    for (const row of rows) {
-      if (remaining() < timeoutMs) return { dueInMs: 0, outOfBudget: true };
-      if (store.isTerminal(row.targetKind, row.targetId)) {
-        inTx(() => store.deleteOutboxFor(row.targetKind, row.targetId));
-        continue;
-      }
-      const outcome = await sendRow(store, api, row);
-      opts.boundary?.("sent");
-      const delay = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));
-      if (outcome.kind === "applied") opts.boundary?.("acknowledged");
-      if (outcome.kind === "retry") return { dueInMs: delay };
-      if (outcome.kind === "pause") return { dueInMs: null };
-    }
-  }
-  return { dueInMs: nextDueMs(store, now()) };
-}
-function nextDueMs(store, now) {
-  const holds = versionHolds(store, now);
-  let due = holds.dueInMs;
-  for (const row of store.latestOutbox()) {
-    if (row.targetKind === "segment" && holds.held.has(row.targetId)) continue;
-    const wait = Math.max(0, Date.parse(row.nextAttemptAt) - now.getTime());
-    due = due === null ? wait : Math.min(due, wait);
-  }
-  return due;
-}
-function sendStage(opts = {}) {
-  return async (ctx) => {
-    const { dueInMs, outOfBudget } = await sendDue(ctx.store, ctx.generation, ctx.api, ctx.now, ctx.remainingMs(), {
-      ...opts,
-      boundary: ctx.boundary,
-      remainingMs: ctx.remainingMs
-    });
-    if (outOfBudget) return { dueInMs: 0, outOfBudget };
-    return dueInMs === null ? {} : { dueInMs };
-  };
-}
-
-// hook-src/attribution.ts
-var DAY_MS = 864e5;
-var ms2 = (iso2) => Date.parse(iso2);
-function nextUtcMidnight(t) {
-  return (Math.floor(t / DAY_MS) + 1) * DAY_MS;
-}
-function buildTurns(sessionId, events) {
-  const sorted = events.filter((e) => e.sessionId === sessionId).sort((a, b) => ms2(a.localTime) - ms2(b.localTime) || a.seq - b.seq);
-  const turns = [];
-  let open = null;
-  for (const ev of sorted) {
-    if (ev.type === "UserPromptSubmit") {
-      if (open !== null) open.endedAt = ev.localTime;
-      open = { sessionId, promptId: ev.promptId ?? ev.eventId, startedAt: ev.localTime, endedAt: null };
-      turns.push(open);
-    } else if ((ev.type === "Stop" || ev.type === "SessionEnd") && open !== null) {
-      open.endedAt = ev.localTime;
-      open = null;
-    }
-  }
-  return turns;
-}
-function turnAt(t, turns) {
-  let found = null;
-  for (const turn of turns) {
-    if (ms2(turn.startedAt) <= t && (turn.endedAt === null || t < ms2(turn.endedAt))) found = turn;
-  }
-  return found;
-}
-function delegatedByTurn(events, turns) {
-  const out = /* @__PURE__ */ new Map();
-  const known = new Set(turns.map((t) => t.promptId));
-  const withEntry = events.filter((e) => e.entryId !== null).sort((a, b) => a.seq - b.seq);
-  for (const ev of withEntry) {
-    const promptId = ev.promptId !== null && known.has(ev.promptId) ? ev.promptId : turnAt(ms2(ev.localTime), turns)?.promptId;
-    if (promptId === void 0) continue;
-    const list = out.get(promptId) ?? [];
-    if (!list.includes(ev.entryId)) list.push(ev.entryId);
-    out.set(promptId, list);
-  }
-  return out;
-}
-function resolveTurn(turn, ctx) {
-  const first = ctx.delegatedByTurn.get(turn.promptId)?.[0];
-  if (first !== void 0) return { kind: "delegated", entryId: first };
-  if (turn.endedAt !== null) return null;
-  return { kind: "turn", sessionId: turn.sessionId, promptId: turn.promptId };
-}
-function resolveRecipient(r, ctx) {
-  if (r === null || r.kind !== "turn") return r;
-  const turn = ctx.turns.find((t) => t.promptId === r.promptId);
-  return turn === void 0 ? r : resolveTurn(turn, ctx);
-}
-function recipientAt(timestamp, ctx) {
-  const t = ms2(timestamp);
-  let inside = null;
-  let before = null;
-  for (const seg2 of ctx.segments) {
-    const start = ms2(seg2.startedAt);
-    if (start > t) continue;
-    if (t < ms2(seg2.stoppedAt) && (inside === null || start >= ms2(inside.startedAt))) inside = seg2;
-    if (t < nextUtcMidnight(start) && (before === null || start >= ms2(before.startedAt))) before = seg2;
-  }
-  const seg = inside ?? before;
-  if (seg !== null) return { kind: "segment", id: seg.id };
-  const turn = turnAt(t, ctx.turns);
-  return turn === null ? null : resolveTurn(turn, ctx);
-}
-function recipientFor(msg, ctx) {
-  if (msg.agentId !== void 0 && ctx.subagents.has(msg.agentId)) return resolveRecipient(ctx.subagents.get(msg.agentId), ctx);
-  return recipientAt(msg.timestamp, ctx);
-}
-function settled(timestamp, segments) {
-  const t = ms2(timestamp);
-  return segments.every((seg) => seg.final || t <= ms2(seg.lastActivityAt));
-}
 
 // hook-src/transcript/reader.ts
 var import_node_crypto6 = require("node:crypto");
@@ -2927,6 +2719,532 @@ var ledgerStage = (ctx) => {
   return {};
 };
 
+// hook-src/quality.ts
+var MAX_USAGE_ROWS = 20;
+var MAX_TOKENS = 1e12;
+var OTHER_PROVIDER = "other";
+var OTHER_MODELS = "other-models";
+var ms3 = (iso2) => Date.parse(iso2);
+var NEVER = Number.POSITIVE_INFINITY;
+function turnAt2(t, turns) {
+  let found = null;
+  for (const turn of turns) if (ms3(turn.startedAt) <= t && (turn.endedAt === null || t < ms3(turn.endedAt))) found = turn;
+  return found;
+}
+function subagentEnd(sub, turns) {
+  if (sub.stoppedAt !== null) return ms3(sub.stoppedAt);
+  if (sub.source === "hook" || sub.launchedAt === null) return null;
+  const turn = turnAt2(ms3(sub.launchedAt), turns);
+  return turn?.endedAt ? ms3(turn.endedAt) : null;
+}
+function coveredAfter(reads, after) {
+  return reads.length > 0 && reads.every((r) => r.status === "complete" && r.readAt !== null && ms3(r.readAt) >= after);
+}
+function latest(ends, floor) {
+  let max = floor;
+  for (const end of ends) {
+    if (end === null) return null;
+    max = Math.max(max, end);
+  }
+  return max;
+}
+function segmentQuality(seg, turns, subagents, reads, provisional = [], until = null) {
+  const start = ms3(seg.startedAt);
+  const stop = ms3(seg.stoppedAt);
+  const spanEnd = until === null ? NEVER : ms3(until);
+  const inSpan = (iso2) => ms3(iso2) >= start && ms3(iso2) < spanEnd;
+  if (provisional.some(inSpan)) return "incomplete";
+  const mine = turns.filter((t) => ms3(t.startedAt) < Math.max(stop, start + 1) && (t.endedAt === null || ms3(t.endedAt) > start));
+  const subs = subagents.filter(
+    (s) => s.recipientKind === "segment" && s.recipientId === seg.id || s.recipientKind === null && s.launchedAt !== null && inSpan(s.launchedAt)
+  );
+  if (subs.some((s) => s.recipientKind === null)) return "incomplete";
+  const end = latest([...mine.map((t) => t.endedAt === null ? null : ms3(t.endedAt)), ...subs.map((s) => subagentEnd(s, turns))], stop);
+  return end !== null && coveredAfter(reads, end) ? "complete" : "incomplete";
+}
+function delegatedQuality(place, subagents, reads, sessionEnded, provisional = []) {
+  if (place === void 0 || place.turn === null || !place.first) return "complete";
+  const turn = place.turn;
+  const start = ms3(turn.startedAt);
+  const turnEnd = turn.endedAt === null ? null : ms3(turn.endedAt);
+  const inTurn = (iso2) => ms3(iso2) >= start && (turnEnd === null || ms3(iso2) < turnEnd);
+  const launched = subagents.filter((s) => s.launchedAt !== null && inTurn(s.launchedAt));
+  const end = turnEnd === null ? null : latest(launched.map((s) => subagentEnd(s, [turn])), turnEnd);
+  const complete = end !== null && !provisional.some(inTurn) && launched.every((s) => s.recipientKind !== null) && coveredAfter(reads, end);
+  if (complete) return "complete";
+  return sessionEnded ? "incomplete" : "pending";
+}
+var RANK = { pending: 0, incomplete: 1, complete: 2 };
+function nextQuality(previous, computed, target) {
+  if (target.segment && !target.final) return "pending";
+  if (previous === null) return computed;
+  return RANK[computed] >= RANK[previous] ? computed : previous;
+}
+var tokensOf = (r) => r.inputTokens + r.outputTokens + r.cacheCreationInputTokens + r.cacheReadInputTokens;
+var byKey = (a, b) => a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : a.model < b.model ? -1 : a.model > b.model ? 1 : 0;
+function boundUsage(rows) {
+  let kept = rows.map((r) => ({ ...r }));
+  if (kept.length > MAX_USAGE_ROWS) {
+    const sorted = [...kept].sort((a, b) => tokensOf(b) - tokensOf(a) || byKey(a, b));
+    const other = sorted.filter((r) => r.provider === OTHER_PROVIDER && r.model === OTHER_MODELS);
+    const rest = sorted.filter((r) => !(r.provider === OTHER_PROVIDER && r.model === OTHER_MODELS));
+    const top = rest.slice(0, MAX_USAGE_ROWS - 1);
+    const folded = { provider: OTHER_PROVIDER, model: OTHER_MODELS, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+    for (const r of [...rest.slice(MAX_USAGE_ROWS - 1), ...other]) {
+      folded.inputTokens += r.inputTokens;
+      folded.outputTokens += r.outputTokens;
+      folded.cacheCreationInputTokens += r.cacheCreationInputTokens;
+      folded.cacheReadInputTokens += r.cacheReadInputTokens;
+    }
+    kept = [...top, folded];
+  }
+  let clamped = false;
+  const clamp = (n) => {
+    if (n > MAX_TOKENS) {
+      clamped = true;
+      return MAX_TOKENS;
+    }
+    return n;
+  };
+  const usage = kept.map((r) => ({
+    ...r,
+    inputTokens: clamp(r.inputTokens),
+    outputTokens: clamp(r.outputTokens),
+    cacheCreationInputTokens: clamp(r.cacheCreationInputTokens),
+    cacheReadInputTokens: clamp(r.cacheReadInputTokens)
+  })).sort(byKey);
+  return { usage, clamped };
+}
+function usageForRevision(store, target) {
+  const row = store.db.prepare("SELECT usage_json FROM usage_snapshots WHERE target_kind = ? AND target_id = ?").get(target.kind, target.id);
+  if (row === void 0) return void 0;
+  return boundUsage(JSON.parse(row.usage_json));
+}
+function sessionReads(store, sessionId) {
+  return store.db.prepare("SELECT status, read_at FROM transcript_offsets WHERE session_id = ? ORDER BY path").all(sessionId).map((r) => ({ status: r.status, readAt: r.read_at }));
+}
+function provisionalTimes(store, sessionId) {
+  return store.db.prepare("SELECT at FROM ledger WHERE session_id = ? AND recipient_kind IN ('pending', 'turn') ORDER BY at").all(sessionId).map((r) => r.at);
+}
+function sessionContext(store, sessionId, now) {
+  const events = store.attributionEvents(sessionId);
+  const session = store.getSession(sessionId);
+  const quietSince = now.getTime() - LEDGER_WINDOW_MS;
+  const ended = events.some((e) => e.type === "SessionEnd") || session !== null && (session.state !== ACTIVE_SESSION || session.lastEventTime !== null && ms3(session.lastEventTime) < quietSince);
+  return {
+    turns: buildTurns(sessionId, events),
+    subagents: subagentsFor(store, sessionId),
+    reads: sessionReads(store, sessionId),
+    provisional: provisionalTimes(store, sessionId),
+    segments: store.segmentsForSession(sessionId),
+    ended
+  };
+}
+function finalSegmentQuality(seg, ctx) {
+  const next = ctx.segments.find((s) => s.id !== seg.id && ms3(s.startedAt) > ms3(seg.startedAt));
+  return segmentQuality(seg, ctx.turns, ctx.subagents, ctx.reads, ctx.provisional, next?.startedAt ?? null);
+}
+
+// hook-src/flusher/rename.ts
+var RENAME_SUPPORT_KEY = "rename_support";
+var PENDING_RENAME_PREFIX = "segment_rename:";
+var REPROBE_MS = 24 * 36e5;
+function readJson(store, key) {
+  const raw = store.getMeta(key);
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+function readRenameSupport(store) {
+  const v = readJson(store, RENAME_SUPPORT_KEY);
+  return v !== null && (v.state === "supported" || v.state === "unsupported") && typeof v.at === "string" ? v : null;
+}
+function writeRenameSupport(store, state, now) {
+  store.setMeta(RENAME_SUPPORT_KEY, JSON.stringify({ state, at: now.toISOString() }));
+}
+function tryInPlace(store, now) {
+  const support = readRenameSupport(store);
+  if (support === null || support.state === "supported") return true;
+  const at = Date.parse(support.at);
+  return !Number.isFinite(at) || now.getTime() - at >= REPROBE_MS;
+}
+function readPendingRename(store, segmentId) {
+  const v = readJson(store, PENDING_RENAME_PREFIX + segmentId);
+  if (v === null || typeof v.fromMappingVersionId !== "number" || typeof v.at !== "string" || typeof v.baseRevision !== "number") return null;
+  return v;
+}
+function writePendingRename(store, segmentId, pending) {
+  store.setMeta(PENDING_RENAME_PREFIX + segmentId, JSON.stringify(pending));
+}
+function clearPendingRename(store, segmentId) {
+  store.deleteMeta(PENDING_RENAME_PREFIX + segmentId);
+}
+function contextOnlyChange(from, to) {
+  if (from.workspaceId !== to.workspaceId || from.projectId !== to.projectId) return false;
+  if (canonicalJson(from.tagIds) !== canonicalJson(to.tagIds)) return false;
+  return from.taskId !== to.taskId || from.description !== to.description;
+}
+function mappingOf(store, versionId) {
+  const version = store.getMapping(versionId);
+  return version ? parseStoredMapping(version.normalizedJson) : null;
+}
+function mayRenameInPlace(store, segmentId, fromVersionId, toVersionId, now) {
+  if (readPendingRename(store, segmentId) !== null) return false;
+  const from = mappingOf(store, fromVersionId);
+  const to = mappingOf(store, toVersionId);
+  if (from === null || to === null || !contextOnlyChange(from, to)) return false;
+  return tryInPlace(store, now);
+}
+function probeView(seg, pending) {
+  return { ...seg, stoppedAt: pending.at, lastActivityAt: pending.at, observedAt: pending.at, working: true, final: false };
+}
+function holdsSent(entry, sent) {
+  const sentTask = typeof sent.taskId === "string" ? sent.taskId.toLowerCase() : null;
+  const gotTask = entry.taskId === null ? null : entry.taskId.toLowerCase();
+  return entry.description === sent.description && gotTask === sentTask;
+}
+function isProbe(pending, revision) {
+  return revision > pending.baseRevision;
+}
+function resolveAppliedProbe(store, answer, newId, now) {
+  const { segmentId, revision, sent, entry, existed } = answer;
+  const pending = readPendingRename(store, segmentId);
+  if (pending === null || !isProbe(pending, revision)) return false;
+  if (entry !== void 0 && holdsSent(entry, sent)) {
+    clearPendingRename(store, segmentId);
+    if (existed) writeRenameSupport(store, "supported", now);
+    return true;
+  }
+  if (entry !== void 0 && existed) writeRenameSupport(store, "unsupported", now);
+  repairRename(store, segmentId, pending, newId(), now);
+  return true;
+}
+function resolveRefusedProbe(store, segmentId, revision, newId, now) {
+  const pending = readPendingRename(store, segmentId);
+  if (pending === null || !isProbe(pending, revision)) return false;
+  repairRename(store, segmentId, pending, newId(), now);
+  return true;
+}
+function repairRename(store, segmentId, pending, newId, now) {
+  clearPendingRename(store, segmentId);
+  const seg = store.getSegment(segmentId);
+  if (seg === null || seg.serverState !== null) return;
+  if (store.getMapping(pending.fromMappingVersionId) === null) return;
+  const at = pending.at;
+  const next = {
+    ...seg,
+    id: newId,
+    startedAt: at,
+    lastActivityAt: Date.parse(seg.lastActivityAt) >= Date.parse(at) ? seg.lastActivityAt : at,
+    stoppedAt: Date.parse(seg.stoppedAt) >= Date.parse(at) ? seg.stoppedAt : at,
+    quality: "pending",
+    createdOnServer: false,
+    serverState: null,
+    lastRevision: 0
+  };
+  store.upsertSegment({
+    ...seg,
+    mappingVersionId: pending.fromMappingVersionId,
+    lastActivityAt: pending.lastActivityAt,
+    observedAt: pending.observedAt,
+    stoppedAt: at,
+    working: false,
+    final: true,
+    finalReason: "mapping",
+    finalDiagnostic: null
+  });
+  store.upsertSegment(next);
+  store.deleteOutboxFor("segment", segmentId);
+  const db = store.db;
+  const moved = db.prepare(
+    `SELECT agent_id FROM subagents WHERE session_id = ? AND recipient_kind = 'segment' AND recipient_id = ? AND launched_at IS NOT NULL AND launched_at >= ?`
+  ).all(seg.sessionId, segmentId, at);
+  db.prepare(`UPDATE subagents SET recipient_id = ? WHERE session_id = ? AND recipient_kind = 'segment' AND recipient_id = ? AND launched_at IS NOT NULL AND launched_at >= ?`).run(
+    newId,
+    seg.sessionId,
+    segmentId,
+    at
+  );
+  db.prepare(
+    `UPDATE ledger SET recipient_id = ? WHERE recipient_kind = 'segment' AND recipient_id = ? AND folded = 0 AND at >= ?
+       AND (agent_id IS NULL OR NOT EXISTS (SELECT 1 FROM subagents s WHERE s.agent_id = ledger.agent_id))`
+  ).run(newId, segmentId, at);
+  const toMove = db.prepare(`UPDATE ledger SET recipient_id = ? WHERE recipient_kind = 'segment' AND recipient_id = ? AND folded = 0 AND agent_id = ?`);
+  for (const { agent_id } of moved) toMove.run(newId, segmentId, agent_id);
+  const reads = sessionReads(store, seg.sessionId);
+  if (reads.length > 0 && reads.every((r) => r.status === "complete")) {
+    const nowIso = now.toISOString();
+    snapshotUsage(store, { kind: "segment", id: segmentId }, nowIso);
+    snapshotUsage(store, { kind: "segment", id: newId }, nowIso);
+  } else {
+    store.deleteUsageSnapshot("segment", segmentId);
+    store.deleteUsageSnapshot("segment", newId);
+  }
+}
+
+// hook-src/flusher/sender.ts
+var MAX_BACKOFF_MS = 5 * 6e4;
+var MAX_RETRY_AFTER_MS = 60 * 6e4;
+var PROBE_INTERVAL_MS = 60 * 6e4;
+var INGESTION_WINDOW_MS = 30 * 24 * 60 * 6e4;
+var AGENT_VERSION_GRACE_MS = 2 * 6e4;
+var SEND_BATCH = 50;
+var STOPPED_MISMATCH = "stopped_mismatch";
+var UNLINKED = "unlinked";
+var PAUSE_KEY = "send_pause";
+var WORKSPACE_KEY = "workspace";
+function readJson2(store, key) {
+  const raw = store.getMeta(key);
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+function readPause(store) {
+  return readJson2(store, PAUSE_KEY);
+}
+function readWorkspace(store) {
+  return readJson2(store, WORKSPACE_KEY);
+}
+function writeWorkspace(store, ws) {
+  store.setMeta(WORKSPACE_KEY, JSON.stringify(ws));
+}
+function pauseSending(store, reason, now) {
+  const current = readPause(store);
+  const probeAt = new Date(now.getTime() + PROBE_INTERVAL_MS).toISOString();
+  const pause2 = { reason, since: current?.reason === reason ? current.since : now.toISOString(), probeAt };
+  store.setMeta(PAUSE_KEY, JSON.stringify(pause2));
+  if (current?.reason !== reason) addNotice(store, reason, now);
+}
+function allowProbeSend(store) {
+  const current = readPause(store);
+  if (current !== null) store.setMeta(PAUSE_KEY, JSON.stringify({ ...current, probing: true }));
+}
+function canSend(store) {
+  const pause2 = readPause(store);
+  return readWorkspace(store) !== null && (pause2 === null || pause2.probing === true);
+}
+function resumeSending(store) {
+  store.deleteMeta(PAUSE_KEY);
+}
+function backoffMs(attempts, random = Math.random) {
+  const base = Math.min(2 ** Math.max(1, attempts) * 1e3, MAX_BACKOFF_MS);
+  const r = Math.min(1, Math.max(0, random()));
+  return Math.round(base / 2 + r * base / 2);
+}
+function retryDelayMs(afterMs, attempts, random) {
+  return afterMs === null ? backoffMs(attempts, random) : Math.min(Math.max(0, afterMs), MAX_RETRY_AFTER_MS);
+}
+function stopMismatchedSession(store, sessionId, now) {
+  const row = store.getSession(sessionId);
+  if (row?.state === STOPPED_MISMATCH) return;
+  store.upsertSession({
+    ...row ?? { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, agentVersion: null, provider: null, lateEvents: 0 },
+    state: STOPPED_MISMATCH
+  });
+  for (const seg of store.segmentsForSession(sessionId)) {
+    store.deleteOutboxFor("segment", seg.id);
+    if (store.isTerminal("segment", seg.id)) continue;
+    store.addTerminal({
+      targetKind: "segment",
+      targetId: seg.id,
+      revision: seg.lastRevision > 0 ? seg.lastRevision : null,
+      code: "workspace_mismatch",
+      at: now.toISOString(),
+      diagnostic: "The mapping names another workspace than the API key's."
+    });
+  }
+  addNotice(store, "workspace_mismatch", now);
+}
+function stopUnlinkedSession(store, sessionId, now) {
+  const row = store.getSession(sessionId);
+  if (row?.state === UNLINKED) return;
+  store.upsertSession({
+    ...row ?? { sessionId, lastEventSeq: 0, lastEventTime: null, lastUptimeS: null, agentVersion: null, provider: null, lateEvents: 0 },
+    state: UNLINKED
+  });
+  const at = now.toISOString();
+  const diagnostic = "The repository is no longer linked on this machine.";
+  for (const seg of store.segmentsForSession(sessionId)) {
+    if (!seg.final) store.upsertSegment({ ...seg, working: false, final: true, finalReason: UNLINKED });
+    store.deleteOutboxFor("segment", seg.id);
+    if (store.isTerminal("segment", seg.id)) continue;
+    store.addTerminal({ targetKind: "segment", targetId: seg.id, revision: seg.lastRevision > 0 ? seg.lastRevision : null, code: UNLINKED, at, diagnostic });
+  }
+  for (const entry of store.delegatedForSession(sessionId)) {
+    store.deleteOutboxFor("delegated", entry.entryId);
+    if (store.isTerminal("delegated", entry.entryId)) continue;
+    const revision = store.getLastCommitted("delegated", entry.entryId)?.revision ?? null;
+    store.addTerminal({ targetKind: "delegated", targetId: entry.entryId, revision, code: UNLINKED, at, diagnostic });
+  }
+  addNotice(store, UNLINKED, now);
+}
+function reactivateLinkedSession(store, sessionId) {
+  const row = store.getSession(sessionId);
+  if (row?.state === UNLINKED) store.upsertSession({ ...row, state: ACTIVE_SESSION });
+}
+function recordTerminal(store, row, code2, diagnostic, now) {
+  store.deleteOutboxFor(row.targetKind, row.targetId);
+  if (store.isTerminal(row.targetKind, row.targetId)) return;
+  store.addTerminal({ targetKind: row.targetKind, targetId: row.targetId, revision: row.revision, code: code2, at: now.toISOString(), diagnostic });
+}
+function segmentMismatch(store, segmentId, workspaceId) {
+  const seg = store.getSegment(segmentId);
+  if (seg === null) return null;
+  const version = store.getMapping(seg.mappingVersionId);
+  const mapping = version ? parseStoredMapping(version.normalizedJson) : null;
+  return mapping !== null && mapping.workspaceId !== workspaceId ? seg.sessionId : null;
+}
+function expireBeforeSend(store, workspaceId, now) {
+  const oldest = now.getTime() - INGESTION_WINDOW_MS;
+  for (const row of store.latestOutbox()) {
+    if (row.targetKind !== "segment") continue;
+    const mismatched = segmentMismatch(store, row.targetId, workspaceId);
+    if (mismatched !== null) {
+      stopMismatchedSession(store, mismatched, now);
+      continue;
+    }
+    const seg = store.getSegment(row.targetId);
+    if (seg?.createdOnServer) continue;
+    const startedAt = Date.parse(JSON.parse(row.bodyJson).startedAt ?? "");
+    if (Number.isFinite(startedAt) && startedAt < oldest) {
+      recordTerminal(store, row, "ingestion_window", "Started more than 30 days ago: Tickr no longer accepts it.", now);
+    }
+  }
+}
+function versionHoldMs(store, row, now) {
+  if (row.targetKind !== "segment") return null;
+  const seg = store.getSegment(row.targetId);
+  if (seg === null || seg.createdOnServer || seg.final) return null;
+  if (JSON.parse(row.bodyJson).final === true) return null;
+  if ((store.getSession(seg.sessionId)?.agentVersion ?? null) !== null) return null;
+  const elapsed = now.getTime() - Date.parse(seg.startedAt);
+  if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= AGENT_VERSION_GRACE_MS) return null;
+  return AGENT_VERSION_GRACE_MS - elapsed;
+}
+function versionHolds(store, now) {
+  const held = /* @__PURE__ */ new Set();
+  let dueInMs = null;
+  for (const row of store.latestOutbox()) {
+    const wait = versionHoldMs(store, row, now);
+    if (wait === null) continue;
+    held.add(row.targetId);
+    dueInMs = dueInMs === null ? wait : Math.min(dueInMs, wait);
+  }
+  return { held, dueInMs };
+}
+async function sendRow(store, api, row) {
+  const body = JSON.parse(row.bodyJson);
+  if (row.targetKind === "segment") {
+    const seg = store.getSegment(row.targetId);
+    const session = seg ? store.getSession(seg.sessionId) : null;
+    const agent = agentHeaderValue({ name: "claude-code", version: session?.agentVersion ?? "unknown" });
+    return api.putSegment(row.targetId, body, agent);
+  }
+  return api.putUsage(row.targetId, body);
+}
+function applyOutcome(store, row, outcome, now, random) {
+  const kind = row.targetKind;
+  const newId = () => uuidv7(now.getTime());
+  if ((outcome.kind === "applied" || outcome.kind === "terminal") && readPause(store) !== null) resumeSending(store);
+  switch (outcome.kind) {
+    case "applied": {
+      store.deleteOutboxThrough(kind, row.targetId, row.revision);
+      if (kind === "segment") {
+        const existed = store.getSegment(row.targetId)?.createdOnServer === true && !outcome.created;
+        store.markSegmentCreated(row.targetId);
+        const sent = JSON.parse(row.bodyJson);
+        if (outcome.detached || outcome.finalized && sent.final !== true) {
+          markClosedByServer(store, row.targetId, outcome.detached ? "detached" : "finalized");
+          store.deleteOutboxFor(kind, row.targetId);
+          return { delay: null, renamed: false };
+        }
+        const answer = { segmentId: row.targetId, revision: row.revision, sent, entry: outcome.entry, existed };
+        return { delay: null, renamed: resolveAppliedProbe(store, answer, newId, now) };
+      }
+      return { delay: null, renamed: false };
+    }
+    case "retry": {
+      const attempts = row.attempts + 1;
+      const delay = retryDelayMs(outcome.afterMs, attempts, random);
+      store.setOutboxAttempt(kind, row.targetId, row.revision, attempts, new Date(now.getTime() + delay).toISOString());
+      return { delay, renamed: false };
+    }
+    case "pause":
+      pauseSending(store, outcome.reason, now);
+      return { delay: null, renamed: false };
+    case "terminal": {
+      if (kind === "segment" && !outcome.closesSegment && resolveRefusedProbe(store, row.targetId, row.revision, newId, now)) {
+        if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
+        return { delay: null, renamed: true };
+      }
+      recordTerminal(store, row, outcome.code, `Refused by Tickr (${outcome.code}).`, now);
+      if (kind === "segment" && outcome.closesSegment) {
+        markClosedByServer(store, row.targetId, outcome.code === "segment_detached" ? "detached" : "finalized");
+      }
+      if (outcome.code === "not_project_member") addNotice(store, "not_project_member", now);
+      return { delay: null, renamed: false };
+    }
+  }
+}
+async function sendDue(store, gen, api, now, budgetMs, opts = {}) {
+  const endAt = performance.now() + budgetMs;
+  const remaining = opts.remainingMs ?? (() => endAt - performance.now());
+  const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const inTx = (fn) => guarded(store, gen, now().toISOString(), fn);
+  const workspace = readWorkspace(store);
+  if (workspace === null || !canSend(store)) return { dueInMs: null };
+  inTx(() => expireBeforeSend(store, workspace.workspaceId, now()));
+  const { held } = versionHolds(store, now());
+  const waiting = (row) => row.targetKind === "segment" && held.has(row.targetId);
+  let resolved = false;
+  for (; ; ) {
+    const rows = store.dueOutbox(now().toISOString(), SEND_BATCH + held.size).filter((row) => !waiting(row));
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      if (remaining() < timeoutMs) return { dueInMs: 0, outOfBudget: true };
+      if (store.isTerminal(row.targetKind, row.targetId)) {
+        inTx(() => store.deleteOutboxFor(row.targetKind, row.targetId));
+        continue;
+      }
+      const outcome = await sendRow(store, api, row);
+      opts.boundary?.("sent");
+      const { delay, renamed } = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));
+      if (renamed) resolved = true;
+      if (outcome.kind === "applied") opts.boundary?.("acknowledged");
+      if (outcome.kind === "retry") return { dueInMs: resolved ? 0 : delay };
+      if (outcome.kind === "pause") return { dueInMs: null };
+    }
+  }
+  return { dueInMs: resolved ? 0 : nextDueMs(store, now()) };
+}
+function nextDueMs(store, now) {
+  const holds = versionHolds(store, now);
+  let due = holds.dueInMs;
+  for (const row of store.latestOutbox()) {
+    if (row.targetKind === "segment" && holds.held.has(row.targetId)) continue;
+    const wait = Math.max(0, Date.parse(row.nextAttemptAt) - now.getTime());
+    due = due === null ? wait : Math.min(due, wait);
+  }
+  return due;
+}
+function sendStage(opts = {}) {
+  return async (ctx) => {
+    const { dueInMs, outOfBudget } = await sendDue(ctx.store, ctx.generation, ctx.api, ctx.now, ctx.remainingMs(), {
+      ...opts,
+      boundary: ctx.boundary,
+      remainingMs: ctx.remainingMs
+    });
+    if (outOfBudget) return { dueInMs: 0, outOfBudget };
+    return dueInMs === null ? {} : { dueInMs };
+  };
+}
+
 // hook-src/flusher/bounds.ts
 var import_node_fs8 = require("node:fs");
 var import_node_path9 = require("node:path");
@@ -3195,132 +3513,6 @@ function boundsStage(opts = {}) {
   };
 }
 
-// hook-src/quality.ts
-var MAX_USAGE_ROWS = 20;
-var MAX_TOKENS = 1e12;
-var OTHER_PROVIDER = "other";
-var OTHER_MODELS = "other-models";
-var ms3 = (iso2) => Date.parse(iso2);
-var NEVER = Number.POSITIVE_INFINITY;
-function turnAt2(t, turns) {
-  let found = null;
-  for (const turn of turns) if (ms3(turn.startedAt) <= t && (turn.endedAt === null || t < ms3(turn.endedAt))) found = turn;
-  return found;
-}
-function subagentEnd(sub, turns) {
-  if (sub.stoppedAt !== null) return ms3(sub.stoppedAt);
-  if (sub.source === "hook" || sub.launchedAt === null) return null;
-  const turn = turnAt2(ms3(sub.launchedAt), turns);
-  return turn?.endedAt ? ms3(turn.endedAt) : null;
-}
-function coveredAfter(reads, after) {
-  return reads.length > 0 && reads.every((r) => r.status === "complete" && r.readAt !== null && ms3(r.readAt) >= after);
-}
-function latest(ends, floor) {
-  let max = floor;
-  for (const end of ends) {
-    if (end === null) return null;
-    max = Math.max(max, end);
-  }
-  return max;
-}
-function segmentQuality(seg, turns, subagents, reads, provisional = [], until = null) {
-  const start = ms3(seg.startedAt);
-  const stop = ms3(seg.stoppedAt);
-  const spanEnd = until === null ? NEVER : ms3(until);
-  const inSpan = (iso2) => ms3(iso2) >= start && ms3(iso2) < spanEnd;
-  if (provisional.some(inSpan)) return "incomplete";
-  const mine = turns.filter((t) => ms3(t.startedAt) < Math.max(stop, start + 1) && (t.endedAt === null || ms3(t.endedAt) > start));
-  const subs = subagents.filter(
-    (s) => s.recipientKind === "segment" && s.recipientId === seg.id || s.recipientKind === null && s.launchedAt !== null && inSpan(s.launchedAt)
-  );
-  if (subs.some((s) => s.recipientKind === null)) return "incomplete";
-  const end = latest([...mine.map((t) => t.endedAt === null ? null : ms3(t.endedAt)), ...subs.map((s) => subagentEnd(s, turns))], stop);
-  return end !== null && coveredAfter(reads, end) ? "complete" : "incomplete";
-}
-function delegatedQuality(place, subagents, reads, sessionEnded, provisional = []) {
-  if (place === void 0 || place.turn === null || !place.first) return "complete";
-  const turn = place.turn;
-  const start = ms3(turn.startedAt);
-  const turnEnd = turn.endedAt === null ? null : ms3(turn.endedAt);
-  const inTurn = (iso2) => ms3(iso2) >= start && (turnEnd === null || ms3(iso2) < turnEnd);
-  const launched = subagents.filter((s) => s.launchedAt !== null && inTurn(s.launchedAt));
-  const end = turnEnd === null ? null : latest(launched.map((s) => subagentEnd(s, [turn])), turnEnd);
-  const complete = end !== null && !provisional.some(inTurn) && launched.every((s) => s.recipientKind !== null) && coveredAfter(reads, end);
-  if (complete) return "complete";
-  return sessionEnded ? "incomplete" : "pending";
-}
-var RANK = { pending: 0, incomplete: 1, complete: 2 };
-function nextQuality(previous, computed, target) {
-  if (target.segment && !target.final) return "pending";
-  if (previous === null) return computed;
-  return RANK[computed] >= RANK[previous] ? computed : previous;
-}
-var tokensOf = (r) => r.inputTokens + r.outputTokens + r.cacheCreationInputTokens + r.cacheReadInputTokens;
-var byKey = (a, b) => a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : a.model < b.model ? -1 : a.model > b.model ? 1 : 0;
-function boundUsage(rows) {
-  let kept = rows.map((r) => ({ ...r }));
-  if (kept.length > MAX_USAGE_ROWS) {
-    const sorted = [...kept].sort((a, b) => tokensOf(b) - tokensOf(a) || byKey(a, b));
-    const other = sorted.filter((r) => r.provider === OTHER_PROVIDER && r.model === OTHER_MODELS);
-    const rest = sorted.filter((r) => !(r.provider === OTHER_PROVIDER && r.model === OTHER_MODELS));
-    const top = rest.slice(0, MAX_USAGE_ROWS - 1);
-    const folded = { provider: OTHER_PROVIDER, model: OTHER_MODELS, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
-    for (const r of [...rest.slice(MAX_USAGE_ROWS - 1), ...other]) {
-      folded.inputTokens += r.inputTokens;
-      folded.outputTokens += r.outputTokens;
-      folded.cacheCreationInputTokens += r.cacheCreationInputTokens;
-      folded.cacheReadInputTokens += r.cacheReadInputTokens;
-    }
-    kept = [...top, folded];
-  }
-  let clamped = false;
-  const clamp = (n) => {
-    if (n > MAX_TOKENS) {
-      clamped = true;
-      return MAX_TOKENS;
-    }
-    return n;
-  };
-  const usage = kept.map((r) => ({
-    ...r,
-    inputTokens: clamp(r.inputTokens),
-    outputTokens: clamp(r.outputTokens),
-    cacheCreationInputTokens: clamp(r.cacheCreationInputTokens),
-    cacheReadInputTokens: clamp(r.cacheReadInputTokens)
-  })).sort(byKey);
-  return { usage, clamped };
-}
-function usageForRevision(store, target) {
-  const row = store.db.prepare("SELECT usage_json FROM usage_snapshots WHERE target_kind = ? AND target_id = ?").get(target.kind, target.id);
-  if (row === void 0) return void 0;
-  return boundUsage(JSON.parse(row.usage_json));
-}
-function sessionReads(store, sessionId) {
-  return store.db.prepare("SELECT status, read_at FROM transcript_offsets WHERE session_id = ? ORDER BY path").all(sessionId).map((r) => ({ status: r.status, readAt: r.read_at }));
-}
-function provisionalTimes(store, sessionId) {
-  return store.db.prepare("SELECT at FROM ledger WHERE session_id = ? AND recipient_kind IN ('pending', 'turn') ORDER BY at").all(sessionId).map((r) => r.at);
-}
-function sessionContext(store, sessionId, now) {
-  const events = store.attributionEvents(sessionId);
-  const session = store.getSession(sessionId);
-  const quietSince = now.getTime() - LEDGER_WINDOW_MS;
-  const ended = events.some((e) => e.type === "SessionEnd") || session !== null && (session.state !== ACTIVE_SESSION || session.lastEventTime !== null && ms3(session.lastEventTime) < quietSince);
-  return {
-    turns: buildTurns(sessionId, events),
-    subagents: subagentsFor(store, sessionId),
-    reads: sessionReads(store, sessionId),
-    provisional: provisionalTimes(store, sessionId),
-    segments: store.segmentsForSession(sessionId),
-    ended
-  };
-}
-function finalSegmentQuality(seg, ctx) {
-  const next = ctx.segments.find((s) => s.id !== seg.id && ms3(s.startedAt) > ms3(seg.startedAt));
-  return segmentQuality(seg, ctx.turns, ctx.subagents, ctx.reads, ctx.provisional, next?.startedAt ?? null);
-}
-
 // hook-src/flusher/revisions.ts
 var WORKING_FRESH_MS = 2 * 6e4;
 var LEASE_REFRESH_MS = 6e4;
@@ -3416,11 +3608,16 @@ var segmentRevisions = (ctx) => {
     const mapping = mappings.get(seg.mappingVersionId);
     if (!mapping) continue;
     const target = { kind: "segment", id: seg.id };
+    const pending = readPendingRename(ctx.store, seg.id);
+    if (pending !== null) {
+      if (seg.lastRevision <= pending.baseRevision) desired.push({ target, body: desiredSegmentBody(probeView(seg, pending), mapping, now, void 0, "pending") });
+      continue;
+    }
     const last = ctx.store.getLastCommitted("segment", seg.id);
     const usage = usageForRevision(ctx.store, target);
     let quality = "pending";
     if (seg.final) {
-      const computed = usage?.clamped ? "incomplete" : finalQuality(ctx.store, seg, now, contextOf(seg.sessionId));
+      const computed = usage === void 0 || usage.clamped ? "incomplete" : finalQuality(ctx.store, seg, now, contextOf(seg.sessionId));
       quality = nextQuality(committedQuality(last), computed, { segment: true, final: true });
     }
     const body = desiredSegmentBody(seg, mapping, now, usage?.usage, quality);

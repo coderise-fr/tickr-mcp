@@ -251,8 +251,9 @@ describe("commands and skill", () => {
     expect(text).toContain("`ask_to_link`");
   });
 
-  it("a task or description change starts a new Tickr entry: said in the skill, /tickr:task, /tickr:describe and the README", () => {
+  it("a task or description change renames the entry in place when Tickr supports it, else starts a new one: said in the skill, /tickr:task, /tickr:describe and the README", () => {
     const readme = readFileSync(`${pluginRoot}../../README.md`, "utf8").replace(/\r\n/g, "\n").replace(/\s+/g, " ");
+    const rule = /renamed in place when your Tickr supports it; otherwise a new Tickr entry starts \(the (previous|current) one ends there\)/;
     for (const [name, text] of [
       ["SKILL.md", read("skills/tickr/SKILL.md")],
       ["task.md", read("commands/task.md")],
@@ -260,12 +261,12 @@ describe("commands and skill", () => {
       ["README.md", readme],
     ] as const) {
       const flat = text.replace(/\s+/g, " ");
-      expect(flat, name).toMatch(/starts a new Tickr entry/);
-      expect(flat, name).toContain("Tickr does not change the task or description of an entry that already exists");
+      expect(flat, name).toMatch(rule);
+      expect(flat, name).not.toContain("Tickr does not change the task or description of an entry that already exists");
     }
     for (const file of ["commands/task.md", "commands/describe.md"] as const) {
       const steps = numberedSteps(parse(read(file)).body.slice(parse(read(file)).body.indexOf("## Steps")));
-      expect(steps.find((s) => s.text.includes("**Confirm.**"))!.text.replace(/\s+/g, " "), file).toMatch(/starts a new Tickr entry/);
+      expect(steps.find((s) => s.text.includes("**Confirm.**"))!.text.replace(/\s+/g, " "), file).toMatch(rule);
     }
     expect(read("skills/tickr/SKILL.md")).toMatch(/set the task and the description early/);
   });

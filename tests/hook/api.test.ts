@@ -73,6 +73,17 @@ describe("createAgentApi: the wire", () => {
     expect(await api.putSegment(SEGMENT, BODY, "claude-code/unknown")).toEqual({ kind: "applied", created: false, finalized: false, detached: true });
   });
 
+  it("reads the entry's task and description from the answer when it shows them (a rename in place is checked against them)", async () => {
+    const { api } = await serve((i) =>
+      json(200, entry([{ description: "Mobile app UI", taskId: "2a9c6e3f-7d4b-4e0a-9c3d-5f7b9d1e3f04" }, { description: "Review", taskId: null }, { description: 7 }, {}][i]!)),
+    );
+    const put = () => api.putSegment(SEGMENT, BODY, "claude-code/unknown");
+    expect(await put()).toMatchObject({ entry: { description: "Mobile app UI", taskId: "2a9c6e3f-7d4b-4e0a-9c3d-5f7b9d1e3f04" } });
+    expect(await put()).toMatchObject({ entry: { description: "Review", taskId: null } });
+    expect(await put()).not.toHaveProperty("entry");
+    expect(await put()).not.toHaveProperty("entry");
+  });
+
   it("a redirect is not followed and the key is not sent elsewhere", async () => {
     const target = await serve(() => json(200, entry()));
     const { api } = await serve(() => ({ status: 307, headers: { location: `${target.server.baseUrl}/api/v1/agent-segments/${SEGMENT}` } }));

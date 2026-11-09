@@ -19,6 +19,7 @@ import {
   type SegmenterConfig,
   type SessionState,
 } from "./segmenter.js";
+import { clearPendingRename, mayRenameInPlace, writePendingRename } from "./rename.js";
 import type { StageRun } from "./stages.js";
 
 /** Events read per guarded transaction. */
@@ -82,9 +83,22 @@ export function applyChanges(store: Store, sessionId: string, changes: readonly 
       });
       continue;
     }
-    const row = store.getSegment(c.id);
+    const row = store.getSegment(c.kind === "rename" ? c.seg.id : c.id);
     if (row === null || row.final) continue;
-    if (c.kind === "extend") {
+    if (c.kind === "rename") {
+      const s = c.seg;
+      store.upsertSegment({ ...row, mappingVersionId: s.mappingVersionId, lastActivityAt: s.lastActivityAt, stoppedAt: s.lastActivityAt, working: s.working, observedAt: s.observedAt });
+      // Nothing committed yet: the server holds nothing of the segment, nothing to confirm.
+      if (row.lastRevision > 0) {
+        writePendingRename(store, s.id, {
+          fromMappingVersionId: c.previous.mappingVersionId,
+          at: c.at,
+          lastActivityAt: c.previous.lastActivityAt,
+          observedAt: c.previous.observedAt,
+          baseRevision: row.lastRevision,
+        });
+      }
+    } else if (c.kind === "extend") {
       store.upsertSegment({ ...row, lastActivityAt: c.lastActivityAt, stoppedAt: c.lastActivityAt, working: c.working, observedAt: c.observedAt });
     } else {
       store.upsertSegment({ ...row, stoppedAt: c.stoppedAt, working: false, final: true, finalReason: c.reason, finalDiagnostic: c.diagnostic ?? null });
@@ -146,11 +160,17 @@ export function markClosedByServer(store: Store, segmentId: string, serverState:
   const row = store.getSegment(segmentId);
   if (row === null) return;
   store.upsertSegment({ ...row, working: false, final: true, finalReason: row.final ? row.finalReason : "server_closed", serverState });
+  // The server closed it: a rename of it waiting for an answer is over.
+  clearPendingRename(store, segmentId);
 }
 
 export const segmentationStage: StageRun = (ctx) => {
   const idleMs = ctx.config.idleMinutes * 60_000;
-  const cfg: SegmenterConfig = { idleMs, newId: () => uuidv7(ctx.now().getTime()) };
+  const cfg: SegmenterConfig = {
+    idleMs,
+    newId: () => uuidv7(ctx.now().getTime()),
+    renameInPlace: (open, mappingVersionId) => mayRenameInPlace(ctx.store, open.id, open.mappingVersionId, mappingVersionId, ctx.now()),
+  };
   for (const sessionId of ctx.store.pendingEventSessions()) {
     for (;;) {
       if (ctx.remainingMs() <= 0) return { dueInMs: 0 };

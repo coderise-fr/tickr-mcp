@@ -183,11 +183,12 @@ Claude also proposes `/tickr:task` when it notices that the work moved to anothe
 of the project or that its purpose changed. A description is plain text of at most
 10 words and 100 characters; only words with a letter count, so numbers are free (the
 100 characters still apply), and `"`, `` ` ``, `$` and `\` are refused. Examples:
-`Implementation of the mobile app UI`, `Fix tickets 1 2 3 4 5 6 7 110 210`. Changing
-the task or the description starts a new Tickr entry from that moment (the previous one
-ends there), because Tickr does not change the task or description of an entry that
-already exists: set them early, once the work is clear, and avoid changing them for
-small shifts. The
+`Implementation of the mobile app UI`, `Fix tickets 1 2 3 4 5 6 7 110 210`. When you
+change the task or the description, the entry is renamed in place when your Tickr
+supports it; otherwise a new Tickr entry starts (the previous one ends there). The
+plugin learns which from Tickr's answers and asks again a day later, so an upgraded
+Tickr is picked up. Set them early, once the work is clear, and avoid changing them
+for small shifts. The
 choice is kept on your machine, in one small file per session in the plugin data
 directory (removed after 90 days); different sessions in the same repository keep
 their own choice.
