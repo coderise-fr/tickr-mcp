@@ -17,6 +17,7 @@ import {
   writeWorkspace,
 } from "../../hook-src/flusher/sender.js";
 import { CLOCK_SKEW_LIMIT_MS, workspaceStage } from "../../hook-src/flusher/workspace.js";
+import { LEDGER_WINDOW_MS } from "../../hook-src/ledger.js";
 import { canonicalJson } from "../../hook-src/mapping.js";
 import type { JournalEvent } from "../../hook-src/store/db.js";
 import { json, problem, type RecordedRequest, type Reply, startServer } from "../helpers/httpServer.js";
@@ -277,6 +278,80 @@ describe("sendDue", () => {
     expect(t.h.store.listTerminal()).toEqual([]);
   });
 
+  it("409 agent_revision_conflict on a final, complete revision: the replacement is still selected, outside the ledger window", async () => {
+    const t = await setup((_req, i) => (i === 0 ? problem(409, "conflict", "agent_revision_conflict") : ok(200)));
+    await t.check();
+    t.activity();
+    const seg = t.h.store.segmentsForSession("s-1")[0]!;
+    t.h.store.upsertSegment({ ...seg, working: false, final: true, finalReason: "idle" });
+    const target = { kind: "segment", id: seg.id } as const;
+    const last = JSON.parse(t.h.store.getLastCommitted("segment", seg.id)!.bodyJson) as Record<string, unknown>;
+    commitIfChanged(t.h.store, t.h.ctx.generation, target, { ...last, working: false, final: true, usageQuality: "complete", usage: [] }, t.h.ctx.now());
+    await t.send();
+    expect(t.h.store.outboxFor("segment", seg.id)).toEqual([]);
+
+    // Days later no ledger row is left to fold and the session is out of the window.
+    const later = plus(NOW, 3 * 24 * 60 * MIN);
+    t.h.setNow(later);
+    expect(t.h.store.segmentsForRevision(plus(later, -LEDGER_WINDOW_MS)).map((s) => s.id)).toEqual([seg.id]);
+    void revisionsStage()(t.h.ctx);
+    await t.send();
+    expect(t.puts().map((r) => (JSON.parse(r.body) as { revision: number }).revision)).toEqual([2, 3]);
+    expect(JSON.parse(t.puts().at(-1)!.body)).toMatchObject({ final: true, usageQuality: "complete" });
+    expect(t.h.store.pendingOutboxCount()).toBe(0);
+  });
+
+  it("an invalidated commit of a delegated entry is selected again, outside the ledger window; a settled one is not", async () => {
+    const t = await setup(() => ok());
+    t.activity();
+    t.h.store.recordDelegated({ entryId: "e-1", sessionId: "s-1", promptId: null, createdAt: NOW, eventSeq: null });
+    const committed = { targetKind: "delegated", targetId: "e-1", revision: 1, canonicalJson: '{"agentSessionId":"s-1"}', bodyJson: JSON.stringify({ revision: 1, agentSessionId: "s-1", usageQuality: "complete", usage: [] }), committedAt: NOW } as const;
+    const outside = plus(NOW, 3 * 24 * 60 * MIN);
+    t.h.store.putLastCommitted(committed);
+    expect(t.h.store.delegatedForRevision(outside)).toEqual([]);
+    t.h.store.putLastCommitted({ ...committed, canonicalJson: "" });
+    expect(t.h.store.delegatedForRevision(outside).map((d) => d.entryId)).toEqual(["e-1"]);
+  });
+
+  it("409 entry_locked ⇒ the session's other unsent segments are cancelled, even those of the batch already read", async () => {
+    const t = await setup(() => problem(409, "conflict", "entry_locked"));
+    await t.check();
+    t.activity();
+    t.h.setNow(plus(NOW, 30 * MIN));
+    t.activity();
+    const [first, second] = t.h.store.segmentsForSession("s-1");
+    expect(t.h.store.latestOutbox()).toHaveLength(2);
+    await t.send();
+    // Only one request: the other segment was cancelled before it was sent.
+    expect(t.puts()).toHaveLength(1);
+    expect(t.h.store.listTerminal().map((r) => [r.targetId, r.code]).sort()).toEqual([[first!.id, "entry_locked"], [second!.id, "entry_locked"]].sort());
+    expect(t.h.store.pendingOutboxCount()).toBe(0);
+    expect(t.h.store.getSession("s-1")!.state).toBe(STOPPED_LOCKED);
+    t.h.setNow(plus(NOW, 60 * MIN));
+    t.activity();
+    await t.send();
+    expect(t.puts()).toHaveLength(1);
+    expect(t.h.store.segmentsForSession("s-1")).toHaveLength(2);
+  });
+
+  it("409 entry_locked on one segment: a segment Tickr already holds keeps its updates", async () => {
+    let lockedId = "";
+    const t = await setup((req) => (lockedId !== "" && req.url.endsWith(lockedId) ? problem(409, "conflict", "entry_locked") : ok(200)));
+    await t.check();
+    t.activity();
+    await t.send(); // created on the server
+    const [held] = t.h.store.segmentsForSession("s-1");
+    expect(held!.createdOnServer).toBe(true);
+    t.h.setNow(plus(NOW, 30 * MIN));
+    t.activity(); // the first goes final (idle), a second opens
+    const second = t.h.store.segmentsForSession("s-1")[1]!;
+    lockedId = second.id;
+    await t.send();
+    expect(t.h.store.listTerminal().map((r) => r.targetId)).toEqual([second.id]);
+    const sentToHeld = t.puts().filter((r) => r.url.endsWith(held!.id));
+    expect(JSON.parse(sentToHeld.at(-1)!.body)).toMatchObject({ final: true });
+  });
+
   it("409 entry_locked ⇒ one notice, the session is no longer segmented: no new entries", async () => {
     const t = await setup(() => problem(409, "conflict", "entry_locked"));
     await t.check();
@@ -373,7 +448,7 @@ describe("sendDue", () => {
     const out = await sendDue(t.h.store, t.h.ctx.generation, t.h.ctx.api, t.h.ctx.now, 60_000, { remainingMs: () => 2999 });
     expect(out).toEqual({ dueInMs: 0, outOfBudget: true });
     expect(t.puts()).toHaveLength(0);
-    expect(t.h.store.pendingOutboxCount()).toBe(2);
+    expect(t.h.store.latestOutbox()).toHaveLength(2);
   });
 });
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## Plugin `tickr` — unreleased
+
+- Fix: after a `409 agent_revision_conflict` on an entry whose last revision was final and
+  complete, the wanted state is now sent under the next number even days later; it
+  was never selected again once no transcript row was left to read.
+- Fix: a tag deleted in Tickr, together with a new tag in the same change, no longer
+  makes the plugin conclude that Tickr ignores renames and split the entry; the tags
+  Tickr holds are adopted.
+- Fix: after Tickr refused a new task or description and the session went idle, the
+  resumed activity opens its entry with the accepted task and description instead of
+  sending the refused ones again.
+- Fix: `409 entry_locked` also cancels the session's other entries that Tickr does not
+  hold yet, including those already queued, so none is opened once the session is
+  stopped. Entries Tickr already holds keep their updates.
+
 ## Plugin `tickr` 0.4.2 — 2026-11-09
 
 - Follows the segment route's rename contract of a Tickr that applies the change, and
