@@ -352,6 +352,36 @@ describe("sendDue", () => {
     expect(JSON.parse(sentToHeld.at(-1)!.body)).toMatchObject({ final: true });
   });
 
+  it("409 agent_revision_conflict, then 409 entry_locked on another segment: the conflicted segment is held by Tickr, its replacement revision is still sent", async () => {
+    let lockedId = "";
+    let conflictedId = "";
+    let conflicts = 1;
+    const t = await setup((req) => {
+      const id = req.url.split("/").pop();
+      if (id === lockedId) return problem(409, "conflict", "entry_locked");
+      if (id === conflictedId && conflicts-- > 0) return problem(409, "conflict", "agent_revision_conflict");
+      return ok(200);
+    });
+    await t.check();
+    t.activity();
+    t.h.setNow(plus(NOW, 30 * MIN));
+    t.activity(); // the first goes final (idle), a second opens
+    const [conflicted, locked] = t.h.store.segmentsForSession("s-1");
+    // The second is held by Tickr already; the first was never acknowledged here (a lost store).
+    t.h.store.markSegmentCreated(locked!.id);
+    conflictedId = conflicted!.id;
+    lockedId = locked!.id;
+    await t.send(); // conflicted first (older id): Tickr holds it, nothing terminal; then the lock
+    expect(t.h.store.getSegment(conflicted!.id)!.createdOnServer).toBe(true);
+    expect(t.h.store.listTerminal().map((r) => r.targetId)).toEqual([locked!.id]);
+    expect(t.h.store.getSession("s-1")!.state).toBe(STOPPED_LOCKED);
+    await revisionsStage()(t.h.ctx); // the wanted state goes under the next number
+    await t.send();
+    expect(t.h.store.isTerminal("segment", conflicted!.id)).toBe(false);
+    expect(t.puts().filter((r) => r.url.endsWith(conflicted!.id))).toHaveLength(2);
+    expect(t.h.store.pendingOutboxCount()).toBe(0);
+  });
+
   it("409 entry_locked ⇒ one notice, the session is no longer segmented: no new entries", async () => {
     const t = await setup(() => problem(409, "conflict", "entry_locked"));
     await t.check();

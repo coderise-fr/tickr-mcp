@@ -14,6 +14,12 @@
 - Fix: `409 entry_locked` also cancels the session's other entries that Tickr does not
   hold yet, including those already queued, so none is opened once the session is
   stopped. Entries Tickr already holds keep their updates.
+- Fix: an entry Tickr reported as already holding a revision (`409 agent_revision_conflict`)
+  is now known as held, so a later `409 entry_locked` on another entry of the session no
+  longer cancels it and its replacement revision is still sent.
+- Fix: a rename answered after the session was locked (`409 entry_locked` on another
+  entry) no longer opens a new entry: the segment the repair would have split off is
+  cancelled like the session's other unsent ones. The entry Tickr holds keeps its update.
 
 ## Plugin `tickr` 0.4.2 — 2026-11-09
 

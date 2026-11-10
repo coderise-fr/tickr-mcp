@@ -1897,6 +1897,24 @@ function ulid(nowMs, rand = import_node_crypto5.randomBytes) {
   return encodeTime(ms4) + lastDigits.map((d) => CROCKFORD[d]).join("");
 }
 
+// hook-src/flusher/locked.ts
+var STOPPED_LOCKED = "stopped_locked";
+function isLockedSession(store, sessionId) {
+  return store.getSession(sessionId)?.state === STOPPED_LOCKED;
+}
+function cancelUnsentSegment(store, segment, now) {
+  store.deleteOutboxFor("segment", segment.id);
+  if (!segment.final) store.upsertSegment({ ...segment, working: false, final: true, finalReason: STOPPED_LOCKED });
+  store.addTerminal({
+    targetKind: "segment",
+    targetId: segment.id,
+    revision: segment.lastRevision > 0 ? segment.lastRevision : null,
+    code: ENTRY_LOCKED,
+    at: now.toISOString(),
+    diagnostic: "Not sent: the session was stopped, its period is already submitted."
+  });
+}
+
 // hook-src/attribution.ts
 var DAY_MS = 864e5;
 var ms = (iso2) => Date.parse(iso2);
@@ -3068,6 +3086,7 @@ function repairRename(store, segmentId, pending, newId, now) {
   });
   store.upsertSegment(next);
   store.deleteOutboxFor("segment", segmentId);
+  if (isLockedSession(store, seg.sessionId)) cancelUnsentSegment(store, next, now);
   const db = store.db;
   const moved = db.prepare(
     `SELECT agent_id FROM subagents WHERE session_id = ? AND recipient_kind = 'segment' AND recipient_id = ? AND launched_at IS NOT NULL AND launched_at >= ?`
@@ -3108,7 +3127,6 @@ var AGENT_VERSION_GRACE_MS = 2 * 6e4;
 var SEND_BATCH = 50;
 var STOPPED_MISMATCH = "stopped_mismatch";
 var UNLINKED = "unlinked";
-var STOPPED_LOCKED = "stopped_locked";
 var PAUSE_KEY = "send_pause";
 var WORKSPACE_KEY = "workspace";
 function readJson2(store, key) {
@@ -3328,6 +3346,7 @@ function applyRefusal(store, row, outcome, newId, now) {
   return { delay: null, renamed: false };
 }
 function supersedeConflicted(store, row) {
+  if (row.targetKind === "segment") store.markSegmentCreated(row.targetId);
   store.deleteOutboxFor(row.targetKind, row.targetId);
   const last = store.getLastCommitted(row.targetKind, row.targetId);
   if (last !== null) store.putLastCommitted({ ...last, canonicalJson: "" });
@@ -3343,20 +3362,10 @@ function stopLockedSegment(store, row, now) {
   addNotice(store, "entry_locked", now);
 }
 function cancelUncreatedSegments(store, sessionId, now) {
-  const at = now.toISOString();
   for (const other of store.segmentsForSession(sessionId)) {
     if (other.createdOnServer || store.isTerminal("segment", other.id)) continue;
     clearPendingRename(store, other.id);
-    store.deleteOutboxFor("segment", other.id);
-    if (!other.final) store.upsertSegment({ ...other, working: false, final: true, finalReason: STOPPED_LOCKED });
-    store.addTerminal({
-      targetKind: "segment",
-      targetId: other.id,
-      revision: other.lastRevision > 0 ? other.lastRevision : null,
-      code: ENTRY_LOCKED,
-      at,
-      diagnostic: "Not sent: the session was stopped, its period is already submitted."
-    });
+    cancelUnsentSegment(store, other, now);
   }
 }
 function closeRefusedProject(store, segmentId) {

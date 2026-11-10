@@ -483,6 +483,45 @@ describe("refusals of a rename", () => {
     expect(puts(server.requests)).toHaveLength(2);
   });
 
+  it.each<[string, FakeOptions]>([
+    ["a Tickr that keeps the old values", { applies: false }],
+    [
+      "422 immutable",
+      {
+        applies: true,
+        intercept: (_req, body, e) =>
+          e !== undefined && body.taskId === TASK ? problem(422, "validation", "Validation failed", { errors: [{ field: "projectId", code: "immutable", message: "m" }] }) : null,
+      },
+    ],
+  ])("%s on a probe answered after the session was locked: the repair opens no sendable segment, the held entry keeps its update", async (_name, fake) => {
+    const { h, ev, pass } = setup();
+    const { server } = await fakeTickr(h, fake);
+    ev("UserPromptSubmit", 0);
+    await pass(1);
+    const held = h.store.segmentsForSession("s-1")[0]!;
+    expect(held.createdOnServer).toBe(true);
+    ev("PostToolUse", 60, { ...MAPPING, taskId: TASK });
+    h.setNow(at(61));
+    for (const name of ["workspace", "segmentation", "ledger", "revisions"] as const) await PIPELINE[name](h.ctx);
+    expect(readPendingRename(h.store, held.id)).not.toBeNull(); // the probe is committed, not sent
+    const before = puts(server.requests).length;
+    // Another segment of the session was refused (entry_locked) while the probe was in flight.
+    h.store.upsertSession({ ...h.store.getSession("s-1")!, state: STOPPED_LOCKED });
+    await pass(62);
+    await pass(400);
+    const segments = h.store.segmentsForSession("s-1");
+    expect(segments).toHaveLength(2);
+    const child = segments[1]!;
+    expect(h.store.isTerminal("segment", child.id)).toBe(true);
+    expect(child.final).toBe(true);
+    expect(puts(server.requests).some((p) => p.id === child.id)).toBe(false);
+    // The entry Tickr holds still gets its final revision, with the mapping it was created with.
+    const ofHeld = puts(server.requests).slice(before).filter((p) => p.id === held.id);
+    expect(ofHeld.length).toBeGreaterThan(0);
+    expect(ofHeld.at(-1)!.body).toMatchObject({ final: true, taskId: null });
+    expect(h.store.pendingOutboxCount()).toBe(0);
+  });
+
   it("409 segment_finalized when the end of a segment Tickr finalised moves: closed, the next activity opens a new segment", async () => {
     const { h, ev, pass } = setup();
     const { server, entries } = await fakeTickr(h, { applies: true });

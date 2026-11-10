@@ -49,6 +49,7 @@ import { canonicalJson, type NormalizedMapping, parseStoredMapping } from "../ma
 import { sessionReads } from "../quality.js";
 import type { SegmentRow, Store } from "../store/db.js";
 import { type AppliedEntry, IMMUTABLE } from "./api.js";
+import { cancelUnsentSegment, isLockedSession } from "./locked.js";
 import type { SegmentBody } from "./revisions.js";
 
 export const RENAME_SUPPORT_KEY = "rename_support";
@@ -382,6 +383,10 @@ export function repairRename(store: Store, segmentId: string, pending: PendingRe
   });
   store.upsertSegment(next);
   store.deleteOutboxFor("segment", segmentId);
+  // The session was locked (entry_locked on another segment) while the probe was in flight: the
+  // child would open a new entry in a submitted period. It is cancelled as the locked session's
+  // other unsent segments are (sender.ts); the old segment, which Tickr holds, keeps its update.
+  if (isLockedSession(store, seg.sessionId)) cancelUnsentSegment(store, next, now);
 
   // Attribution as the split would have made it.
   const db = store.db;

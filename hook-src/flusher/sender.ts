@@ -24,6 +24,7 @@ import type { OutboxRow, Store, TargetKind } from "../store/db.js";
 import { addNotice, renameRefusedKind } from "../notices.js";
 import { type AgentApi, ENTRY_LOCKED, IMMUTABLE, type PauseReason, REQUEST_TIMEOUT_MS, REVISION_CONFLICT, type SendOutcome, type UsageBody } from "./api.js";
 import { uuidv7 } from "../ids.js";
+import { cancelUnsentSegment, STOPPED_LOCKED } from "./locked.js";
 import { guarded } from "./owner.js";
 import { clearPendingRename, resolveAppliedProbe, resolveRefusedProbe, supersedeProbe } from "./rename.js";
 import type { SegmentBody } from "./revisions.js";
@@ -45,8 +46,7 @@ export const SEND_BATCH = 50;
 export const STOPPED_MISMATCH = "stopped_mismatch";
 /** Session state of a session whose checkout is no longer linked on this machine (consent.ts). */
 export const UNLINKED = "unlinked";
-/** Session state of a session one of whose segments Tickr refused as in a submitted period (entry_locked). */
-export const STOPPED_LOCKED = "stopped_locked";
+export { STOPPED_LOCKED };
 
 export const PAUSE_KEY = "send_pause";
 export const WORKSPACE_KEY = "workspace";
@@ -380,6 +380,9 @@ function applyRefusal(store: Store, row: OutboxRow, outcome: Refusal, newId: () 
  * revisions stage commits the desired body as the next number (a pending rename's probe too).
  */
 function supersedeConflicted(store: Store, row: OutboxRow): void {
+  // Tickr holds a revision of the entry, whatever this store knew: a later lock of the session
+  // must keep its replacement revision (cancelUncreatedSegments only cancels what Tickr lacks).
+  if (row.targetKind === "segment") store.markSegmentCreated(row.targetId);
   store.deleteOutboxFor(row.targetKind, row.targetId);
   const last = store.getLastCommitted(row.targetKind, row.targetId);
   if (last !== null) store.putLastCommitted({ ...last, canonicalJson: "" });
@@ -408,20 +411,10 @@ function stopLockedSegment(store: Store, row: OutboxRow, now: Date): void {
  * keep their updates: each one is accepted, or refused (entry_locked) on its own.
  */
 function cancelUncreatedSegments(store: Store, sessionId: string, now: Date): void {
-  const at = now.toISOString();
   for (const other of store.segmentsForSession(sessionId)) {
     if (other.createdOnServer || store.isTerminal("segment", other.id)) continue;
     clearPendingRename(store, other.id);
-    store.deleteOutboxFor("segment", other.id);
-    if (!other.final) store.upsertSegment({ ...other, working: false, final: true, finalReason: STOPPED_LOCKED });
-    store.addTerminal({
-      targetKind: "segment",
-      targetId: other.id,
-      revision: other.lastRevision > 0 ? other.lastRevision : null,
-      code: ENTRY_LOCKED,
-      at,
-      diagnostic: "Not sent: the session was stopped, its period is already submitted.",
-    });
+    cancelUnsentSegment(store, other, now);
   }
 }
 
