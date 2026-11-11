@@ -1,6 +1,6 @@
 # Changelog
 
-## Plugin `tickr` — unreleased
+## Plugin `tickr` 0.4.3 — 2026-11-11
 
 - Fix: after a `409 agent_revision_conflict` on an entry whose last revision was final and
   complete, the wanted state is now sent under the next number even days later; it

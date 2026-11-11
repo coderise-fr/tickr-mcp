@@ -357,7 +357,7 @@ function agentHeaderValue(info) {
 }
 
 // hook-src/version.ts
-var PLUGIN_VERSION = "0.4.2";
+var PLUGIN_VERSION = "0.4.3";
 
 // hook-src/flusher/api.ts
 var REQUEST_TIMEOUT_MS = 3e3;
