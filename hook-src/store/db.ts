@@ -449,6 +449,11 @@ export class Store {
     );
   }
 
+  /** How many events of this type the session has journalled (a prompt count for the intake). */
+  countSessionEvents(sessionId: string, type: string): number {
+    return num(this.get("SELECT COUNT(*) AS n FROM events WHERE session_id = ? AND type = ?", sessionId, type)?.n);
+  }
+
   /**
    * Journals one event with the mapping version of its moment (created when new, by hash).
    * Idempotent by event_id; true when the event was not journalled yet.

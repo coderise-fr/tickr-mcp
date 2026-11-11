@@ -19,7 +19,7 @@ import {
 import { createAgentApi } from "../../hook-src/flusher/api.js";
 import { RETENTION_KEY, RETENTION_MS } from "../../hook-src/flusher/bounds.js";
 import { PIPELINE, STAGE_NAMES } from "../../hook-src/flusher/stages.js";
-import { contextNote, NOT_LINKED_MESSAGE, NOT_LINKED_NOTE, recordEvent, UNTRACKED_MESSAGE, UNTRACKED_NOTE } from "../../hook-src/intake.js";
+import { contextNote, DESCRIBE_NOTE, DESCRIBE_NUDGES, NOT_LINKED_MESSAGE, NOT_LINKED_NOTE, recordEvent, UNTRACKED_MESSAGE, UNTRACKED_NOTE } from "../../hook-src/intake.js";
 import { main } from "../../hook-src/main.js";
 import { DEFAULT_DESCRIPTION, findMapping, type FoundMapping } from "../../hook-src/mapping.js";
 import { DB_FILE, openStore, type Store } from "../../hook-src/store/db.js";
@@ -504,10 +504,13 @@ describe("SessionStart note for the model (additionalContext)", () => {
     expect((await sessionStart(cwd, data))!.hookSpecificOutput!.additionalContext).toMatch(/Current session context: none/);
   });
 
-  it("only at SessionStart", async () => {
+  it("only at SessionStart (a prompt carries the describe note, never the session context note; a real description, nothing)", async () => {
     const { cwd, data } = linked();
     const { out } = await run(["UserPromptSubmit"], pluginEnv(data), JSON.stringify(hookInput("UserPromptSubmit", cwd)));
-    expect(out).not.toContain("hookSpecificOutput");
+    expect(out).not.toContain("Tickr session context");
+    const real = linked({ workspace_id: WS, project_id: PROJECT, description: DESCRIPTION });
+    const second = await run(["UserPromptSubmit"], pluginEnv(real.data), JSON.stringify(hookInput("UserPromptSubmit", real.cwd)));
+    expect(second.out).not.toContain("hookSpecificOutput");
   });
 
   it("no session context note in a checkout that is not linked, nor in one without .tickr.json", async () => {
@@ -524,6 +527,71 @@ describe("SessionStart note for the model (additionalContext)", () => {
     expect(out?.systemMessage).toMatch(/not tracked/);
     expect(out?.hookSpecificOutput?.additionalContext).toBe(UNTRACKED_NOTE);
     for (const note of [NOT_LINKED_NOTE, UNTRACKED_NOTE]) expect(note).not.toMatch(/Tickr session context/);
+  });
+});
+
+describe("note for the model while the description is still the default (UserPromptSubmit)", () => {
+  type Out = { hookSpecificOutput?: { hookEventName: string; additionalContext: string } };
+  async function event(name: string, cwd: string, data: string, session = "s-1", extra: Record<string, string> = {}): Promise<Out | null> {
+    const { code, out } = await run([name], pluginEnv(data, extra), JSON.stringify(hookInput(name, cwd, { session_id: session })));
+    expect(code).toBe(0);
+    return out === "" ? null : (JSON.parse(out) as Out);
+  }
+  const prompt = (cwd: string, data: string, session = "s-1", extra: Record<string, string> = {}) => event("UserPromptSubmit", cwd, data, session, extra);
+
+  it("the first prompts of a session still recorded as 'Claude Code session' ask the model to describe the work, at most DESCRIBE_NUDGES times", async () => {
+    const { cwd, data } = linked();
+    for (let i = 0; i < DESCRIBE_NUDGES; i++) {
+      const out = await prompt(cwd, data);
+      expect(out?.hookSpecificOutput?.hookEventName).toBe("UserPromptSubmit");
+      expect(out!.hookSpecificOutput!.additionalContext).toBe(DESCRIBE_NOTE);
+    }
+    expect(await prompt(cwd, data)).toBeNull();
+    expect(await prompt(cwd, data)).toBeNull();
+  });
+
+  it("the note tells to use tickr:describe without asking in chat, a short label, once, and never to replace a real description", () => {
+    expect(DESCRIBE_NOTE).toMatch(/tickr:describe/);
+    expect(DESCRIBE_NOTE).toContain(DEFAULT_DESCRIPTION);
+    expect(DESCRIBE_NOTE).toMatch(/without asking in chat/);
+    expect(DESCRIBE_NOTE).toMatch(/at most 10 words/i);
+    expect(DESCRIBE_NOTE).toMatch(/never quote/i);
+    expect(DESCRIBE_NOTE).toMatch(/declines/);
+    expect(DESCRIBE_NOTE).not.toMatch(UUID_ANYWHERE);
+  });
+
+  it("each session counts its own prompts", async () => {
+    const { cwd, data } = linked();
+    for (let i = 0; i < DESCRIBE_NUDGES; i++) await prompt(cwd, data, "s-1");
+    expect(await prompt(cwd, data, "s-1")).toBeNull();
+    expect((await prompt(cwd, data, "s-2"))?.hookSpecificOutput?.additionalContext).toBe(DESCRIBE_NOTE);
+  });
+
+  it("a description in .tickr.json is a context already given: no note", async () => {
+    const { cwd, data } = linked({ workspace_id: WS, project_id: PROJECT, description: DESCRIPTION });
+    expect(await prompt(cwd, data)).toBeNull();
+  });
+
+  it("a description set for the session is a context already given: no note, and no more once it is set", async () => {
+    const { cwd, data } = linked();
+    expect((await prompt(cwd, data))?.hookSpecificOutput?.additionalContext).toBe(DESCRIBE_NOTE);
+    await setContext(data, "s-1", PROJECT, "--description", DESCRIPTION);
+    expect(await prompt(cwd, data)).toBeNull();
+    // A task alone leaves the description at the default: the note stays.
+    await setContext(data, "s-2", PROJECT, "--task", TASK);
+    expect((await prompt(cwd, data, "s-2"))?.hookSpecificOutput?.additionalContext).toBe(DESCRIBE_NOTE);
+  });
+
+  it("only a prompt carries it: no other event does", async () => {
+    const { cwd, data } = linked();
+    for (const name of ["PostToolUse", "Stop", "SubagentStop"]) expect(await event(name, cwd, data), name).toBeNull();
+  });
+
+  it("a checkout that is not linked gets none (it has the ask-to-link note instead)", async () => {
+    const root = tempDir();
+    const cwd = writeMapping(join(root, "repo"));
+    const out = await prompt(cwd, join(root, "data"));
+    expect(out?.hookSpecificOutput?.additionalContext ?? "").not.toBe(DESCRIBE_NOTE);
   });
 });
 

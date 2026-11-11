@@ -1155,6 +1155,10 @@ var Store = class {
       ev.linkKey
     ) === 1;
   }
+  /** How many events of this type the session has journalled (a prompt count for the intake). */
+  countSessionEvents(sessionId, type) {
+    return num(this.get("SELECT COUNT(*) AS n FROM events WHERE session_id = ? AND type = ?", sessionId, type)?.n);
+  }
   /**
    * Journals one event with the mapping version of its moment (created when new, by hash).
    * Idempotent by event_id; true when the event was not journalled yet.
@@ -3523,6 +3527,11 @@ function contextNote(autoContext, ctx) {
   const rule = autoContext ? "Mode: automatic. When the work moves to another existing task of the linked project, or its overall purpose changes, apply /tickr:task (or /tickr:describe) yourself without asking in chat, after reading list_tasks." : "Mode: manual. When the work moves to another existing task of the linked project, or its overall purpose changes, propose /tickr:task (or /tickr:describe) to the user and apply it only once they confirm.";
   return `Tickr session context: this session is recorded as Tickr time. ${rule} ${current} Follow the tickr skill: never create tasks or tags, descriptions of at most 10 words, never quote prompts or code.`;
 }
+var DESCRIBE_NUDGES = 3;
+var DESCRIBE_NOTE = `Tickr: this session is still recorded under the default description "${DEFAULT_DESCRIPTION}". As soon as you know what the user wants (their request, or once you have started on it), run the tickr:describe command (Skill tool, skill 'tickr:describe') with a short label of the overall work, without asking in chat: Claude Code asks the user to allow it. At most 10 words; never quote the prompt, answers, code, file or branch names or paths. Do it once; if the user declines, do not insist. Never replace a description that is already set.`;
+function asksToDescribe(ev, journalled, effective) {
+  return journalled !== null && ev.type === "UserPromptSubmit" && journalled.prompts < DESCRIBE_NUDGES && effective.description === DEFAULT_DESCRIPTION;
+}
 function enabled(value) {
   if (value === void 0) return false;
   const v = value.trim().toLowerCase();
@@ -3564,8 +3573,9 @@ function journalInStore(dbPath, ev, now) {
     return store.transaction(() => {
       if (store.schemaVersion() !== SCHEMA_VERSION) return null;
       const paused = store.getMeta(INTAKE_PAUSED_KEY) !== null;
+      const prompts = ev.type === "UserPromptSubmit" ? store.countSessionEvents(ev.sessionId, "UserPromptSubmit") : 0;
       if (!paused) store.journal(ev);
-      return { paused, messages: takeNoticeMessages(store, now), ownerFresh: isOwnerFresh(store.readOwner(), now) };
+      return { paused, messages: takeNoticeMessages(store, now), ownerFresh: isOwnerFresh(store.readOwner(), now), prompts };
     });
   } catch {
     return null;
@@ -3591,8 +3601,9 @@ function recordEvent(input, cfg, deadlineMs, opts = {}) {
   const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
   const sessionCtx = readContext(cfg.dataDir, input.session_id);
   const applied2 = sessionCtx !== null && sameId(sessionCtx.projectId, found.mapping.projectId) ? sessionCtx : null;
-  const ev = buildEvent(input, mappingVersion(effectiveMapping(found.mapping, applied2)), now, (opts.uptime ?? import_node_os.uptime)(), env, linkKey(found.dir, found.hash));
-  const note = input.hook_event_name === "SessionStart" ? { additionalContext: contextNote(cfg.autoContext, applied2) } : {};
+  const effective = effectiveMapping(found.mapping, applied2);
+  const ev = buildEvent(input, mappingVersion(effective), now, (opts.uptime ?? import_node_os.uptime)(), env, linkKey(found.dir, found.hash));
+  let note = input.hook_event_name === "SessionStart" ? { additionalContext: contextNote(cfg.autoContext, applied2) } : {};
   let dirReady = true;
   try {
     writeInstanceInfo(dir, { baseUrl: cfg.baseUrl, workspaceId: found.mapping.workspaceId }, now);
@@ -3605,6 +3616,7 @@ function recordEvent(input, cfg, deadlineMs, opts = {}) {
     recordGap(dir);
     return note;
   }
+  if (asksToDescribe(ev, journalled, effective)) note = { additionalContext: DESCRIBE_NOTE };
   const messages = [];
   const gaps = takeGaps(dir);
   if (gaps > 0) messages.push(collectionInterruptedMessage(gaps));

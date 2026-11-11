@@ -2,6 +2,12 @@
 
 ## Plugin `tickr` 0.4.3 — 2026-11-11
 
+- A session still recorded as `Claude Code session` is now labelled as the work begins: at
+  each of its first three prompts, while the description is the default, the plugin tells
+  Claude to run `/tickr:describe` with a short label of the request, without asking in
+  chat (Claude Code's permission request is the confirmation); `/tickr:link` does the same
+  right after linking. A description from `.tickr.json` or chosen for the session is never
+  replaced on Claude's own initiative.
 - Fix: after a `409 agent_revision_conflict` on an entry whose last revision was final and
   complete, the wanted state is now sent under the next number even days later; it
   was never selected again once no transcript row was left to read.

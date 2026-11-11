@@ -137,7 +137,7 @@ describe("commands and skill", () => {
 
   it("link.md: keeping an existing .tickr.json skips the rewrite but still reaches the exclude step and `accept`", () => {
     const steps = numberedSteps(parse(read("commands/link.md")).body);
-    expect(steps.map((s) => s.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(steps.map((s) => s.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const existing = steps[1]!.text;
     expect(existing).toMatch(/\*\*replace\*\* it or \*\*keep\*\* it/);
     expect(existing).not.toMatch(/\bstop\b/i);
@@ -191,6 +191,22 @@ describe("commands and skill", () => {
     expect(body).toContain("Implementation of the mobile app UI");
     expect(body).toMatch(/Mode: automatic/);
     expect(body).toContain("In manual mode (the default), ask the user to confirm");
+  });
+
+  it("describe.md: the first label of a session still recorded as the default is not asked for in chat, a real description is never replaced", () => {
+    const { body } = parse(read("commands/describe.md"));
+    expect(body).toMatch(/still the default `Claude Code session`[^]*do not ask in chat/);
+    expect(body).toMatch(/A real description is never replaced this way/);
+  });
+
+  it("link.md labels the work already given, after linking, without asking in chat", () => {
+    const steps = numberedSteps(parse(read("commands/link.md")).body);
+    const label = steps.find((s) => s.text.includes("**Label the work already given.**"))!;
+    expect(label.n).toBeGreaterThan(steps.find((s) => s.text.includes('tickr-hook.cjs" accept "${CLAUDE_PLUGIN_DATA}"'))!.n);
+    expect(label.n).toBeLessThan(steps.find((s) => s.text.includes("**Tell the user**"))!.n);
+    expect(label.text).toContain("tickr:describe");
+    expect(label.text).toMatch(/without asking in chat/);
+    expect(label.text).toMatch(/real description/);
   });
 
   it.each(CONTEXT_COMMANDS)("%s reads the project with context-info (the .tickr.json of the hooks), never the git root, and stops when not linked", (file) => {
