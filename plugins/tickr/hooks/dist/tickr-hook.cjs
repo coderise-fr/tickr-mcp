@@ -357,7 +357,7 @@ function agentHeaderValue(info) {
 }
 
 // hook-src/version.ts
-var PLUGIN_VERSION = "0.4.2";
+var PLUGIN_VERSION = "0.4.3";
 
 // hook-src/flusher/api.ts
 var REQUEST_TIMEOUT_MS = 3e3;
@@ -1155,6 +1155,10 @@ var Store = class {
       ev.linkKey
     ) === 1;
   }
+  /** How many events of this type the session has journalled (a prompt count for the intake). */
+  countSessionEvents(sessionId, type) {
+    return num(this.get("SELECT COUNT(*) AS n FROM events WHERE session_id = ? AND type = ?", sessionId, type)?.n);
+  }
   /**
    * Journals one event with the mapping version of its moment (created when new, by hash).
    * Idempotent by event_id; true when the event was not journalled yet.
@@ -1221,6 +1225,7 @@ var Store = class {
        WHERE s.state = 'active'
          AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'delegated' AND t.target_id = d.entry_id)
          AND (c.target_id IS NULL
+           OR c.canonical_json = ''
            OR json_extract(c.body_json, '$.usageQuality') IS NOT 'complete' AND json_extract(c.body_json, '$.usageQuality') IS NOT 'incomplete'
            OR (s.last_event_time >= ? AND (json_extract(c.body_json, '$.usageQuality') IS NOT 'complete'
              OR EXISTS (SELECT 1 FROM ledger l WHERE l.recipient_kind = 'delegated' AND l.recipient_id = d.entry_id AND l.folded = 0))))
@@ -1356,7 +1361,7 @@ var Store = class {
          LEFT JOIN last_committed c ON c.target_kind = 'segment' AND c.target_id = s.id
          WHERE s.server_state IS NULL
            AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'segment' AND t.target_id = s.id)
-           AND (s.final = 0 OR c.target_id IS NULL OR json_extract(c.body_json, '$.final') IS NOT 1 ${recheck})
+           AND (s.final = 0 OR c.target_id IS NULL OR c.canonical_json = '' OR json_extract(c.body_json, '$.final') IS NOT 1 ${recheck})
          ORDER BY s.started_at, s.id`
     ).all(...sinceIso === void 0 ? [] : [sinceIso]).map((r) => toSegment(r));
   }
@@ -1896,6 +1901,24 @@ function ulid(nowMs, rand = import_node_crypto5.randomBytes) {
   return encodeTime(ms4) + lastDigits.map((d) => CROCKFORD[d]).join("");
 }
 
+// hook-src/flusher/locked.ts
+var STOPPED_LOCKED = "stopped_locked";
+function isLockedSession(store, sessionId) {
+  return store.getSession(sessionId)?.state === STOPPED_LOCKED;
+}
+function cancelUnsentSegment(store, segment, now) {
+  store.deleteOutboxFor("segment", segment.id);
+  if (!segment.final) store.upsertSegment({ ...segment, working: false, final: true, finalReason: STOPPED_LOCKED });
+  store.addTerminal({
+    targetKind: "segment",
+    targetId: segment.id,
+    revision: segment.lastRevision > 0 ? segment.lastRevision : null,
+    code: ENTRY_LOCKED,
+    at: now.toISOString(),
+    diagnostic: "Not sent: the session was stopped, its period is already submitted."
+  });
+}
+
 // hook-src/attribution.ts
 var DAY_MS = 864e5;
 var ms = (iso2) => Date.parse(iso2);
@@ -2026,7 +2049,8 @@ function applyEvent(s, ev, cfg) {
     changes.push(diagnostic === void 0 ? { kind: "finalize", id: seg.id, stoppedAt, reason } : { kind: "finalize", id: seg.id, stoppedAt, reason, diagnostic });
     open = null;
   };
-  const start = (startedAt, mappingVersionId, working) => {
+  const start = (startedAt, eventMapping, working) => {
+    const mappingVersionId = cfg.openingMapping?.(s.sessionId, eventMapping) ?? eventMapping;
     open = { id: cfg.newId(), mappingVersionId, startedAt, lastActivityAt: ev.localTime, working, observedAt: ev.localTime };
     changes.push({ kind: "open", seg: open });
   };
@@ -2203,6 +2227,7 @@ var segmentationStage = (ctx) => {
     idleMs,
     newId: () => uuidv7(ctx.now().getTime()),
     renameInPlace: (open, mappingVersionId) => mayRenameInPlace(ctx.store, open.id, open.mappingVersionId, mappingVersionId, ctx.now()),
+    openingMapping: (sessionId, mappingVersionId) => openingMapping(ctx.store, sessionId, mappingVersionId),
     keepMapping: (open, mappingVersionId) => {
       const sessionId = ctx.store.getSegment(open.id)?.sessionId;
       return sessionId !== void 0 && keepsMapping(ctx.store, sessionId, open.mappingVersionId, mappingVersionId);
@@ -2949,6 +2974,10 @@ function keepsMapping(store, sessionId, fromVersionId, toVersionId) {
   const refused = readJson(store, REFUSED_RENAME_PREFIX + sessionId);
   return refused?.from === fromVersionId && refused.to === toVersionId;
 }
+function openingMapping(store, sessionId, versionId) {
+  const refused = readJson(store, REFUSED_RENAME_PREFIX + sessionId);
+  return refused?.to === versionId && store.getMapping(refused.from) !== null ? refused.from : versionId;
+}
 function wireMapping(store, segmentId, mapping) {
   const adopted = readJson(store, ADOPTED_TAGS_PREFIX + segmentId);
   if (adopted === null || !Array.isArray(adopted.to) || canonicalJson(adopted.from) !== canonicalJson(mapping.tagIds)) return mapping;
@@ -2979,6 +3008,8 @@ function tagVerdict(entry, sent, previousTags) {
   if (entry.tagIds === void 0 || !Array.isArray(sent.tagIds)) return "same";
   const got = tagSet(entry.tagIds);
   if (got === tagSet(sent.tagIds)) return "same";
+  const sentSet = new Set(sent.tagIds.map((t) => t.toLowerCase()));
+  if (entry.tagIds.every((t) => sentSet.has(t.toLowerCase()))) return "adopt";
   if (previousTags !== null && tagSet(previousTags) !== tagSet(sent.tagIds) && got === tagSet(previousTags)) return "ignored";
   return "adopt";
 }
@@ -3059,6 +3090,7 @@ function repairRename(store, segmentId, pending, newId, now) {
   });
   store.upsertSegment(next);
   store.deleteOutboxFor("segment", segmentId);
+  if (isLockedSession(store, seg.sessionId)) cancelUnsentSegment(store, next, now);
   const db = store.db;
   const moved = db.prepare(
     `SELECT agent_id FROM subagents WHERE session_id = ? AND recipient_kind = 'segment' AND recipient_id = ? AND launched_at IS NOT NULL AND launched_at >= ?`
@@ -3099,7 +3131,6 @@ var AGENT_VERSION_GRACE_MS = 2 * 6e4;
 var SEND_BATCH = 50;
 var STOPPED_MISMATCH = "stopped_mismatch";
 var UNLINKED = "unlinked";
-var STOPPED_LOCKED = "stopped_locked";
 var PAUSE_KEY = "send_pause";
 var WORKSPACE_KEY = "workspace";
 function readJson2(store, key) {
@@ -3319,6 +3350,7 @@ function applyRefusal(store, row, outcome, newId, now) {
   return { delay: null, renamed: false };
 }
 function supersedeConflicted(store, row) {
+  if (row.targetKind === "segment") store.markSegmentCreated(row.targetId);
   store.deleteOutboxFor(row.targetKind, row.targetId);
   const last = store.getLastCommitted(row.targetKind, row.targetId);
   if (last !== null) store.putLastCommitted({ ...last, canonicalJson: "" });
@@ -3330,7 +3362,15 @@ function stopLockedSegment(store, row, now) {
   const seg = store.getSegment(row.targetId);
   const session = seg ? store.getSession(seg.sessionId) : null;
   if (session !== null && session.state === ACTIVE_SESSION) store.upsertSession({ ...session, state: STOPPED_LOCKED });
+  if (seg !== null) cancelUncreatedSegments(store, seg.sessionId, now);
   addNotice(store, "entry_locked", now);
+}
+function cancelUncreatedSegments(store, sessionId, now) {
+  for (const other of store.segmentsForSession(sessionId)) {
+    if (other.createdOnServer || store.isTerminal("segment", other.id)) continue;
+    clearPendingRename(store, other.id);
+    cancelUnsentSegment(store, other, now);
+  }
 }
 function closeRefusedProject(store, segmentId) {
   store.deleteOutboxFor("segment", segmentId);
@@ -3487,6 +3527,11 @@ function contextNote(autoContext, ctx) {
   const rule = autoContext ? "Mode: automatic. When the work moves to another existing task of the linked project, or its overall purpose changes, apply /tickr:task (or /tickr:describe) yourself without asking in chat, after reading list_tasks." : "Mode: manual. When the work moves to another existing task of the linked project, or its overall purpose changes, propose /tickr:task (or /tickr:describe) to the user and apply it only once they confirm.";
   return `Tickr session context: this session is recorded as Tickr time. ${rule} ${current} Follow the tickr skill: never create tasks or tags, descriptions of at most 10 words, never quote prompts or code.`;
 }
+var DESCRIBE_NUDGES = 3;
+var DESCRIBE_NOTE = `Tickr: this session is still recorded under the default description "${DEFAULT_DESCRIPTION}". As soon as you know what the user wants (their request, or once you have started on it), run the tickr:describe command (Skill tool, skill 'tickr:describe') with a short label of the overall work, without asking in chat: Claude Code asks the user to allow it. At most 10 words; never quote the prompt, answers, code, file or branch names or paths. Do it once; if the user declines, do not insist. Never replace a description that is already set.`;
+function asksToDescribe(ev, journalled, effective) {
+  return journalled !== null && ev.type === "UserPromptSubmit" && journalled.prompts < DESCRIBE_NUDGES && effective.description === DEFAULT_DESCRIPTION;
+}
 function enabled(value) {
   if (value === void 0) return false;
   const v = value.trim().toLowerCase();
@@ -3528,8 +3573,9 @@ function journalInStore(dbPath, ev, now) {
     return store.transaction(() => {
       if (store.schemaVersion() !== SCHEMA_VERSION) return null;
       const paused = store.getMeta(INTAKE_PAUSED_KEY) !== null;
+      const prompts = ev.type === "UserPromptSubmit" ? store.countSessionEvents(ev.sessionId, "UserPromptSubmit") : 0;
       if (!paused) store.journal(ev);
-      return { paused, messages: takeNoticeMessages(store, now), ownerFresh: isOwnerFresh(store.readOwner(), now) };
+      return { paused, messages: takeNoticeMessages(store, now), ownerFresh: isOwnerFresh(store.readOwner(), now), prompts };
     });
   } catch {
     return null;
@@ -3555,8 +3601,9 @@ function recordEvent(input, cfg, deadlineMs, opts = {}) {
   const dir = instanceDir(cfg.dataDir, instanceId(cfg.baseUrl, found.mapping.workspaceId, cfg.apiKey));
   const sessionCtx = readContext(cfg.dataDir, input.session_id);
   const applied2 = sessionCtx !== null && sameId(sessionCtx.projectId, found.mapping.projectId) ? sessionCtx : null;
-  const ev = buildEvent(input, mappingVersion(effectiveMapping(found.mapping, applied2)), now, (opts.uptime ?? import_node_os.uptime)(), env, linkKey(found.dir, found.hash));
-  const note = input.hook_event_name === "SessionStart" ? { additionalContext: contextNote(cfg.autoContext, applied2) } : {};
+  const effective = effectiveMapping(found.mapping, applied2);
+  const ev = buildEvent(input, mappingVersion(effective), now, (opts.uptime ?? import_node_os.uptime)(), env, linkKey(found.dir, found.hash));
+  let note = input.hook_event_name === "SessionStart" ? { additionalContext: contextNote(cfg.autoContext, applied2) } : {};
   let dirReady = true;
   try {
     writeInstanceInfo(dir, { baseUrl: cfg.baseUrl, workspaceId: found.mapping.workspaceId }, now);
@@ -3569,6 +3616,7 @@ function recordEvent(input, cfg, deadlineMs, opts = {}) {
     recordGap(dir);
     return note;
   }
+  if (asksToDescribe(ev, journalled, effective)) note = { additionalContext: DESCRIBE_NOTE };
   const messages = [];
   const gaps = takeGaps(dir);
   if (gaps > 0) messages.push(collectionInterruptedMessage(gaps));

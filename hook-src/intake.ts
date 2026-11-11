@@ -13,7 +13,7 @@ import { isOwnerFresh } from "./flusher/owner.js";
 import { instanceDir, instanceId, writeInstanceInfo } from "./identity.js";
 import { ulid } from "./ids.js";
 import type { HookInput, HookOutput } from "./io.js";
-import { canonicalJson, findMapping, type NormalizedMapping } from "./mapping.js";
+import { canonicalJson, DEFAULT_DESCRIPTION, findMapping, type NormalizedMapping } from "./mapping.js";
 import { collectionInterruptedMessage, takeNoticeMessages } from "./notices.js";
 import { DB_FILE, type JournalEvent, openStore } from "./store/db.js";
 import { SCHEMA_VERSION } from "./store/schema.js";
@@ -65,6 +65,31 @@ export function contextNote(autoContext: boolean, ctx: SessionContext | null): s
     ? "Mode: automatic. When the work moves to another existing task of the linked project, or its overall purpose changes, apply /tickr:task (or /tickr:describe) yourself without asking in chat, after reading list_tasks."
     : "Mode: manual. When the work moves to another existing task of the linked project, or its overall purpose changes, propose /tickr:task (or /tickr:describe) to the user and apply it only once they confirm.";
   return `Tickr session context: this session is recorded as Tickr time. ${rule} ${current} Follow the tickr skill: never create tasks or tags, descriptions of at most 10 words, never quote prompts or code.`;
+}
+
+/** Prompts of a session (the first ones) that carry DESCRIBE_NOTE while its description is the default. */
+export const DESCRIBE_NUDGES = 3;
+
+/**
+ * The note for the model at a prompt of a session still recorded under the default description:
+ * the work was given in the prompt (or is about to start), so the model labels it itself, once,
+ * without asking in chat (Claude Code's permission prompt for the command is the confirmation).
+ * It never touches a description that is already set.
+ */
+export const DESCRIBE_NOTE =
+  `Tickr: this session is still recorded under the default description "${DEFAULT_DESCRIPTION}". ` +
+  "As soon as you know what the user wants (their request, or once you have started on it), run the tickr:describe command " +
+  "(Skill tool, skill 'tickr:describe') with a short label of the overall work, without asking in chat: Claude Code asks the user to allow it. " +
+  "At most 10 words; never quote the prompt, answers, code, file or branch names or paths. Do it once; if the user declines, do not insist. " +
+  "Never replace a description that is already set.";
+
+/**
+ * Whether this event carries DESCRIBE_NOTE: one of the first prompts of a session whose effective
+ * description is still the default. A real description, from .tickr.json or set for the session,
+ * is never nudged; nor is a prompt that was not journalled (it cannot be counted).
+ */
+function asksToDescribe(ev: JournalEvent, journalled: Journalled | null, effective: NormalizedMapping): boolean {
+  return journalled !== null && ev.type === "UserPromptSubmit" && journalled.prompts < DESCRIBE_NUDGES && effective.description === DEFAULT_DESCRIPTION;
 }
 
 export type Provider = "anthropic" | "bedrock" | "vertex" | "foundry";
@@ -138,6 +163,8 @@ interface Journalled {
   paused: boolean;
   messages: string[];
   ownerFresh: boolean;
+  /** Prompts the session had journalled before this event (0 for any other event). */
+  prompts: number;
 }
 
 /** One short transaction: the event, its mapping version, the unshown notices, the owner. */
@@ -150,8 +177,9 @@ function journalInStore(dbPath: string, ev: JournalEvent, now: Date): Journalled
     return store.transaction((): Journalled | null => {
       if (store.schemaVersion() !== SCHEMA_VERSION) return null;
       const paused = store.getMeta(INTAKE_PAUSED_KEY) !== null;
+      const prompts = ev.type === "UserPromptSubmit" ? store.countSessionEvents(ev.sessionId, "UserPromptSubmit") : 0;
       if (!paused) store.journal(ev);
-      return { paused, messages: takeNoticeMessages(store, now), ownerFresh: isOwnerFresh(store.readOwner(), now) };
+      return { paused, messages: takeNoticeMessages(store, now), ownerFresh: isOwnerFresh(store.readOwner(), now), prompts };
     });
   } catch {
     return null;
@@ -188,8 +216,9 @@ export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: num
   const sessionCtx = readContext(cfg.dataDir, input.session_id);
   const applied = sessionCtx !== null && sameId(sessionCtx.projectId, found.mapping.projectId) ? sessionCtx : null;
   // The link the event is journalled under: the flusher stops the session once it is revoked.
-  const ev = buildEvent(input, mappingVersion(effectiveMapping(found.mapping, applied)), now, (opts.uptime ?? osUptime)(), env, linkKey(found.dir, found.hash));
-  const note: HookOutput = input.hook_event_name === "SessionStart" ? { additionalContext: contextNote(cfg.autoContext, applied) } : {};
+  const effective = effectiveMapping(found.mapping, applied);
+  const ev = buildEvent(input, mappingVersion(effective), now, (opts.uptime ?? osUptime)(), env, linkKey(found.dir, found.hash));
+  let note: HookOutput = input.hook_event_name === "SessionStart" ? { additionalContext: contextNote(cfg.autoContext, applied) } : {};
 
   let dirReady = true;
   try {
@@ -205,6 +234,8 @@ export function recordEvent(input: HookInput, cfg: PluginConfig, deadlineMs: num
     recordGap(dir);
     return note;
   }
+
+  if (asksToDescribe(ev, journalled, effective)) note = { additionalContext: DESCRIBE_NOTE };
 
   const messages: string[] = [];
   const gaps = takeGaps(dir);

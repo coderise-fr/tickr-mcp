@@ -172,6 +172,14 @@ description of `.tickr.json`, unless you choose others for that session only:
 - `/tickr:describe [text]` changes only the description; the task stays.
 - `/tickr:task clear` goes back to the task and description of `.tickr.json`.
 
+A session that would otherwise be recorded as `Claude Code session` is labelled as the
+work begins: at each of its first three prompts, while the description is still that
+default, the plugin tells Claude to run `/tickr:describe` with a short label of what you
+asked (and `/tickr:link` does the same right after linking, for the work you had already
+given). Claude does not ask in chat for this first label; Claude Code asks you to allow
+the command. A description that is already set, from `.tickr.json` or chosen for the
+session, is never replaced on Claude's own initiative.
+
 Both commands first run the plugin's read-only `context-info` command, which reads the
 same `.tickr.json` as the recording (the nearest one from the session's current directory
 upwards, so a `.tickr.json` in a sub-folder of the repository wins over one at its root),

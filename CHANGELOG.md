@@ -1,5 +1,32 @@
 # Changelog
 
+## Plugin `tickr` 0.4.3 — 2026-11-11
+
+- A session still recorded as `Claude Code session` is now labelled as the work begins: at
+  each of its first three prompts, while the description is the default, the plugin tells
+  Claude to run `/tickr:describe` with a short label of the request, without asking in
+  chat (Claude Code's permission request is the confirmation); `/tickr:link` does the same
+  right after linking. A description from `.tickr.json` or chosen for the session is never
+  replaced on Claude's own initiative.
+- Fix: after a `409 agent_revision_conflict` on an entry whose last revision was final and
+  complete, the wanted state is now sent under the next number even days later; it
+  was never selected again once no transcript row was left to read.
+- Fix: a tag deleted in Tickr, together with a new tag in the same change, no longer
+  makes the plugin conclude that Tickr ignores renames and split the entry; the tags
+  Tickr holds are adopted.
+- Fix: after Tickr refused a new task or description and the session went idle, the
+  resumed activity opens its entry with the accepted task and description instead of
+  sending the refused ones again.
+- Fix: `409 entry_locked` also cancels the session's other entries that Tickr does not
+  hold yet, including those already queued, so none is opened once the session is
+  stopped. Entries Tickr already holds keep their updates.
+- Fix: an entry Tickr reported as already holding a revision (`409 agent_revision_conflict`)
+  is now known as held, so a later `409 entry_locked` on another entry of the session no
+  longer cancels it and its replacement revision is still sent.
+- Fix: a rename answered after the session was locked (`409 entry_locked` on another
+  entry) no longer opens a new entry: the segment the repair would have split off is
+  cancelled like the session's other unsent ones. The entry Tickr holds keeps its update.
+
 ## Plugin `tickr` 0.4.2 — 2026-11-09
 
 - Follows the segment route's rename contract of a Tickr that applies the change, and

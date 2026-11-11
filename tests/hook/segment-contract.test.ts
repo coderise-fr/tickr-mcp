@@ -276,6 +276,60 @@ describe("a Tickr that applies the change", () => {
     expect(h.store.segmentsForSession("s-1")).toHaveLength(1);
   });
 
+  it.each([
+    ["with a new description", "Mobile app UI"],
+    ["alone", MAPPING.description],
+  ])("on a supported Tickr, [A] → [A, B] with B deleted %s: applied, the tags Tickr holds are adopted, no split", async (_name, description) => {
+    const { h, ev, pass } = setup();
+    const { server, entries, tags } = await fakeTickr(h, { applies: true });
+    h.ctx.guarded(() => writeRenameSupport(h.store, "supported", new Date(T0)));
+    const base: NormalizedMapping = { ...MAPPING, tagIds: [TAG] };
+    ev("UserPromptSubmit", 0, base);
+    await pass(1);
+    tags.delete(TAG_2);
+    const changed: NormalizedMapping = { ...base, tagIds: [TAG, TAG_2].sort(), description };
+    ev("PostToolUse", 60, changed);
+    await pass(61);
+    const segments = h.store.segmentsForSession("s-1");
+    expect(segments).toHaveLength(1);
+    expect(readRenameSupport(h.store)?.state).toBe("supported");
+    expect(entries.get(segments[0]!.id)).toMatchObject({ description, tagIds: [TAG] });
+    // Nothing was split off: the next revision carries the tags Tickr holds, never the deleted one.
+    ev("PostToolUse", 200, changed);
+    await pass(201);
+    expect(puts(server.requests).at(-1)!.body.tagIds).toEqual([TAG]);
+    expect(h.store.segmentsForSession("s-1")).toHaveLength(1);
+  });
+
+  it("a refused rename, then an idle gap: the resumed segment opens with the accepted mapping, the refused one is not sent again", async () => {
+    const { h, ev, pass } = setup();
+    const BAD_TASK = "4c1e8a5b-9f6d-4a2c-8e5f-7b9d1f3a5b06";
+    const bad: NormalizedMapping = { ...MAPPING, taskId: BAD_TASK, description: "Refused task" };
+    const refuseBad = (req: RecordedRequest) =>
+      req.method === "PUT" && req.body.includes(BAD_TASK)
+        ? problem(422, "validation", "Validation failed", { errors: [{ field: "taskId", code: "invalid", message: "refused" }] })
+        : null;
+    const { server } = await fakeTickr(h, { applies: true, intercept: refuseBad });
+    ev("UserPromptSubmit", 0);
+    await pass(1);
+    ev("PostToolUse", 60, bad);
+    await pass(61);
+    expect(h.store.listNotices().map((n) => n.kind)).toEqual(["rename_refused:invalid"]);
+
+    // An hour of idleness, then the same context: a new segment, with the accepted mapping.
+    ev("PostToolUse", 3700, bad);
+    await pass(3701);
+    ev("PostToolUse", 3760, bad);
+    await pass(3761);
+    const segments = h.store.segmentsForSession("s-1");
+    expect(segments).toHaveLength(2);
+    expect(segments[0]).toMatchObject({ final: true, finalReason: "idle" });
+    expect(mappingOf(h, segments[1]!.mappingVersionId)).toEqual(MAPPING);
+    expect(puts(server.requests).filter((p) => p.body.taskId === BAD_TASK)).toHaveLength(1);
+    expect(h.store.listTerminal()).toEqual([]);
+    expect(puts(server.requests).some((p) => p.id === segments[1]!.id)).toBe(true);
+  });
+
   it("a change of project is never sent on the segment: split, the old one final with its project and end, a new segment for the new project", async () => {
     const { h, ev, pass } = setup();
     const { server, entries } = await fakeTickr(h, { applies: true });
@@ -427,6 +481,45 @@ describe("refusals of a rename", () => {
     expect(h.store.listNotices().map((n) => n.kind)).toEqual(["entry_locked"]);
     expect(noticeMessage("entry_locked")).toBe("Tickr says this period is already submitted; the session is not recorded further.");
     expect(puts(server.requests)).toHaveLength(2);
+  });
+
+  it.each<[string, FakeOptions]>([
+    ["a Tickr that keeps the old values", { applies: false }],
+    [
+      "422 immutable",
+      {
+        applies: true,
+        intercept: (_req, body, e) =>
+          e !== undefined && body.taskId === TASK ? problem(422, "validation", "Validation failed", { errors: [{ field: "projectId", code: "immutable", message: "m" }] }) : null,
+      },
+    ],
+  ])("%s on a probe answered after the session was locked: the repair opens no sendable segment, the held entry keeps its update", async (_name, fake) => {
+    const { h, ev, pass } = setup();
+    const { server } = await fakeTickr(h, fake);
+    ev("UserPromptSubmit", 0);
+    await pass(1);
+    const held = h.store.segmentsForSession("s-1")[0]!;
+    expect(held.createdOnServer).toBe(true);
+    ev("PostToolUse", 60, { ...MAPPING, taskId: TASK });
+    h.setNow(at(61));
+    for (const name of ["workspace", "segmentation", "ledger", "revisions"] as const) await PIPELINE[name](h.ctx);
+    expect(readPendingRename(h.store, held.id)).not.toBeNull(); // the probe is committed, not sent
+    const before = puts(server.requests).length;
+    // Another segment of the session was refused (entry_locked) while the probe was in flight.
+    h.store.upsertSession({ ...h.store.getSession("s-1")!, state: STOPPED_LOCKED });
+    await pass(62);
+    await pass(400);
+    const segments = h.store.segmentsForSession("s-1");
+    expect(segments).toHaveLength(2);
+    const child = segments[1]!;
+    expect(h.store.isTerminal("segment", child.id)).toBe(true);
+    expect(child.final).toBe(true);
+    expect(puts(server.requests).some((p) => p.id === child.id)).toBe(false);
+    // The entry Tickr holds still gets its final revision, with the mapping it was created with.
+    const ofHeld = puts(server.requests).slice(before).filter((p) => p.id === held.id);
+    expect(ofHeld.length).toBeGreaterThan(0);
+    expect(ofHeld.at(-1)!.body).toMatchObject({ final: true, taskId: null });
+    expect(h.store.pendingOutboxCount()).toBe(0);
   });
 
   it("409 segment_finalized when the end of a segment Tickr finalised moves: closed, the next activity opens a new segment", async () => {

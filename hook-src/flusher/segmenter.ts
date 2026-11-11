@@ -69,6 +69,12 @@ export interface SegmenterConfig {
    * nor renamed: Tickr refused that rename of the segment, flusher/rename.ts). Absent: never.
    */
   keepMapping?: (open: OpenSegment, mappingVersionId: number) => boolean;
+  /**
+   * The mapping version a segment opened for an event of the session takes: the event's own, or
+   * the one Tickr accepted when it refused that very mapping in the session (flusher/rename.ts).
+   * Absent: the event's.
+   */
+  openingMapping?: (sessionId: string, mappingVersionId: number) => number;
 }
 
 /** The event fields the reducer reads. */
@@ -145,7 +151,8 @@ export function applyEvent(s: SessionState, ev: SegmentEvent, cfg: SegmenterConf
     changes.push(diagnostic === undefined ? { kind: "finalize", id: seg.id, stoppedAt, reason } : { kind: "finalize", id: seg.id, stoppedAt, reason, diagnostic });
     open = null;
   };
-  const start = (startedAt: string, mappingVersionId: number, working: boolean) => {
+  const start = (startedAt: string, eventMapping: number, working: boolean) => {
+    const mappingVersionId = cfg.openingMapping?.(s.sessionId, eventMapping) ?? eventMapping;
     open = { id: cfg.newId(), mappingVersionId, startedAt, lastActivityAt: ev.localTime, working, observedAt: ev.localTime };
     changes.push({ kind: "open", seg: open });
   };

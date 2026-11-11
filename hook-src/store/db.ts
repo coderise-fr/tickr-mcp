@@ -449,6 +449,11 @@ export class Store {
     );
   }
 
+  /** How many events of this type the session has journalled (a prompt count for the intake). */
+  countSessionEvents(sessionId: string, type: string): number {
+    return num(this.get("SELECT COUNT(*) AS n FROM events WHERE session_id = ? AND type = ?", sessionId, type)?.n);
+  }
+
   /**
    * Journals one event with the mapping version of its moment (created when new, by hash).
    * Idempotent by event_id; true when the event was not journalled yet.
@@ -520,6 +525,7 @@ export class Store {
        WHERE s.state = 'active'
          AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'delegated' AND t.target_id = d.entry_id)
          AND (c.target_id IS NULL
+           OR c.canonical_json = ''
            OR json_extract(c.body_json, '$.usageQuality') IS NOT 'complete' AND json_extract(c.body_json, '$.usageQuality') IS NOT 'incomplete'
            OR (s.last_event_time >= ? AND (json_extract(c.body_json, '$.usageQuality') IS NOT 'complete'
              OR EXISTS (SELECT 1 FROM ledger l WHERE l.recipient_kind = 'delegated' AND l.recipient_id = d.entry_id AND l.folded = 0))))
@@ -677,7 +683,7 @@ export class Store {
          LEFT JOIN last_committed c ON c.target_kind = 'segment' AND c.target_id = s.id
          WHERE s.server_state IS NULL
            AND NOT EXISTS (SELECT 1 FROM terminal t WHERE t.target_kind = 'segment' AND t.target_id = s.id)
-           AND (s.final = 0 OR c.target_id IS NULL OR json_extract(c.body_json, '$.final') IS NOT 1 ${recheck})
+           AND (s.final = 0 OR c.target_id IS NULL OR c.canonical_json = '' OR json_extract(c.body_json, '$.final') IS NOT 1 ${recheck})
          ORDER BY s.started_at, s.id`,
       )
       .all(...(sinceIso === undefined ? [] : [sinceIso]))

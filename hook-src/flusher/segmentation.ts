@@ -19,7 +19,7 @@ import {
   type SegmenterConfig,
   type SessionState,
 } from "./segmenter.js";
-import { clearPendingRename, keepsMapping, mayRenameInPlace, writePendingRename } from "./rename.js";
+import { clearPendingRename, keepsMapping, mayRenameInPlace, openingMapping, writePendingRename } from "./rename.js";
 import type { StageRun } from "./stages.js";
 
 /** Events read per guarded transaction. */
@@ -171,6 +171,7 @@ export const segmentationStage: StageRun = (ctx) => {
     idleMs,
     newId: () => uuidv7(ctx.now().getTime()),
     renameInPlace: (open, mappingVersionId) => mayRenameInPlace(ctx.store, open.id, open.mappingVersionId, mappingVersionId, ctx.now()),
+    openingMapping: (sessionId, mappingVersionId) => openingMapping(ctx.store, sessionId, mappingVersionId),
     keepMapping: (open, mappingVersionId) => {
       const sessionId = ctx.store.getSegment(open.id)?.sessionId;
       return sessionId !== undefined && keepsMapping(ctx.store, sessionId, open.mappingVersionId, mappingVersionId);

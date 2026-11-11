@@ -35,6 +35,8 @@ When you change the task or the description, the entry is renamed in place when 
 
 The note "Tickr session context" given at the start of a tracked session says the mode (manual or automatic) and the current context.
 
+- **A session still recorded as `Claude Code session`.** When a note at one of the first prompts says so, the user has just given you the work: once you know what it is (their request, or as you start on it), run `/tickr:describe` yourself (skill `tickr:describe`) with a short label of that work, **without asking in chat**: Claude Code asks the user to allow the command, which is the confirmation. Do it once, and do not insist when the user declines. This is the only description change you make on your own initiative: **never replace a description that is already set** (from `.tickr.json` or from the session).
+
 - When you notice that the work moved to another task of the linked project, or that its overall purpose changed, **propose** `/tickr:task` (or `/tickr:describe` when only the purpose changed) to the user. In manual mode (the default), apply it only once the user confirms. In automatic mode (plugin option `auto_context`), apply it yourself without asking in chat; Claude Code may still ask the user to allow the command.
 - Always read the tasks with `list_tasks` first, and choose only among the existing tasks of the linked project, or no task. **Never create a task or a tag**, and never pick a task of another project.
 - A description is plain text of at most 10 words and 100 characters (numbers do not count as words), for example `Implementation of the mobile app UI` or `Fix tickets 1 2 3 4 5 6 7 110 210`. It labels the work: **never quote prompts, answers or code** in it, nor file names, branch names or paths.

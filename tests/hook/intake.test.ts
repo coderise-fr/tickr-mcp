@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { isLinked, linkKey } from "../../hook-src/consent.js";
 import { isOwnerFresh, OWNER_STALE_MS } from "../../hook-src/flusher/owner.js";
 import { findMapping, type FoundMapping } from "../../hook-src/mapping.js";
-import { INTAKE_PAUSED_KEY, providerFrom, recordEvent } from "../../hook-src/intake.js";
+import { DESCRIBE_NOTE, INTAKE_PAUSED_KEY, providerFrom, recordEvent } from "../../hook-src/intake.js";
 import { main } from "../../hook-src/main.js";
 import { DB_FILE, openStore, type Store } from "../../hook-src/store/db.js";
 import {
@@ -266,7 +266,8 @@ describe("main dispatch of a hook event", () => {
       write: (text) => void out.push(text),
     });
     expect(code).toBe(0);
-    expect(out).toEqual([]);
+    // Nothing but the note for the model: the checkout's description is still the default.
+    expect(JSON.parse(out.join(""))).toEqual({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: DESCRIBE_NOTE } });
     const store = flusherStore(dbPath);
     expect(store.eventsAfter(0).map((e) => [e.type, e.provider])).toEqual([["UserPromptSubmit", "vertex"]]);
     store.close();
