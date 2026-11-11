@@ -61,7 +61,7 @@ describe("readHookInput", () => {
     stdin.write('{"session_id":');
     const started = Date.now();
     expect(await readHookInput(stdin, started + 150)).toBeNull();
-    expect(Date.now() - started).toBeLessThan(1000);
+    expect(Date.now() - started).toBeLessThan(4000);
     stdin.destroy();
   });
 

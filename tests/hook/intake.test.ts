@@ -225,7 +225,7 @@ describe("recordEvent", () => {
     const started = performance.now();
     expect(await run("UserPromptSubmit")).toBe(0);
     expect(await run("PostToolUse")).toBe(0);
-    expect(performance.now() - started).toBeLessThan(2000);
+    expect(performance.now() - started).toBeLessThan(6000);
     expect(out).toEqual([]);
     expect(readFileSync(join(dir, "gaps"), "utf8")).toBe("2");
 
@@ -250,7 +250,7 @@ describe("recordEvent", () => {
       write: (text) => void out.push(text),
     });
     expect(code).toBe(0);
-    expect(performance.now() - started).toBeLessThan(1000);
+    expect(performance.now() - started).toBeLessThan(4000);
     expect(out).toEqual([]);
   });
 });

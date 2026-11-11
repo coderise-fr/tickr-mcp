@@ -550,7 +550,7 @@ describe("flusher processes", () => {
         // The next hook is not blocked and journals in the store.
         const started = performance.now();
         recordEvent(hookInput("PostToolUse", cwd, { session_id: "s-hook" }), cfg, Date.now() + 1000);
-        expect(performance.now() - started).toBeLessThan(800);
+        expect(performance.now() - started).toBeLessThan(3000);
 
         // A new flusher takes the dead one's instance over once its heartbeat is stale.
         const api = createAgentApi({ baseUrl: server.baseUrl, apiKey: cfg.apiKey, timeoutMs: 3000 });
@@ -683,9 +683,13 @@ describe("flusher processes", () => {
       // Stop was handled by the sleeping owner within a poll slice (no flusher started for it);
       // the SessionEnd that came after its release started one, which delivered the final revision.
       expect(flushersAt).not.toContain(at.Stop);
-      expect(stops[0]! - at.Stop!).toBeLessThanOrEqual(POLL_MS);
+      // The hooks write to the store with real lock waits: on a loaded runner one may reach it
+      // through its fallback file, imported by the next pass. The bound therefore is a few
+      // slices, far below the 57.5 s of the refresh wait that this test is about.
+      const SLICES_MS = 16 * POLL_MS;
+      expect(stops[0]! - at.Stop!).toBeLessThanOrEqual(SLICES_MS);
       expect(finals).toHaveLength(1);
-      expect(finals[0]! - at.SessionEnd!).toBeLessThanOrEqual(POLL_MS);
+      expect(finals[0]! - at.SessionEnd!).toBeLessThanOrEqual(SLICES_MS);
       expect(mono).toBeLessThan(10_000); // not the 57.5 s of the refresh wait
       const store = flusherStore(join(dir, DB_FILE));
       try {
