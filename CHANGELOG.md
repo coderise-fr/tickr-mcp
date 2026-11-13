@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Fix: `409 entry_locked` on one entry no longer discards the updates of an entry whose
+  creation was sent but never answered (a lost response, a crash): Tickr may hold it. It is
+  kept and sent again, accepted if Tickr holds the entry and refused (`entry_locked`)
+  otherwise; only entries never sent are cancelled.
+- Fix: once Tickr accepts a task and description that it had refused from another one (for
+  instance after the task became valid), the old refusal is forgotten: an entry resumed after
+  an idle gap or midnight no longer opens with the previous task and description, which
+  silently undid the accepted change.
+
 ## Plugin `tickr` 0.4.3 — 2026-11-11
 
 - A session still recorded as `Claude Code session` is now labelled as the work begins: at

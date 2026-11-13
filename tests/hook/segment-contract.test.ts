@@ -330,6 +330,40 @@ describe("a Tickr that applies the change", () => {
     expect(puts(server.requests).some((p) => p.id === segments[1]!.id)).toBe(true);
   });
 
+  it("a refused rename A→B, then B accepted from another mapping: the refusal no longer applies, an idle gap resumes with B", async () => {
+    const { h, ev, pass } = setup();
+    let refuse = true;
+    const B: NormalizedMapping = { ...MAPPING, taskId: TASK_2, description: "Task B" };
+    const C: NormalizedMapping = { ...MAPPING, taskId: TASK, description: "Task C" };
+    await fakeTickr(h, {
+      applies: true,
+      intercept: (req) =>
+        refuse && req.method === "PUT" && req.body.includes(TASK_2)
+          ? problem(422, "validation", "Validation failed", { errors: [{ field: "taskId", code: "invalid", message: "refused" }] })
+          : null,
+    });
+    ev("UserPromptSubmit", 0);
+    await pass(1);
+    ev("PostToolUse", 60, B);
+    await pass(61); // A→B refused: the segment keeps A
+    expect(h.store.listNotices().map((n) => n.kind)).toEqual(["rename_refused:invalid"]);
+
+    refuse = false; // B becomes valid (the task was fixed on Tickr)
+    ev("PostToolUse", 120, C);
+    await pass(121); // A→C accepted
+    ev("PostToolUse", 180, B);
+    await pass(181); // C→B accepted
+    const [seg] = h.store.segmentsForSession("s-1");
+    expect(mappingOf(h, seg!.mappingVersionId)).toEqual(B);
+
+    // An idle gap, then the same context: the new segment opens with B, not with the stale A.
+    ev("PostToolUse", 3800, B);
+    await pass(3801);
+    const segments = h.store.segmentsForSession("s-1");
+    expect(segments).toHaveLength(2);
+    expect(mappingOf(h, segments[1]!.mappingVersionId)).toEqual(B);
+  });
+
   it("a change of project is never sent on the segment: split, the old one final with its project and end, a new segment for the new project", async () => {
     const { h, ev, pass } = setup();
     const { server, entries } = await fakeTickr(h, { applies: true });
