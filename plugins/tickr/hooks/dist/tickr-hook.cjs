@@ -1537,6 +1537,10 @@ var Store = class {
          AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 14))`
     );
     n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 22) = 'segment_creation_sent:'
+         AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 23))`
+    );
+    n += this.run(
       `DELETE FROM meta WHERE substr(key, 1, 14) = 'snapshot_owed:'
          AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = substr(meta.key, 15))`
     );
@@ -3025,6 +3029,7 @@ function resolveAppliedProbe(store, answer, newId, now) {
   const tags = entry !== void 0 && holdsSent(entry, sent) ? tagVerdict(entry, sent, previousTags) : "ignored";
   if (entry !== void 0 && tags !== "ignored") {
     clearPendingRename(store, segmentId);
+    forgetRefusal(store, segmentId);
     if (existed) writeRenameSupport(store, "supported", now);
     if (tags === "adopt") adoptTags(store, segmentId, entry.tagIds);
     return true;
@@ -3032,6 +3037,12 @@ function resolveAppliedProbe(store, answer, newId, now) {
   if (entry !== void 0 && existed) writeRenameSupport(store, "unsupported", now);
   repairRename(store, segmentId, pending, newId(), now);
   return true;
+}
+function forgetRefusal(store, segmentId) {
+  const seg = store.getSegment(segmentId);
+  if (seg === null) return;
+  const refused = readJson(store, REFUSED_RENAME_PREFIX + seg.sessionId);
+  if (refused?.to === seg.mappingVersionId) store.deleteMeta(REFUSED_RENAME_PREFIX + seg.sessionId);
 }
 function adoptTags(store, segmentId, held) {
   const seg = store.getSegment(segmentId);
@@ -3131,6 +3142,7 @@ var AGENT_VERSION_GRACE_MS = 2 * 6e4;
 var SEND_BATCH = 50;
 var STOPPED_MISMATCH = "stopped_mismatch";
 var UNLINKED = "unlinked";
+var CREATION_SENT_PREFIX = "segment_creation_sent:";
 var PAUSE_KEY = "send_pause";
 var WORKSPACE_KEY = "workspace";
 function readJson2(store, key) {
@@ -3225,6 +3237,14 @@ function reactivateLinkedSession(store, sessionId) {
   const row = store.getSession(sessionId);
   if (row?.state === UNLINKED) store.upsertSession({ ...row, state: ACTIVE_SESSION });
 }
+function noteCreationSent(store, row) {
+  if (row.targetKind !== "segment" || store.getSegment(row.targetId)?.createdOnServer !== false) return;
+  if (store.getMeta(CREATION_SENT_PREFIX + row.targetId) === null) store.setMeta(CREATION_SENT_PREFIX + row.targetId, "1");
+}
+function markCreated(store, segmentId) {
+  store.markSegmentCreated(segmentId);
+  store.deleteMeta(CREATION_SENT_PREFIX + segmentId);
+}
 function recordTerminal(store, row, code2, diagnostic, now) {
   store.deleteOutboxFor(row.targetKind, row.targetId);
   if (store.isTerminal(row.targetKind, row.targetId)) return;
@@ -3294,7 +3314,7 @@ function applyOutcome(store, row, outcome, now, random) {
       store.deleteOutboxThrough(kind, row.targetId, row.revision);
       if (kind === "segment") {
         const existed = store.getSegment(row.targetId)?.createdOnServer === true && !outcome.created;
-        store.markSegmentCreated(row.targetId);
+        markCreated(store, row.targetId);
         const sent = JSON.parse(row.bodyJson);
         if (outcome.detached || outcome.finalized && sent.final !== true) {
           markClosedByServer(store, row.targetId, outcome.detached ? "detached" : "finalized");
@@ -3350,7 +3370,7 @@ function applyRefusal(store, row, outcome, newId, now) {
   return { delay: null, renamed: false };
 }
 function supersedeConflicted(store, row) {
-  if (row.targetKind === "segment") store.markSegmentCreated(row.targetId);
+  if (row.targetKind === "segment") markCreated(store, row.targetId);
   store.deleteOutboxFor(row.targetKind, row.targetId);
   const last = store.getLastCommitted(row.targetKind, row.targetId);
   if (last !== null) store.putLastCommitted({ ...last, canonicalJson: "" });
@@ -3368,6 +3388,7 @@ function stopLockedSegment(store, row, now) {
 function cancelUncreatedSegments(store, sessionId, now) {
   for (const other of store.segmentsForSession(sessionId)) {
     if (other.createdOnServer || store.isTerminal("segment", other.id)) continue;
+    if (store.getMeta(CREATION_SENT_PREFIX + other.id) !== null) continue;
     clearPendingRename(store, other.id);
     cancelUnsentSegment(store, other, now);
   }
@@ -3398,6 +3419,7 @@ async function sendDue(store, gen, api, now, budgetMs, opts = {}) {
         inTx(() => store.deleteOutboxFor(row.targetKind, row.targetId));
         continue;
       }
+      inTx(() => noteCreationSent(store, row));
       const outcome = await sendRow(store, api, row);
       opts.boundary?.("sent");
       const { delay, renamed, conflict } = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));

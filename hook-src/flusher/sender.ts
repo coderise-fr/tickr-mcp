@@ -48,6 +48,13 @@ export const STOPPED_MISMATCH = "stopped_mismatch";
 export const UNLINKED = "unlinked";
 export { STOPPED_LOCKED };
 
+/**
+ * meta key prefix of a segment whose creation was sent at least once: Tickr may hold the entry
+ * although no acknowledgement was stored (a lost response, a crash before the answer was applied).
+ * It is written before the request goes out and dropped once the creation is acknowledged.
+ */
+export const CREATION_SENT_PREFIX = "segment_creation_sent:";
+
 export const PAUSE_KEY = "send_pause";
 export const WORKSPACE_KEY = "workspace";
 
@@ -196,6 +203,18 @@ export function reactivateLinkedSession(store: Store, sessionId: string): void {
   if (row?.state === UNLINKED) store.upsertSession({ ...row, state: ACTIVE_SESSION });
 }
 
+/** Before a request: records that the creation of a segment Tickr has not acknowledged goes out (inside a guarded transaction). */
+function noteCreationSent(store: Store, row: OutboxRow): void {
+  if (row.targetKind !== "segment" || store.getSegment(row.targetId)?.createdOnServer !== false) return;
+  if (store.getMeta(CREATION_SENT_PREFIX + row.targetId) === null) store.setMeta(CREATION_SENT_PREFIX + row.targetId, "1");
+}
+
+/** Tickr holds the segment's entry (acknowledged, or shown by a revision conflict). */
+function markCreated(store: Store, segmentId: string): void {
+  store.markSegmentCreated(segmentId);
+  store.deleteMeta(CREATION_SENT_PREFIX + segmentId);
+}
+
 function recordTerminal(store: Store, row: OutboxRow, code: string, diagnostic: string, now: Date): void {
   store.deleteOutboxFor(row.targetKind, row.targetId);
   if (store.isTerminal(row.targetKind, row.targetId)) return;
@@ -310,7 +329,7 @@ function applyOutcome(store: Store, row: OutboxRow, outcome: SendOutcome, now: D
       store.deleteOutboxThrough(kind, row.targetId, row.revision);
       if (kind === "segment") {
         const existed = store.getSegment(row.targetId)?.createdOnServer === true && !outcome.created;
-        store.markSegmentCreated(row.targetId);
+        markCreated(store, row.targetId);
         const sent = JSON.parse(row.bodyJson) as Partial<SegmentBody>;
         if (outcome.detached || (outcome.finalized && sent.final !== true)) {
           markClosedByServer(store, row.targetId, outcome.detached ? "detached" : "finalized");
@@ -382,7 +401,7 @@ function applyRefusal(store: Store, row: OutboxRow, outcome: Refusal, newId: () 
 function supersedeConflicted(store: Store, row: OutboxRow): void {
   // Tickr holds a revision of the entry, whatever this store knew: a later lock of the session
   // must keep its replacement revision (cancelUncreatedSegments only cancels what Tickr lacks).
-  if (row.targetKind === "segment") store.markSegmentCreated(row.targetId);
+  if (row.targetKind === "segment") markCreated(store, row.targetId);
   store.deleteOutboxFor(row.targetKind, row.targetId);
   const last = store.getLastCommitted(row.targetKind, row.targetId);
   if (last !== null) store.putLastCommitted({ ...last, canonicalJson: "" });
@@ -408,11 +427,15 @@ function stopLockedSegment(store: Store, row: OutboxRow, now: Date): void {
  * The session is stopped: its segments that Tickr does not hold yet would open new entries, so
  * they are closed locally and terminal, their outbox rows dropped (the send pass checks the
  * terminal list before every row, including rows it already read). Segments Tickr already holds
- * keep their updates: each one is accepted, or refused (entry_locked) on its own.
+ * keep their updates: each one is accepted, or refused (entry_locked) on its own. So do the
+ * segments whose creation was sent without an answer (CREATION_SENT_PREFIX): Tickr may hold them,
+ * and cancelling would discard their updates for good. Their next send is the reconciliation:
+ * accepted when the entry exists (or is created), refused (entry_locked) otherwise.
  */
 function cancelUncreatedSegments(store: Store, sessionId: string, now: Date): void {
   for (const other of store.segmentsForSession(sessionId)) {
     if (other.createdOnServer || store.isTerminal("segment", other.id)) continue;
+    if (store.getMeta(CREATION_SENT_PREFIX + other.id) !== null) continue;
     clearPendingRename(store, other.id);
     cancelUnsentSegment(store, other, now);
   }
@@ -460,6 +483,7 @@ export async function sendDue(store: Store, gen: number, api: AgentApi, now: () 
         inTx(() => store.deleteOutboxFor(row.targetKind, row.targetId));
         continue;
       }
+      inTx(() => noteCreationSent(store, row));
       const outcome = await sendRow(store, api, row);
       opts.boundary?.("sent");
       const { delay, renamed, conflict } = inTx(() => applyOutcome(store, row, outcome, now(), opts.random));

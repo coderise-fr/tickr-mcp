@@ -352,6 +352,42 @@ describe("sendDue", () => {
     expect(JSON.parse(sentToHeld.at(-1)!.body)).toMatchObject({ final: true });
   });
 
+  it("409 entry_locked on one segment: a creation already sent without an answer is not cancelled, Tickr decides it", async () => {
+    let uncertainId = "";
+    let lockedId = "";
+    let uncertainAnswered = false;
+    const t = await setup((req) => {
+      const id = req.url.split("/").pop();
+      if (id === lockedId) return problem(409, "conflict", "entry_locked");
+      if (id === uncertainId && !uncertainAnswered) {
+        uncertainAnswered = true;
+        return problem(503, "service_unavailable", "workspace_busy", {}, { "retry-after": "3600" });
+      }
+      return ok(200);
+    });
+    await t.check();
+    t.activity();
+    t.h.setNow(plus(NOW, 30 * MIN));
+    t.activity();
+    const [uncertain, locked] = t.h.store.segmentsForSession("s-1");
+    uncertainId = uncertain!.id;
+    await t.send(); // the first creation goes out, its outcome is unknown (retry later)
+    expect(uncertainAnswered).toBe(true);
+    expect(uncertain!.createdOnServer).toBe(false);
+    lockedId = locked!.id;
+    await t.send(); // the second is refused as locked
+    // The first may exist on Tickr: it is neither cancelled nor terminal, its send stays queued.
+    expect(t.h.store.listTerminal().map((r) => r.targetId)).toEqual([locked!.id]);
+    expect(t.h.store.latestOutbox().map((r) => r.targetId)).toEqual([uncertain!.id]);
+    expect(t.h.store.getSegment(uncertain!.id)!.final).toBe(true);
+    // Once due, Tickr answers for it.
+    t.h.setNow(plus(NOW, 30 * MIN + 61 * MIN));
+    await t.send();
+    expect(t.h.store.getSegment(uncertain!.id)!.createdOnServer).toBe(true);
+    expect(t.h.store.pendingOutboxCount()).toBe(0);
+    expect(t.h.store.isTerminal("segment", uncertain!.id)).toBe(false);
+  });
+
   it("409 agent_revision_conflict, then 409 entry_locked on another segment: the conflicted segment is held by Tickr, its replacement revision is still sent", async () => {
     let lockedId = "";
     let conflictedId = "";

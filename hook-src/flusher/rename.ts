@@ -267,6 +267,7 @@ export function resolveAppliedProbe(store: Store, answer: AppliedAnswer, newId: 
   const tags = entry !== undefined && holdsSent(entry, sent) ? tagVerdict(entry, sent, previousTags) : "ignored";
   if (entry !== undefined && tags !== "ignored") {
     clearPendingRename(store, segmentId);
+    forgetRefusal(store, segmentId);
     if (existed) writeRenameSupport(store, "supported", now);
     if (tags === "adopt") adoptTags(store, segmentId, entry.tagIds!);
     return true;
@@ -275,6 +276,18 @@ export function resolveAppliedProbe(store: Store, answer: AppliedAnswer, newId: 
   if (entry !== undefined && existed) writeRenameSupport(store, "unsupported", now);
   repairRename(store, segmentId, pending, newId(), now);
   return true;
+}
+
+/**
+ * Tickr accepted the mapping of the segment: a refusal of the session that targeted this very
+ * mapping (from another one) is stale, so it no longer keeps the segment, nor the next one it
+ * opens, on the mapping Tickr once accepted instead (keepsMapping, openingMapping).
+ */
+function forgetRefusal(store: Store, segmentId: string): void {
+  const seg = store.getSegment(segmentId);
+  if (seg === null) return;
+  const refused = readJson<RefusedRename>(store, REFUSED_RENAME_PREFIX + seg.sessionId);
+  if (refused?.to === seg.mappingVersionId) store.deleteMeta(REFUSED_RENAME_PREFIX + seg.sessionId);
 }
 
 /** The segment's next revisions carry the tags Tickr holds, while its mapping names the same tags. */

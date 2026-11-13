@@ -885,6 +885,11 @@ export class Store {
       `DELETE FROM meta WHERE substr(key, 1, 13) = 'segment_tags:'
          AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 14))`,
     );
+    // Creations sent without an acknowledgement, of segments gone (flusher/sender.ts).
+    n += this.run(
+      `DELETE FROM meta WHERE substr(key, 1, 22) = 'segment_creation_sent:'
+         AND NOT EXISTS (SELECT 1 FROM segments s WHERE s.id = substr(meta.key, 23))`,
+    );
     // Snapshots a rename repair owes (ledger.ts): kept while the session is, gone with it.
     n += this.run(
       `DELETE FROM meta WHERE substr(key, 1, 14) = 'snapshot_owed:'
